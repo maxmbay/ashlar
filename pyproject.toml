@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ashlar-tabular"
+version = "0.1.0"
+description = "Narrow JAX/Equinox tabular models with explicit weights and ensemble semantics."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Maxwell Bay"}]
+dependencies = [
+  "jax>=0.4.38",
+  "equinox>=0.11",
+  "optax>=0.2",
+  "numpy>=1.26",
+  "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+dataframes = ["pandas>=2.0", "polars>=1.0"]
+dev = ["pandas>=2.0", "polars>=1.0", "pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
