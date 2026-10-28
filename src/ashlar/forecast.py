@@ -13,6 +13,14 @@ zero-filled and masked. Positions are sinusoidal ages counted back from the
 origin, plus a learned offset on the recent tokens. Recent tokens attend to
 each other and to every patch. The target horizon is not part of the prefix.
 
+``head`` selects the training objective. ``mse`` is squared error and remains
+the default. ``quantile``, ``gaussian``, ``mixture``, ``flow``, and
+``histogram`` train a pinball loss, a heteroscedastic normal, a five-component
+normal mixture, a rational-quadratic spline flow, and a fixed-bin histogram.
+``predict`` is still one point on the original scale, so absolute error stays
+available: the quantile median, the gaussian mean, the mixture mean, the flow
+median, or the histogram mean.
+
 The residual regression default does not use this module.
 """
 
@@ -25,6 +33,18 @@ import numpy as np
 import optax
 from equinox import Module, field, nn
 
+from ashlar.distributional import (
+    check_output_head,
+    decode,
+    distributional_loss,
+    histogram_centers,
+    initial_bias,
+    initial_weight_scale,
+    log_density,
+    output_width,
+    point_values,
+    sample_values,
+)
 from ashlar.errors import AshlarError, ShapeError
 
 FORECAST_LOOKBACK = 48
@@ -82,6 +102,7 @@ class ForecastNet(Module):
     out_bias: jax.Array
     lookback: int = field(static=True)
     horizon: int = field(static=True)
+    head: str = field(static=True, default="mse")
 
     def __call__(self, window: jax.Array) -> jax.Array:
         if window.ndim != 1 or window.shape[0] != self.lookback:
@@ -92,7 +113,19 @@ class ForecastNet(Module):
         return tokens[-1] @ self.out_weight + self.out_bias
 
 
-def _init_forecast(key, lookback: int, horizon: int) -> ForecastNet:
+def _output_projection(key, d_model: int, head: str, horizon: int):
+    check_output_head(head)
+    width = output_width(head, horizon)
+    if head == "mse":
+        scale = np.float32(np.sqrt(1.0 / d_model))
+    else:
+        scale = np.float32(initial_weight_scale(head, d_model))
+    weight = jax.random.normal(key, (d_model, width), dtype=jnp.float32) * scale
+    return weight, initial_bias(head, horizon)
+
+
+def _init_forecast(key, lookback: int, horizon: int, head: str = "mse") -> ForecastNet:
+    check_output_head(head)
     if lookback < 2 or horizon < 1:
         raise AshlarError("lookback must be at least 2 and horizon at least 1.")
     if FORECAST_D_MODEL % FORECAST_HEADS != 0:
@@ -118,15 +151,17 @@ def _init_forecast(key, lookback: int, horizon: int) -> ForecastNet:
                 norm2_bias=jnp.zeros((d_model,), dtype=jnp.float32),
             )
         )
+    out_weight, out_bias = _output_projection(keys[2], d_model, head, horizon)
     return ForecastNet(
         in_weight=jax.random.normal(keys[0], (d_model,), dtype=jnp.float32) * np.float32(0.5),
         in_bias=jnp.zeros((d_model,), dtype=jnp.float32),
         position=jax.random.normal(keys[1], (lookback, d_model), dtype=jnp.float32) * np.float32(0.02),
         blocks=tuple(blocks),
-        out_weight=jax.random.normal(keys[2], (d_model, horizon), dtype=jnp.float32) * np.float32(np.sqrt(1.0 / d_model)),
-        out_bias=jnp.zeros((horizon,), dtype=jnp.float32),
+        out_weight=out_weight,
+        out_bias=out_bias,
         lookback=int(lookback),
         horizon=int(horizon),
+        head=head,
     )
 
 
@@ -138,12 +173,19 @@ def _mse(model: ForecastNet, windows: jax.Array, target: jax.Array) -> jax.Array
     return jnp.mean(jnp.square(_forecast_batch(model, windows) - target))
 
 
+def _forecast_objective(model: ForecastNet, windows: jax.Array, target: jax.Array) -> jax.Array:
+    if model.head == "mse":
+        return _mse(model, windows, target)
+    flat = _forecast_batch(model, windows)
+    return distributional_loss(model.head, decode(model.head, flat, model.horizon), target)
+
+
 def _make_step(learning_rate: float):
     optimizer = optax.adam(learning_rate)
 
     @eqx.filter_jit
     def step(model, opt_state, windows, target):
-        loss, grads = eqx.filter_value_and_grad(_mse)(model, windows, target)
+        loss, grads = eqx.filter_value_and_grad(_forecast_objective)(model, windows, target)
         updates, opt_state = optimizer.update(grads, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
@@ -154,6 +196,69 @@ def _make_step(learning_rate: float):
 @eqx.filter_jit
 def _apply(model: ForecastNet, windows: jax.Array) -> jax.Array:
     return _forecast_batch(model, windows)
+
+
+@eqx.filter_jit
+def _apply_point(model: ForecastNet, windows: jax.Array) -> jax.Array:
+    flat = _forecast_batch(model, windows)
+    return point_values(model.head, decode(model.head, flat, model.horizon))
+
+
+@eqx.filter_jit
+def _apply_gaussian(model: ForecastNet, windows: jax.Array):
+    flat = _forecast_batch(model, windows)
+    return decode("gaussian", flat, model.horizon)
+
+
+@eqx.filter_jit
+def _apply_log_prob(model: ForecastNet, windows: jax.Array, value: jax.Array) -> jax.Array:
+    flat = _forecast_batch(model, windows)
+    return log_density(model.head, decode(model.head, flat, model.horizon), value)
+
+
+@eqx.filter_jit
+def _apply_quantiles(model: ForecastNet, windows: jax.Array) -> jax.Array:
+    flat = _forecast_batch(model, windows)
+    return decode("quantile", flat, model.horizon)
+
+
+@eqx.filter_jit
+def _apply_bins(model: ForecastNet, windows: jax.Array) -> jax.Array:
+    flat = _forecast_batch(model, windows)
+    return jax.nn.softmax(decode("histogram", flat, model.horizon), axis=-1)
+
+
+@eqx.filter_jit
+def _apply_sample(model: ForecastNet, windows: jax.Array, key, n: int) -> jax.Array:
+    flat = _forecast_batch(model, windows)
+    return sample_values(model.head, decode(model.head, flat, model.horizon), key, n)
+
+
+@eqx.filter_jit
+def _forecast_objective_jit(model: ForecastNet, windows: jax.Array, target: jax.Array) -> jax.Array:
+    return _forecast_objective(model, windows, target)
+
+
+def _as_key(key):
+    if isinstance(key, (int, np.integer)):
+        return jax.random.PRNGKey(int(key))
+    return key
+
+
+def _observed_horizon(value, single: bool, horizon: int, batch: int) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    if single:
+        if array.shape != (horizon,):
+            raise AshlarError(f"value must have shape ({horizon},); received {array.shape}.")
+        array = array[None, :]
+    elif array.shape != (batch, horizon):
+        raise AshlarError(f"value must have shape ({batch}, {horizon}); received {array.shape}.")
+    if not np.isfinite(array).all():
+        raise AshlarError("value must be finite.")
+    return np.ascontiguousarray(array)
+
+
+_DENSITY_HEADS = ("gaussian", "mixture", "flow", "histogram")
 
 
 def _snapshot(model):
@@ -216,7 +321,10 @@ class TimeSeriesForecaster:
     series is a chronological holdout used only to choose the epoch. The fit
     then starts again from the same initialization and trains that many epochs
     on every window in the series it was given. ``predict`` reads a lookback
-    and returns the original scale.
+    and returns one point on the original scale. Absolute error of that point
+    is the summary. ``head="mse"`` trains squared error. The other heads train
+    a pinball loss or their own likelihood, and the point is the median, the
+    gaussian mean, the mixture mean, the flow median, or the histogram mean.
     """
 
     def __init__(
@@ -229,6 +337,7 @@ class TimeSeriesForecaster:
         patience: int = FORECAST_PATIENCE,
         batch_size: int = FORECAST_BATCH_SIZE,
         val_fraction: float = FORECAST_VAL_FRACTION,
+        head: str = "mse",
     ):
         if lookback < 2 or horizon < 1 or max_epochs < 1 or patience < 1 or batch_size < 1:
             raise AshlarError("lookback, horizon, epochs, patience, and batch size must be positive.")
@@ -242,6 +351,7 @@ class TimeSeriesForecaster:
         self.patience = int(patience)
         self.batch_size = int(batch_size)
         self.val_fraction = float(val_fraction)
+        self.head = check_output_head(head)
 
     def fit(self, y):
         series = _series(y)
@@ -261,13 +371,133 @@ class TimeSeriesForecaster:
         self.model_ = model
         self.mean_ = float(mean)
         self.std_ = float(std)
-        self.selection_mse_ = float(selection)
+        self.selection_loss_ = float(selection)
+        if self.head == "mse":
+            self.selection_mse_ = float(selection)
         self.n_obs_ = int(len(series))
         return self
 
     def predict(self, history) -> np.ndarray:
         if not hasattr(self, "model_"):
             raise AshlarError("fit the forecaster before predict.")
+        windows, single = self._standardized_windows(history)
+        apply = _apply if self.head == "mse" else _apply_point
+        pieces = []
+        for start in range(0, len(windows), 512):
+            pieces.append(np.asarray(apply(self.model_, jnp.asarray(windows[start : start + 512]))))
+        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return restored[0]
+        return restored
+
+    def gaussian(self, history):
+        """Gaussian location and scale on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before gaussian.")
+        if self.head != "gaussian":
+            raise AshlarError("location and scale are available on the gaussian head.")
+        windows, single = self._standardized_windows(history)
+        locations = []
+        scales = []
+        for start in range(0, len(windows), 512):
+            loc, scale = _apply_gaussian(self.model_, jnp.asarray(windows[start : start + 512]))
+            locations.append(np.asarray(loc))
+            scales.append(np.asarray(scale))
+        loc = np.concatenate(locations).astype(np.float64) * self.std_ + self.mean_
+        scale = np.concatenate(scales).astype(np.float64) * self.std_
+        if single:
+            return loc[0], scale[0]
+        return loc, scale
+
+    def log_prob(self, history, value) -> np.ndarray:
+        """Per-step log density of ``value`` on the original scale.
+
+        ``value`` has the shape ``predict`` returns. The quantile and
+        squared-error heads have no density.
+        """
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before log_prob.")
+        if self.head not in _DENSITY_HEADS:
+            raise AshlarError(f"the {self.head} head has no log density.")
+        windows, single = self._standardized_windows(history)
+        observed = _observed_horizon(value, single, self.horizon, len(windows))
+        standardized = _scale(observed, self.mean_, self.std_)
+        pieces = []
+        for start in range(0, len(windows), 512):
+            stop = start + 512
+            pieces.append(
+                np.asarray(
+                    _apply_log_prob(
+                        self.model_,
+                        jnp.asarray(windows[start:stop]),
+                        jnp.asarray(standardized[start:stop]),
+                    )
+                )
+            )
+        logged = np.concatenate(pieces).astype(np.float64) - np.log(self.std_)
+        if single:
+            return logged[0]
+        return logged
+
+    def sample(self, history, key, n: int = 1) -> np.ndarray:
+        """Draw ``n`` horizons. Shape ``(n, horizon)`` or ``(n, batch, horizon)``.
+
+        A flow draw is one forward pass from a standard normal through the spline.
+        """
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before sample.")
+        if self.head not in _DENSITY_HEADS:
+            raise AshlarError(f"the {self.head} head has no sampler.")
+        count = int(n)
+        if count < 1:
+            raise AshlarError("the number of samples must be positive.")
+        windows, single = self._standardized_windows(history)
+        pieces = []
+        sample_key = _as_key(key)
+        for start in range(0, len(windows), 512):
+            sample_key, chunk_key = jax.random.split(sample_key)
+            pieces.append(
+                np.asarray(
+                    _apply_sample(self.model_, jnp.asarray(windows[start : start + 512]), chunk_key, count)
+                )
+            )
+        drawn = np.concatenate(pieces, axis=1).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return drawn[:, 0, :]
+        return drawn
+
+    def quantiles(self, history) -> np.ndarray:
+        """Quantile forecasts at 0.1, 0.5, and 0.9, on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before quantiles.")
+        if self.head != "quantile":
+            raise AshlarError("quantiles are available on the quantile head.")
+        windows, single = self._standardized_windows(history)
+        pieces = []
+        for start in range(0, len(windows), 512):
+            pieces.append(np.asarray(_apply_quantiles(self.model_, jnp.asarray(windows[start : start + 512]))))
+        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return restored[0]
+        return restored
+
+    def bin_probabilities(self, history):
+        """Histogram probabilities and the fixed bin centers on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before bin_probabilities.")
+        if self.head != "histogram":
+            raise AshlarError("bin probabilities are available on the histogram head.")
+        windows, single = self._standardized_windows(history)
+        pieces = []
+        for start in range(0, len(windows), 512):
+            pieces.append(np.asarray(_apply_bins(self.model_, jnp.asarray(windows[start : start + 512]))))
+        probabilities = np.concatenate(pieces).astype(np.float64)
+        centers = np.asarray(histogram_centers(), dtype=np.float64) * self.std_ + self.mean_
+        if single:
+            return probabilities[0], centers
+        return probabilities, centers
+
+    def _standardized_windows(self, history):
         array = np.asarray(history, dtype=np.float64)
         single = array.ndim == 1
         if single:
@@ -279,13 +509,7 @@ class TimeSeriesForecaster:
         if not np.isfinite(array).all():
             raise AshlarError("history must be finite.")
         windows = _scale(array[:, -self.lookback :], self.mean_, self.std_)
-        pieces = []
-        for start in range(0, len(windows), 512):
-            pieces.append(np.asarray(_apply(self.model_, jnp.asarray(windows[start : start + 512]))))
-        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
-        if single:
-            return restored[0]
-        return restored
+        return windows, single
 
     def _select(self, inputs, targets, train, val, mean: float, std: float):
         scaled_x = _scale(inputs, mean, std)
@@ -293,21 +517,24 @@ class TimeSeriesForecaster:
         self._reset()
 
         def init():
-            return _init_forecast(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon)
+            return _init_forecast(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon, self.head)
 
         def step_epoch(state, epoch):
             return self._epoch(state, scaled_x[train], scaled_y[train], epoch)
 
         def score(state):
-            return self._mse_numpy(state, scaled_x[val], scaled_y[val])
+            if self.head == "mse":
+                return self._mse_numpy(state, scaled_x[val], scaled_y[val])
+            return self._objective_numpy(state, scaled_x[val], scaled_y[val])
 
-        return _train_until(init, step_epoch, score, self.max_epochs, self.patience, self.verbose)
+        metric = "val_mse" if self.head == "mse" else "val_loss"
+        return _train_until(init, step_epoch, score, self.max_epochs, self.patience, self.verbose, metric=metric)
 
     def _run(self, scaled_x, scaled_y):
         self._reset()
 
         def init():
-            return _init_forecast(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon)
+            return _init_forecast(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon, self.head)
 
         def step_epoch(state, epoch):
             return self._epoch(state, scaled_x, scaled_y, epoch)
@@ -340,12 +567,25 @@ class TimeSeriesForecaster:
         pred = np.concatenate(pieces)
         return float(np.mean(np.square(pred - targets)))
 
+    def _objective_numpy(self, model, inputs, targets) -> float:
+        total = 0.0
+        count = 0
+        for start in range(0, len(inputs), 256):
+            x = jnp.asarray(inputs[start : start + 256])
+            y = jnp.asarray(targets[start : start + 256])
+            value = float(_forecast_objective_jit(model, x, y))
+            total += value * int(x.shape[0])
+            count += int(x.shape[0])
+        return total / count
+
     def _reset(self) -> None:
         self._opt_state = None
         self._step = None
 
 
-def _train_until(init, step_epoch, score, max_epochs: int, patience: int, verbose: bool, label: str = "forecast"):
+def _train_until(
+    init, step_epoch, score, max_epochs: int, patience: int, verbose: bool, label: str = "forecast", metric: str = "val_mse"
+):
     state = init()
     history = []
     best_epoch = 1
@@ -357,7 +597,7 @@ def _train_until(init, step_epoch, score, max_epochs: int, patience: int, verbos
         history = history[-_CHECKPOINT_AVERAGE:]
         value = float(score(_average(history)))
         if verbose:
-            print(f"  {label} epoch {epoch} val_mse {value:.6f}", flush=True)
+            print(f"  {label} epoch {epoch} {metric} {value:.6f}", flush=True)
         if value < best_score:
             best_score = value
             best_epoch = epoch
@@ -436,6 +676,7 @@ class FullHistoryNet(Module):
     out_bias: jax.Array
     lookback: int = field(static=True)
     horizon: int = field(static=True)
+    head: str = field(static=True, default="mse")
 
     def __call__(
         self,
@@ -494,7 +735,8 @@ def _init_history_block(key, d_model: int) -> _HistoryBlock:
     )
 
 
-def _init_history(key, lookback: int, horizon: int) -> FullHistoryNet:
+def _init_history(key, lookback: int, horizon: int, head: str = "mse") -> FullHistoryNet:
+    check_output_head(head)
     if lookback < 2 or horizon < 1:
         raise AshlarError("lookback must be at least 2 and horizon at least 1.")
     if FORECAST_D_MODEL % FORECAST_HEADS != 0 or FORECAST_D_MODEL % 2 != 0:
@@ -503,6 +745,7 @@ def _init_history(key, lookback: int, horizon: int) -> FullHistoryNet:
     d_model = FORECAST_D_MODEL
     blocks = tuple(_init_history_block(keys[6 + index], d_model) for index in range(FORECAST_LAYERS))
     scale = np.float32(np.sqrt(1.0 / lookback))
+    out_weight, out_bias = _output_projection(keys[5], d_model, head, horizon)
     return FullHistoryNet(
         in_weight=jax.random.normal(keys[0], (d_model,), dtype=jnp.float32) * np.float32(0.5),
         in_bias=jnp.zeros((d_model,), dtype=jnp.float32),
@@ -512,10 +755,11 @@ def _init_history(key, lookback: int, horizon: int) -> FullHistoryNet:
         patch_bias=jnp.zeros((d_model,), dtype=jnp.float32),
         null_token=jax.random.normal(keys[4], (d_model,), dtype=jnp.float32) * np.float32(0.02),
         blocks=blocks,
-        out_weight=jax.random.normal(keys[5], (d_model, horizon), dtype=jnp.float32) * np.float32(np.sqrt(1.0 / d_model)),
-        out_bias=jnp.zeros((horizon,), dtype=jnp.float32),
+        out_weight=out_weight,
+        out_bias=out_bias,
         lookback=int(lookback),
         horizon=int(horizon),
+        head=head,
     )
 
 
@@ -530,12 +774,21 @@ def _history_mse(model: FullHistoryNet, recent, patches, within, valid, ages, ta
     return jnp.mean(jnp.square(_history_batch(model, recent, patches, within, valid, ages) - target))
 
 
+def _history_objective(model: FullHistoryNet, recent, patches, within, valid, ages, target) -> jax.Array:
+    if model.head == "mse":
+        return _history_mse(model, recent, patches, within, valid, ages, target)
+    flat = _history_batch(model, recent, patches, within, valid, ages)
+    return distributional_loss(model.head, decode(model.head, flat, model.horizon), target)
+
+
 def _make_history_step(learning_rate: float):
     optimizer = optax.adam(learning_rate)
 
     @eqx.filter_jit
     def step(model, opt_state, recent, patches, within, valid, ages, target):
-        loss, grads = eqx.filter_value_and_grad(_history_mse)(model, recent, patches, within, valid, ages, target)
+        loss, grads = eqx.filter_value_and_grad(_history_objective)(
+            model, recent, patches, within, valid, ages, target
+        )
         updates, opt_state = optimizer.update(grads, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
@@ -620,8 +873,12 @@ class FullHistoryForecaster:
     series is a chronological holdout used only to choose the epoch. The fit
     then starts again from the same initialization and trains that many epochs
     on every origin in the series it was given. ``predict`` reads a prefix and
-    returns the original scale. Passing ``origins`` forecasts each of those
-    cut points; omitting it forecasts the horizon after the last observation.
+    returns one point on the original scale. Absolute error of that point is
+    the summary. ``head="mse"`` trains squared error. The other heads train
+    a pinball loss or their own likelihood, and the point is the
+    median, the gaussian mean, the mixture mean, the flow median, or the
+    histogram mean. Passing ``origins`` forecasts each of those cut points;
+    omitting it forecasts the horizon after the last observation.
     """
 
     def __init__(
@@ -634,6 +891,7 @@ class FullHistoryForecaster:
         patience: int = FORECAST_PATIENCE,
         batch_size: int = FORECAST_BATCH_SIZE,
         val_fraction: float = FORECAST_VAL_FRACTION,
+        head: str = "mse",
     ):
         if lookback < 2 or horizon < 1 or max_epochs < 1 or patience < 1 or batch_size < 1:
             raise AshlarError("lookback, horizon, epochs, patience, and batch size must be positive.")
@@ -647,6 +905,7 @@ class FullHistoryForecaster:
         self.patience = int(patience)
         self.batch_size = int(batch_size)
         self.val_fraction = float(val_fraction)
+        self.head = check_output_head(head)
 
     def fit(self, y):
         series = _series(y)
@@ -667,13 +926,138 @@ class FullHistoryForecaster:
         self.model_ = model
         self.mean_ = float(mean)
         self.std_ = float(std)
-        self.selection_mse_ = float(selection)
+        self.selection_loss_ = float(selection)
+        if self.head == "mse":
+            self.selection_mse_ = float(selection)
         self.n_obs_ = int(len(series))
         return self
 
     def predict(self, history, origins=None) -> np.ndarray:
         if not hasattr(self, "model_"):
             raise AshlarError("fit the forecaster before predict.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        apply = _history_apply if self.head == "mse" else _history_point
+        pieces = []
+        for start in range(0, len(origins), 128):
+            chunk = origins[start : start + 128]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            pieces.append(np.asarray(apply(self.model_, *[jnp.asarray(part) for part in packed])))
+        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return restored[0]
+        return restored
+
+    def gaussian(self, history, origins=None):
+        """Gaussian location and scale on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before gaussian.")
+        if self.head != "gaussian":
+            raise AshlarError("location and scale are available on the gaussian head.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        locations = []
+        scales = []
+        for start in range(0, len(origins), 128):
+            chunk = origins[start : start + 128]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            loc, scale = _history_gaussian(self.model_, *[jnp.asarray(part) for part in packed])
+            locations.append(np.asarray(loc))
+            scales.append(np.asarray(scale))
+        loc = np.concatenate(locations).astype(np.float64) * self.std_ + self.mean_
+        scale = np.concatenate(scales).astype(np.float64) * self.std_
+        if single:
+            return loc[0], scale[0]
+        return loc, scale
+
+    def log_prob(self, history, value, origins=None) -> np.ndarray:
+        """Per-step log density of ``value`` on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before log_prob.")
+        if self.head not in _DENSITY_HEADS:
+            raise AshlarError(f"the {self.head} head has no log density.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        observed = _observed_horizon(value, single, self.horizon, len(origins))
+        standardized = _scale(observed, self.mean_, self.std_)
+        pieces = []
+        for start in range(0, len(origins), 128):
+            stop = start + 128
+            chunk = origins[start:stop]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            pieces.append(
+                np.asarray(
+                    _history_log_prob(
+                        self.model_,
+                        *[jnp.asarray(part) for part in packed],
+                        jnp.asarray(standardized[start:stop]),
+                    )
+                )
+            )
+        logged = np.concatenate(pieces).astype(np.float64) - np.log(self.std_)
+        if single:
+            return logged[0]
+        return logged
+
+    def sample(self, history, key, n: int = 1, origins=None) -> np.ndarray:
+        """Draw ``n`` horizons. A flow draw is one spline forward pass."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before sample.")
+        if self.head not in _DENSITY_HEADS:
+            raise AshlarError(f"the {self.head} head has no sampler.")
+        count = int(n)
+        if count < 1:
+            raise AshlarError("the number of samples must be positive.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        pieces = []
+        sample_key = _as_key(key)
+        for start in range(0, len(origins), 128):
+            sample_key, chunk_key = jax.random.split(sample_key)
+            chunk = origins[start : start + 128]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            pieces.append(
+                np.asarray(
+                    _history_sample(self.model_, *[jnp.asarray(part) for part in packed], chunk_key, count)
+                )
+            )
+        drawn = np.concatenate(pieces, axis=1).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return drawn[:, 0, :]
+        return drawn
+
+    def quantiles(self, history, origins=None) -> np.ndarray:
+        """Quantile forecasts at 0.1, 0.5, and 0.9, on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before quantiles.")
+        if self.head != "quantile":
+            raise AshlarError("quantiles are available on the quantile head.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        pieces = []
+        for start in range(0, len(origins), 128):
+            chunk = origins[start : start + 128]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            pieces.append(np.asarray(_history_quantiles(self.model_, *[jnp.asarray(part) for part in packed])))
+        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
+        if single:
+            return restored[0]
+        return restored
+
+    def bin_probabilities(self, history, origins=None):
+        """Histogram probabilities and the fixed bin centers on the original scale."""
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before bin_probabilities.")
+        if self.head != "histogram":
+            raise AshlarError("bin probabilities are available on the histogram head.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        pieces = []
+        for start in range(0, len(origins), 128):
+            chunk = origins[start : start + 128]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            pieces.append(np.asarray(_history_bins(self.model_, *[jnp.asarray(part) for part in packed])))
+        probabilities = np.concatenate(pieces).astype(np.float64)
+        centers = np.asarray(histogram_centers(), dtype=np.float64) * self.std_ + self.mean_
+        if single:
+            return probabilities[0], centers
+        return probabilities, centers
+
+    def _prepare_origins(self, history, origins):
         series = _series(history)
         single = origins is None
         if single:
@@ -686,38 +1070,40 @@ class FullHistoryForecaster:
                 raise AshlarError("at least one forecast origin is required.")
         scaled = _scale(series, self.mean_, self.std_)
         capacity = _patches_needed(origins, self.lookback)
-        pieces = []
-        for start in range(0, len(origins), 128):
-            chunk = origins[start : start + 128]
-            packed = _pack_history(scaled, chunk, self.lookback, capacity)
-            pieces.append(np.asarray(_history_apply(self.model_, *[jnp.asarray(part) for part in packed])))
-        restored = np.concatenate(pieces).astype(np.float64) * self.std_ + self.mean_
-        if single:
-            return restored[0]
-        return restored
+        return scaled, origins, capacity, single
 
     def _select(self, series, origins, train, val, mean: float, std: float):
         scaled = _scale(series, mean, std)
         self._reset()
 
         def init():
-            return _init_history(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon)
+            return _init_history(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon, self.head)
 
         def step_epoch(state, epoch):
             return self._epoch(state, scaled, origins[train], epoch)
 
         def score(state):
-            return self._mse_numpy(state, scaled, origins[val])
+            if self.head == "mse":
+                return self._mse_numpy(state, scaled, origins[val])
+            return self._objective_numpy(state, scaled, origins[val])
 
+        metric = "val_mse" if self.head == "mse" else "val_loss"
         return _train_until(
-            init, step_epoch, score, self.max_epochs, self.patience, self.verbose, label="full-history"
+            init,
+            step_epoch,
+            score,
+            self.max_epochs,
+            self.patience,
+            self.verbose,
+            label="full-history",
+            metric=metric,
         )
 
     def _run(self, scaled, origins):
         self._reset()
 
         def init():
-            return _init_history(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon)
+            return _init_history(jax.random.PRNGKey(self.random_state), self.lookback, self.horizon, self.head)
 
         def step_epoch(state, epoch):
             return self._epoch(state, scaled, origins, epoch)
@@ -762,6 +1148,21 @@ class FullHistoryForecaster:
             weights.append(target.size)
         return float(sum(squares) / sum(weights))
 
+    def _objective_numpy(self, model, scaled, origins) -> float:
+        capacity = _patches_needed(origins, self.lookback)
+        total = 0.0
+        count = 0
+        for start in range(0, len(origins), 64):
+            chunk = origins[start : start + 64]
+            packed = _pack_history(scaled, chunk, self.lookback, capacity)
+            target = _horizon_targets(scaled, chunk, self.horizon)
+            value = float(
+                _history_objective_jit(model, *[jnp.asarray(part) for part in packed], jnp.asarray(target))
+            )
+            total += value * int(len(chunk))
+            count += int(len(chunk))
+        return total / count
+
     def _reset(self) -> None:
         self._opt_state = None
         self._step = None
@@ -777,3 +1178,48 @@ def _horizon_targets(series: np.ndarray, origins: np.ndarray, horizon: int) -> n
 @eqx.filter_jit
 def _history_apply(model: FullHistoryNet, recent, patches, within, valid, ages) -> jax.Array:
     return _history_batch(model, recent, patches, within, valid, ages)
+
+
+def _history_flat(model: FullHistoryNet, recent, patches, within, valid, ages) -> jax.Array:
+    return _history_batch(model, recent, patches, within, valid, ages)
+
+
+@eqx.filter_jit
+def _history_point(model: FullHistoryNet, recent, patches, within, valid, ages) -> jax.Array:
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return point_values(model.head, decode(model.head, flat, model.horizon))
+
+
+@eqx.filter_jit
+def _history_gaussian(model: FullHistoryNet, recent, patches, within, valid, ages):
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return decode("gaussian", flat, model.horizon)
+
+
+@eqx.filter_jit
+def _history_log_prob(model: FullHistoryNet, recent, patches, within, valid, ages, value) -> jax.Array:
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return log_density(model.head, decode(model.head, flat, model.horizon), value)
+
+
+@eqx.filter_jit
+def _history_quantiles(model: FullHistoryNet, recent, patches, within, valid, ages) -> jax.Array:
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return decode("quantile", flat, model.horizon)
+
+
+@eqx.filter_jit
+def _history_bins(model: FullHistoryNet, recent, patches, within, valid, ages) -> jax.Array:
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return jax.nn.softmax(decode("histogram", flat, model.horizon), axis=-1)
+
+
+@eqx.filter_jit
+def _history_sample(model: FullHistoryNet, recent, patches, within, valid, ages, key, n: int) -> jax.Array:
+    flat = _history_flat(model, recent, patches, within, valid, ages)
+    return sample_values(model.head, decode(model.head, flat, model.horizon), key, n)
+
+
+@eqx.filter_jit
+def _history_objective_jit(model: FullHistoryNet, recent, patches, within, valid, ages, target) -> jax.Array:
+    return _history_objective(model, recent, patches, within, valid, ages, target)

@@ -1,0 +1,10 @@
+include .gitignore
+recursive-include tests *.py
+recursive-include examples *.py
+recursive-include .github *.yml
+recursive-include docs *.md
+recursive-include docs *.png
+global-exclude *.py[cod]
+global-exclude __pycache__/*
+global-exclude *.egg-info/*
+prune src/ashlar_tabular.egg-info

@@ -23,7 +23,8 @@ dev = ["pandas>=2.0", "polars>=1.0", "pytest>=8.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["ashlar*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -p no:cacheprovider"
