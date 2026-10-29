@@ -112,24 +112,29 @@ def year():
 def flights_3m():
     """US arrival delay in minutes, January to June 2001 (vega flights-3m).
 
-    Only what a schedule tells you: weekday, scheduled hour, distance, origin,
-    and destination. The date is not a feature, and the test rows are the last
-    20% of dates, so no model can learn which days had bad weather and then
-    meet those same days in the test split. ``__order__`` is the date, used
-    only to split.
+    Only what a schedule tells you: day of year and scheduled hour, each as a
+    point on a circle (sin, cos), weekday, distance, origin, and destination.
+    ``__group__`` is the calendar date. Test rows are a random 20% of dates,
+    and every model's early-stopping slice is also a set of whole dates, so no
+    model meets a day whose weather it has already seen.
     """
     from benchmark_readme import _path
 
     raw = pd.read_parquet(_path("flights-3m.parquet"))
     date = raw["date"]
+    day = date.dt.dayofyear.to_numpy(np.float64)
+    hour = (date.dt.hour + date.dt.minute / 60).to_numpy(np.float64)
     frame = pd.DataFrame(
         {
+            "day_sin": np.sin(2 * np.pi * day / 365.25),
+            "day_cos": np.cos(2 * np.pi * day / 365.25),
+            "hour_sin": np.sin(2 * np.pi * hour / 24),
+            "hour_cos": np.cos(2 * np.pi * hour / 24),
             "weekday": date.dt.dayofweek.astype(np.float64),
-            "departure": (date.dt.hour + date.dt.minute / 60).astype(np.float64),
             "distance": raw["distance"].astype(np.float64),
             "origin": raw["origin"],
             "dest": raw["destination"],
-            "__order__": (date - date.min()).dt.total_seconds().astype(np.float64),
+            "__group__": date.dt.strftime("%Y-%m-%d"),
         }
     )
     return _cap(_strings(frame), raw["delay"].to_numpy(np.float64))
@@ -184,19 +189,36 @@ def load(table):
     return frame, y
 
 
+# Calendar-day groups of the current training rows, or None for an iid table.
+TRAIN_GROUPS = None
+
+
 def splits(table, seed):
+    global TRAIN_GROUPS
     frame, y = load(table)
     task = TABLES[table][0]
-    if "__order__" in frame.columns:
-        # A time split: the last 20% of the clock is the test set, whatever the seed.
-        order = np.argsort(frame.pop("__order__").to_numpy(), kind="stable")
-        cut = int(round(0.8 * len(order)))
-        train, test = order[:cut], order[cut:]
+    if "__group__" in frame.columns:
+        from sklearn.model_selection import GroupShuffleSplit
+
+        groups = frame.pop("__group__").to_numpy()
+        train, test = next(GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=seed).split(frame, y, groups))
+        TRAIN_GROUPS = groups[train]
         return (task, frame.iloc[train].reset_index(drop=True), frame.iloc[test].reset_index(drop=True),
                 y[train], y[test])
+    TRAIN_GROUPS = None
     stratify = y if task == "classification" else None
     x_train, x_test, y_train, y_test = train_test_split(frame, y, test_size=0.2, random_state=seed, stratify=stratify)
     return task, x_train.reset_index(drop=True), x_test.reset_index(drop=True), y_train, y_test
+
+
+def inner_split(frame, y, seed):
+    """The early-stopping slice of the training rows: whole days when the table has them."""
+    if TRAIN_GROUPS is None:
+        return train_test_split(frame, y, test_size=VALIDATION, random_state=seed)
+    from sklearn.model_selection import GroupShuffleSplit
+
+    fit, val = next(GroupShuffleSplit(n_splits=1, test_size=VALIDATION, random_state=seed).split(frame, y, TRAIN_GROUPS))
+    return frame.iloc[fit], frame.iloc[val], y[fit], y[val]
 
 
 # ---------------------------------------------------------------- scores
@@ -276,7 +298,7 @@ def _align(train, other):
 def fit_tree(kind, task, x_train, y_train, seed, classes=None):
     """Early-stopped at learning rate 0.05, up to 4,000 trees, 100 rounds of patience."""
     frame = _tree_frame(x_train)
-    fit_x, val_x, fit_y, val_y = train_test_split(frame, y_train, test_size=VALIDATION, random_state=seed)
+    fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
     if task == "classification":
         fit_y = np.searchsorted(classes, fit_y)
         val_y = np.searchsorted(classes, val_y)
@@ -369,7 +391,7 @@ def run_catboost_uncertainty(table, seed):
             f[c] = f[c].astype(object).where(f[c].notna(), "__missing__").astype(str)
         return f
 
-    fit_x, val_x, fit_y, val_y = train_test_split(frame, y_train, test_size=VALIDATION, random_state=seed)
+    fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
     model = catboost.CatBoostRegressor(iterations=4000, learning_rate=0.05, od_type="Iter", od_wait=100,
                                        random_seed=seed, thread_count=GBM_THREADS, verbose=False,
                                        cat_features=cats, loss_function="RMSEWithUncertainty")
@@ -411,7 +433,10 @@ def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
         model = classifier(random_state=seed, **overrides)
     else:
         model = TabularEstimator(task=head or "regression", random_state=seed, **overrides)
-    model.fit(x_train, y_train)
+    if TRAIN_GROUPS is None:
+        model.fit(x_train, y_train)
+    else:
+        model.set_params(split="group").fit(x_train, y_train, groups=TRAIN_GROUPS)
     seconds = time.time() - start
     record = {"seconds": round(seconds, 1), "epochs": len(model.history_["train_loss"])}
     if task == "classification":

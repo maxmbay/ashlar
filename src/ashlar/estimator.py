@@ -233,6 +233,10 @@ class TabularEstimator(BaseEstimator):
         names and one-hots the other categoricals. ``[]`` one-hots every
         categorical. The constructor value is what ``get_params`` returns;
         the fitted names are ``embedded_columns_``.
+    cyclical:
+        ``{column: period}``. Each named numeric column becomes two columns,
+        ``sin`` and ``cos`` of ``2π value / period``, so the end of a cycle sits
+        next to its start: ``{"hour": 24, "day_of_year": 365.25}``.
     set_features:
         Column names whose cells are a list of categories. Each list is a
         variable-length set: a masked mean of learned token embeddings.
@@ -277,6 +281,7 @@ class TabularEstimator(BaseEstimator):
         categorical_embedding_dim: int = 8,
         categorical_embedding_hidden: bool = False,
         set_max_length: int = 8,
+        cyclical: dict | None = None,
         random_state: int = 0,
     ):
         self.task = task
@@ -318,6 +323,7 @@ class TabularEstimator(BaseEstimator):
         self.categorical_embedding_dim = categorical_embedding_dim
         self.categorical_embedding_hidden = categorical_embedding_hidden
         self.set_max_length = set_max_length
+        self.cyclical = cyclical
         self.random_state = random_state
 
     def _check_config(self):
@@ -458,6 +464,9 @@ class TabularEstimator(BaseEstimator):
             # A fresh fit resolves its own settings; a previous fit's must not leak in.
             self.resolved_ = None
         y_array = target_array(y)
+        X = self._with_cyclical(X)
+        if validation is not None:
+            validation = (self._with_cyclical(validation[0]), *validation[1:])
         names, columns = frame_columns(X)
         n_rows = len(columns[0])
         if len(y_array) != n_rows:
@@ -1046,6 +1055,31 @@ class TabularEstimator(BaseEstimator):
             w_device,
         )
 
+    def _with_cyclical(self, X):
+        """Replace each ``cyclical`` column by its ``_sin`` and ``_cos`` on a circle of that period.
+
+        Hour 23 and hour 0 land next to each other, as do the last and first
+        week of the year. A missing value stays missing in both coordinates.
+        """
+        if not self.cyclical:
+            return X
+        names, columns = frame_columns(X)
+        unknown = set(self.cyclical).difference(names)
+        if unknown:
+            raise AshlarError(f"cyclical columns {sorted(unknown)} are not in X.")
+        out = {}
+        for name, values in zip(names, columns, strict=True):
+            if name not in self.cyclical:
+                out[name] = values
+                continue
+            period = float(self.cyclical[name])
+            if not np.isfinite(period) or period <= 0:
+                raise AshlarError(f"the period of cyclical column {name!r} must be positive.")
+            angle = 2 * np.pi * np.asarray(values, dtype=np.float64) / period
+            out[f"{name}_sin"] = np.sin(angle)
+            out[f"{name}_cos"] = np.cos(angle)
+        return out
+
     def prepare(self, X):
         """Return scaled numeric features and host-encoded one-hot categories.
 
@@ -1054,7 +1088,7 @@ class TabularEstimator(BaseEstimator):
         schema has those columns and you are not calling ``predict``.
         """
         self._require_fitted()
-        encoded = self.encoder_.transform(X)
+        encoded = self.encoder_.transform(self._with_cyclical(X))
         return self.numeric_transform_(encoded.numeric_raw), encoded.categorical_onehot
 
     def forward_raw(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
@@ -1097,7 +1131,7 @@ class TabularEstimator(BaseEstimator):
 
     def _raw_from_frame(self, X):
         self._require_fitted()
-        encoded = self.encoder_.transform(X)
+        encoded = self.encoder_.transform(self._with_cyclical(X))
         numeric_z = self.numeric_transform_(encoded.numeric_raw)
         inputs = (
             numeric_z,
@@ -1304,6 +1338,7 @@ class TabularEstimator(BaseEstimator):
             "categorical_embedding_dim": int(self.categorical_embedding_dim),
             "categorical_embedding_hidden": bool(self.categorical_embedding_hidden),
             "gradient_clip": self.gradient_clip,
+            "cyclical": self.cyclical,
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
@@ -1350,6 +1385,7 @@ class TabularEstimator(BaseEstimator):
             soft_stages=payload.get("soft_stages"),
             weight_decay=payload["weight_decay"],
             gradient_clip=payload.get("gradient_clip"),
+            cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             prediction_policy=payload["prediction_policy"],
