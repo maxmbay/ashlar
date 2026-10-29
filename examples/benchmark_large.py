@@ -87,9 +87,14 @@ def zurich():
 
 
 def airlines_delay():
-    """US departure delay in minutes, 10M flights 1987-2008 (OpenML 42728)."""
+    """US departure delay in minutes, 10M flights 1987-2008 (OpenML 42728).
+
+    Day of month is dropped: with a random split it lets a model memorize
+    single bad-weather days. The source has no year, so a time split is not
+    possible; month and weekday stay as seasonal features.
+    """
     X, y = _openml(42728)
-    return _cap(_strings(X), np.asarray(y, dtype=np.float64))
+    return _cap(_strings(X.drop(columns=["DayofMonth"])), np.asarray(y, dtype=np.float64))
 
 
 def taxi_tip():
@@ -105,10 +110,29 @@ def year():
 
 
 def flights_3m():
-    from benchmark_readme import flights_3m as load
+    """US arrival delay in minutes, January to June 2001 (vega flights-3m).
 
-    frame, y = load()
-    return _cap(frame, y)
+    Only what a schedule tells you: weekday, scheduled hour, distance, origin,
+    and destination. The date is not a feature, and the test rows are the last
+    20% of dates, so no model can learn which days had bad weather and then
+    meet those same days in the test split. ``__order__`` is the date, used
+    only to split.
+    """
+    from benchmark_readme import _path
+
+    raw = pd.read_parquet(_path("flights-3m.parquet"))
+    date = raw["date"]
+    frame = pd.DataFrame(
+        {
+            "weekday": date.dt.dayofweek.astype(np.float64),
+            "departure": (date.dt.hour + date.dt.minute / 60).astype(np.float64),
+            "distance": raw["distance"].astype(np.float64),
+            "origin": raw["origin"],
+            "dest": raw["destination"],
+            "__order__": (date - date.min()).dt.total_seconds().astype(np.float64),
+        }
+    )
+    return _cap(_strings(frame), raw["delay"].to_numpy(np.float64))
 
 
 def higgs():
@@ -163,6 +187,13 @@ def load(table):
 def splits(table, seed):
     frame, y = load(table)
     task = TABLES[table][0]
+    if "__order__" in frame.columns:
+        # A time split: the last 20% of the clock is the test set, whatever the seed.
+        order = np.argsort(frame.pop("__order__").to_numpy(), kind="stable")
+        cut = int(round(0.8 * len(order)))
+        train, test = order[:cut], order[cut:]
+        return (task, frame.iloc[train].reset_index(drop=True), frame.iloc[test].reset_index(drop=True),
+                y[train], y[test])
     stratify = y if task == "classification" else None
     x_train, x_test, y_train, y_test = train_test_split(frame, y, test_size=0.2, random_state=seed, stratify=stratify)
     return task, x_train.reset_index(drop=True), x_test.reset_index(drop=True), y_train, y_test
@@ -367,13 +398,16 @@ def ashlar_params(task, n_train, overrides):
     return params
 
 
-def run_ashlar(table, seed, *, head=None, overrides=None):
-    from ashlar import TabularEstimator, classifier
+def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
+    from ashlar import TabularEstimator, classifier, tabm_piecewise
 
     task, x_train, x_test, y_train, y_test = splits(table, seed)
     overrides = dict(overrides or {})
     start = time.time()
-    if task == "classification":
+    if recipe == "tabm_piecewise":
+        model = tabm_piecewise(task="classification" if task == "classification" else head or "regression",
+                               random_state=seed, **overrides)
+    elif task == "classification":
         model = classifier(random_state=seed, **overrides)
     else:
         model = TabularEstimator(task=head or "regression", random_state=seed, **overrides)
@@ -448,6 +482,8 @@ def model_runner(name):
         return lambda table, seed, overrides: run_catboost_uncertainty(table, seed)
     if name == "ashlar":
         return lambda table, seed, overrides: run_ashlar(table, seed, overrides=overrides)
+    if name == "ashlar_tabm":
+        return lambda table, seed, overrides: run_ashlar(table, seed, overrides=overrides, recipe="tabm_piecewise")
     if name.startswith("ashlar_"):
         head = name.split("_", 1)[1]
         return lambda table, seed, overrides: run_ashlar(table, seed, head=head, overrides=overrides)

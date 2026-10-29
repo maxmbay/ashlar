@@ -22,11 +22,13 @@ from ashlar.recipes import (
     DEFAULT_RECIPE,
     ORDINAL_RECIPE,
     TABM_PAPER,
+    TABM_PIECEWISE,
     classifier,
     ordinal,
     residual_mlp,
     tabular,
     tabm,
+    tabm_piecewise,
 )
 from ashlar.rounds import HistogramBooster, LearnedNeighborhood, LinearLeafBooster
 from ashlar.search import DEFAULT_SEARCH
@@ -51,6 +53,7 @@ __all__ = [
     "ObliviousEnsemble",
     "ShapeError",
     "TABM_PAPER",
+    "TABM_PIECEWISE",
     "TabularEstimator",
     "TimeSeriesForecaster",
     "VariationalPairwise",
@@ -61,4 +64,5 @@ __all__ = [
     "residual_mlp",
     "tabular",
     "tabm",
+    "tabm_piecewise",
 ]

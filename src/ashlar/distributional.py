@@ -213,7 +213,7 @@ def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
                 "mixture parameters must share shape "
                 f"{target.shape} + ({MIXTURE_COMPONENTS},); received {getattr(loc, 'shape', None)}."
             )
-        log_component = normal_log_prob(target[..., None], loc, scale) + jnp.log(weight)
+        log_component = normal_log_prob(target[..., None], loc, scale) + _log_weight(weight)
         return jnp.mean(-jax.nn.logsumexp(log_component, axis=-1))
     if head == "flow":
         _flow_shape(decoded, target)
@@ -230,6 +230,12 @@ def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
         squared = jnp.square(expected - target)
         return jnp.mean(-chosen + jnp.asarray(HISTOGRAM_LOCATION_WEIGHT, dtype=target.dtype) * squared)
     raise AshlarError("the squared-error head does not use the distributional loss.")
+
+
+def _log_weight(weight):
+    """Log of mixture weights. A weight that underflows to 0 gives a large
+    negative number, not ``-inf``, so its gradient stays finite."""
+    return jnp.log(jnp.maximum(weight, jnp.asarray(1e-30, dtype=weight.dtype)))
 
 
 def row_loss(head: str, decoded, target: jax.Array) -> jax.Array:
@@ -263,7 +269,7 @@ def log_density(head: str, decoded, value: jax.Array) -> jax.Array:
             raise ShapeError(
                 f"mixture log density expected value shape {loc.shape[:-1]}; received {value.shape}."
             )
-        log_component = normal_log_prob(value[..., None], loc, scale) + jnp.log(weight)
+        log_component = normal_log_prob(value[..., None], loc, scale) + _log_weight(weight)
         return jax.nn.logsumexp(log_component, axis=-1)
     if head == "flow":
         _flow_shape(decoded, value)
@@ -299,7 +305,7 @@ def sample_values(head: str, decoded, key, n: int) -> jax.Array:
         loc, scale, weight = decoded
         component_key, noise_key = jax.random.split(key)
         choices = jax.random.categorical(
-            component_key, jnp.log(weight), axis=-1, shape=(count,) + loc.shape[:-1]
+            component_key, _log_weight(weight), axis=-1, shape=(count,) + loc.shape[:-1]
         )
         chosen_loc = jnp.take_along_axis(jnp.broadcast_to(loc, (count,) + loc.shape), choices[..., None], axis=-1)[
             ..., 0

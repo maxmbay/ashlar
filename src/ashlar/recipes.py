@@ -77,6 +77,31 @@ TABM_PAPER = {
     "prediction_policy": "mean_members",
 }
 
+# The most accurate recipe in the ablations (examples/ablation_gbm_parity.py,
+# config ``tabm_ple_quantile``): a 32-member TabM on piecewise-linear numeric
+# embeddings of quantile-normalized features. About 5 to 10 times the cost of
+# the default on CPU.
+TABM_PIECEWISE = {
+    "task": "regression",
+    "backbone": "tabm",
+    "backbone_kwargs": {
+        "n_blocks": 2,
+        "d_block": 256,
+        "dropout": 0.1,
+        "k": 32,
+        "start_scaling_init": "normal",
+    },
+    "num_embeddings": "piecewise",
+    "num_embedding_dim": 16,
+    "numeric_scaling": "quantile",
+    "learning_rate": 2e-3,
+    "learning_rate_schedule": "constant",
+    "weight_decay": 0.0,
+    "batch_size": "auto",
+    "max_epochs": "auto",
+    "patience": 16,
+}
+
 TABM_PROBE = {
     "task": "regression",
     "backbone": "tabm",
@@ -157,6 +182,22 @@ ORDINAL_RECIPE = {
     "prediction_policy": "mean_probabilities",
     "standardize_target": False,
 }
+
+
+def tabm_piecewise(**overrides) -> TabularEstimator:
+    """TabM on piecewise-linear numeric embeddings: the accuracy recipe.
+
+    Works for every task. Classification and ordinal turn the label z-score
+    off and average member probabilities; a distribution task predicts the
+    member mixture.
+    """
+    params = deepcopy(TABM_PIECEWISE)
+    task = overrides.get("task", "regression")
+    if task in {"classification", "ordinal"}:
+        params.setdefault("prediction_policy", "mean_probabilities")
+        if "standardize_target" not in overrides:
+            params["standardize_target"] = False
+    return TabularEstimator(**_merge(params, overrides))
 
 
 def ordinal(**overrides) -> TabularEstimator:

@@ -85,8 +85,8 @@ DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile")
 _SCALED_TASKS = {"regression", *DISTRIBUTION_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
-# Bins per numeric column for ``num_embeddings="piecewise"``.
-PIECEWISE_BINS = 48
+# Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
+DISTRIBUTION_GRADIENT_CLIP = 1.0
 
 
 def _squeeze_univariate(point):
@@ -250,6 +250,7 @@ class TabularEstimator(BaseEstimator):
         dist_fn=None,
         num_embeddings: str | None = "piecewise",
         num_embedding_dim: int = 16,
+        num_embedding_bins: int = 48,
         n_events: int | None = None,
         validation_size: float = 0.2,
         split: str = "iid",
@@ -265,6 +266,7 @@ class TabularEstimator(BaseEstimator):
         expectation_weight: float | None = None,
         soft_stages: int | None = None,
         weight_decay: float = 1e-4,
+        gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
         numeric_scaling: str = "robust",
         prediction_policy: str | None = None,
@@ -287,6 +289,7 @@ class TabularEstimator(BaseEstimator):
         self.dist_fn = dist_fn
         self.num_embeddings = num_embeddings
         self.num_embedding_dim = num_embedding_dim
+        self.num_embedding_bins = num_embedding_bins
         self.n_events = n_events
         self.validation_size = validation_size
         self.split = split
@@ -304,6 +307,7 @@ class TabularEstimator(BaseEstimator):
         self.expectation_weight = expectation_weight
         self.soft_stages = soft_stages
         self.weight_decay = weight_decay
+        self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
         self.numeric_scaling = numeric_scaling
         self.prediction_policy = prediction_policy
@@ -566,6 +570,7 @@ class TabularEstimator(BaseEstimator):
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
+            gradient_clip=self._gradient_clip(),
             weight_decay=float(resolved["weight_decay"]),
             batch_size=int(resolved["batch_size"]),
             max_epochs=self._max_epochs(),
@@ -616,6 +621,18 @@ class TabularEstimator(BaseEstimator):
             "batch_size": self._batch_size(self.batch_size),
             "backbone_kwargs": self.backbone_kwargs,
         }
+
+    def _gradient_clip(self) -> float | None:
+        """Global gradient norm cap. ``None`` caps distribution tasks at 1 and leaves the rest alone.
+
+        A density head on a target with a spike can drive a component scale
+        toward its floor, where one minibatch's gradient is large enough to
+        blow up the run. ``0`` turns the cap off for every task.
+        """
+        if self.gradient_clip is None:
+            return DISTRIBUTION_GRADIENT_CLIP if self.task in DISTRIBUTION_TASKS else None
+        value = float(self.gradient_clip)
+        return None if value == 0.0 else value
 
     def _batch_size(self, value) -> int:
         if value == "auto":
@@ -710,6 +727,7 @@ class TabularEstimator(BaseEstimator):
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
+            gradient_clip=self._gradient_clip(),
             weight_decay=float(resolved["weight_decay"]),
             batch_size=int(resolved["batch_size"]),
             max_epochs=int(spec["max_epochs"]),
@@ -898,9 +916,9 @@ class TabularEstimator(BaseEstimator):
             embeddings = PeriodicEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
         elif self.num_embeddings in {"piecewise", "piecewise_relu"}:
             if numeric_z is None:
-                edges = jnp.tile(jnp.linspace(-1.0, 1.0, PIECEWISE_BINS + 1), (encoder.n_numeric, 1))
+                edges = jnp.tile(jnp.linspace(-1.0, 1.0, int(self.num_embedding_bins) + 1), (encoder.n_numeric, 1))
             else:
-                edges = quantile_edges(numeric_z, PIECEWISE_BINS, seed=int(self.random_state))
+                edges = quantile_edges(numeric_z, int(self.num_embedding_bins), seed=int(self.random_state))
             embeddings = PiecewiseLinearEmbeddings(
                 edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
             )
@@ -1255,6 +1273,7 @@ class TabularEstimator(BaseEstimator):
             "dist_fn": dump_ref(self.dist_fn),
             "num_embeddings": self.num_embeddings,
             "num_embedding_dim": self.num_embedding_dim,
+            "num_embedding_bins": self.num_embedding_bins,
             "n_events": self.n_events_,
             "n_classes": self.n_classes_,
             "prediction_policy": self._policy(),
@@ -1284,6 +1303,7 @@ class TabularEstimator(BaseEstimator):
             "set_features": self.set_features,
             "categorical_embedding_dim": int(self.categorical_embedding_dim),
             "categorical_embedding_hidden": bool(self.categorical_embedding_hidden),
+            "gradient_clip": self.gradient_clip,
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
@@ -1313,6 +1333,7 @@ class TabularEstimator(BaseEstimator):
             dist_fn=load_ref(payload["dist_fn"]),
             num_embeddings=payload["num_embeddings"],
             num_embedding_dim=payload["num_embedding_dim"],
+            num_embedding_bins=payload.get("num_embedding_bins", 48),
             n_events=None if payload["task"] in _LABELED_TASKS else payload["n_events"],
             validation_size=payload["validation_size"],
             split=payload["split"],
@@ -1328,6 +1349,7 @@ class TabularEstimator(BaseEstimator):
             expectation_weight=payload.get("expectation_weight"),
             soft_stages=payload.get("soft_stages"),
             weight_decay=payload["weight_decay"],
+            gradient_clip=payload.get("gradient_clip"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             prediction_policy=payload["prediction_policy"],
@@ -1364,7 +1386,7 @@ class TabularEstimator(BaseEstimator):
             rate = float(estimator.learning_rate)
             if estimator.learning_rate_schedule in {"linear", "cosine"}:
                 rate = lambda count, rate=rate: rate  # same state layout as the fitted schedule
-            template_state = make_optimizer(rate, float(estimator.weight_decay)).init(
+            template_state = make_optimizer(rate, float(estimator.weight_decay), estimator._gradient_clip()).init(
                 eqx.filter(estimator.core_, eqx.is_array)
             )
             estimator.opt_state_ = load_opt_state(directory, template_state)

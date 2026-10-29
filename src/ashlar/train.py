@@ -42,12 +42,12 @@ _STEEPNESS_FLOOR = 1e-8
 
 # ``batch_size="auto"`` and ``max_epochs="auto"``. The batch doubles from 256
 # for every doubling of the training rows past 50,000, up to 2,048. The epoch
-# budget is about 3 million row passes, between 10 and 100 epochs.
+# budget is about 20 million row passes, between 20 and 100 epochs.
 AUTO_BATCH_BASE = 256
 AUTO_BATCH_ROWS = 50_000
 AUTO_BATCH_MAX = 2048
-AUTO_ROW_PASSES = 3_000_000
-AUTO_EPOCHS_MIN = 10
+AUTO_ROW_PASSES = 20_000_000
+AUTO_EPOCHS_MIN = 20
 AUTO_EPOCHS_MAX = 100
 
 
@@ -109,9 +109,15 @@ def decay_mask(params):
     return jax.tree_util.tree_map_with_path(keep, params)
 
 
-def make_optimizer(learning_rate, weight_decay: float):
-    """AdamW with frozen fitted leaves left out of the decay. Gradients there are already zero."""
-    return optax.adamw(learning_rate, weight_decay=weight_decay, mask=decay_mask)
+def make_optimizer(learning_rate, weight_decay: float, gradient_clip: float | None = None):
+    """AdamW with frozen fitted leaves left out of the decay. Gradients there are already zero.
+
+    ``gradient_clip`` rescales the whole gradient to that global norm first.
+    """
+    adamw = optax.adamw(learning_rate, weight_decay=weight_decay, mask=decay_mask)
+    if gradient_clip is None:
+        return adamw
+    return optax.chain(optax.clip_by_global_norm(float(gradient_clip)), adamw)
 
 
 def surface_learning_rate(n_train: int, curvature: float, grad_rms: float) -> float:
@@ -196,6 +202,7 @@ def fit_loop(
     score_fn=None,
     learning_rate_schedule: str = "constant",
     share_training_batches: bool = True,
+    gradient_clip: float | None = None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
 
@@ -208,11 +215,12 @@ def fit_loop(
     batch_size = max(1, min(int(batch_size), n_rows))
     surface = learning_rate_schedule == "surface"
     if surface:
-        optimizer = make_optimizer(SURFACE_PROBE_RATE, weight_decay)
+        optimizer = make_optimizer(SURFACE_PROBE_RATE, weight_decay, gradient_clip)
     else:
         optimizer = make_optimizer(
             _learning_rate_arg(learning_rate, learning_rate_schedule, n_rows, batch_size, max_epochs),
             weight_decay,
+            gradient_clip,
         )
     params = eqx_filter(core, is_array)
     if opt_state is None:
@@ -359,7 +367,7 @@ def fit_loop(
                 if curvature_value != curvature_value or grad_rms_value != grad_rms_value:
                     raise WeightError("the loss-surface scale is not finite. Check targets, weights, and the probe rate.")
                 chosen = surface_learning_rate(n_rows, curvature_value, grad_rms_value)
-                optimizer = make_optimizer(chosen, weight_decay)
+                optimizer = make_optimizer(chosen, weight_decay, gradient_clip)
                 step = _adamw_step(optimizer, objective)
                 opt_state = optimizer.init(eqx_filter(core, is_array))
                 surface_ready = True
@@ -488,14 +496,14 @@ def _fit_scanned(
                 return optax.apply_updates(params, updates), new_state, loss
 
             def skip(_):
-                return params, state, jnp.asarray(jnp.nan, dtype=jnp.float32)
+                return params, state, jnp.asarray(0.0, dtype=jnp.float32)
 
             new_params, new_state, loss = jax.lax.cond(has_mass, update, skip, None)
-            return (new_params, new_state), loss
+            return (new_params, new_state), (loss, has_mass)
 
         steps = jnp.arange(steps_per_epoch)
-        (params, state), losses = jax.lax.scan(body, (params, state), (index, mask, steps))
-        return params, state, losses
+        (params, state), (losses, seen) = jax.lax.scan(body, (params, state), (index, mask, steps))
+        return params, state, losses, seen
 
     @filter_jit
     def evaluate(model, *batch):
@@ -513,9 +521,8 @@ def _fit_scanned(
         epoch_key = jax.random.fold_in(key, epoch)
         perm_key, batch_key = jax.random.split(epoch_key)
         order = jax.random.permutation(perm_key, n_rows)
-        params, opt_state, losses = run_epoch(params, opt_state, order, batch_key)
-        losses = np.asarray(losses)
-        seen = losses[~np.isnan(losses)]
+        params, opt_state, losses, seen = run_epoch(params, opt_state, order, batch_key)
+        seen = np.asarray(losses)[np.asarray(seen)]
         if seen.size == 0:
             raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
         if not np.isfinite(seen).all():
