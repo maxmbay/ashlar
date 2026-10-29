@@ -7,6 +7,8 @@
 
 Ashlar fits tables and forecasts series with small JAX models. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
 
+It slots in wherever a gradient-boosted model does. It follows the scikit-learn estimator interface, takes a pandas or Polars frame as it is, string columns included, and works with `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`. Swap `LGBMRegressor()` or `XGBRegressor()` for `TabularEstimator()`, and `LGBMClassifier()` for `classifier()`. That is a drop-in for the workflow, not a promise of the same accuracy: [the comparison below](#ashlar-beside-gradient-boosted-trees) shows where the trees still win.
+
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Ashlar beside gradient-boosted trees](#ashlar-beside-gradient-boosted-trees)
@@ -31,12 +33,14 @@ A table. `X` is a NumPy array, a dict of columns, or a pandas or Polars frame. N
 ```python
 from ashlar import TabularEstimator, classifier, ordinal
 
-model = TabularEstimator().fit(X, y)        # regression
+model = TabularEstimator().fit(X, y)        # where you had LGBMRegressor()
 model.predict(X_new)
 
-clf = classifier().fit(X, labels)           # predict, predict_proba
+clf = classifier().fit(X, labels)           # where you had LGBMClassifier(); predict, predict_proba
 rank = ordinal().fit(X, ratings)            # predict, predict_score (expected label)
 ```
+
+Two differences from a scikit-learn regressor or classifier: there is no `score` method, so pass `scoring=` to `cross_val_score` or `GridSearchCV`, and scikit-learn does not tag `classifier()` as a classifier, so it will not stratify folds on its own and the `roc_auc` scorer does not read its probabilities.
 
 A series, with a distributional head.
 

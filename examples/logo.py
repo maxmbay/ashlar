@@ -114,7 +114,7 @@ def draw(theme_name: str, light: TTFont, regular: TTFont) -> str:
                     parts.append(_face(top, _shade(color, 0.18), edge))
     text_x = OX + G * S * 0.866 + 50
     word, word_width = _text_path(light, "ashlar", 100, text_x - 5, 150, tracking=-2)
-    tag, tag_width = _text_path(regular, "tables, series, and their distributions", 16.5, text_x, 188)
+    tag, tag_width = _text_path(regular, "distributional models for tabular data", 16.5, text_x, 188)
     width = math.ceil(text_x + max(word_width, tag_width) + 30)
     height = math.ceil(OY + G * S + 14)
     blocks = "\n  ".join(parts)
