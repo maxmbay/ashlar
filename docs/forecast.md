@@ -40,7 +40,7 @@ The [quantile figure](images/quantile-forecast.png) rolls a one-step model acros
 
 `head="histogram"` is a softmax over 16 bins fixed on the standardized interval [−4, 4], plus a small squared error of the probability-weighted bin center. `predict` is that center, mapped back to the original scale. `bin_probabilities(history)` returns the probabilities and the bin centers on the original scale.
 
-The [histogram figure](images/histogram-bins.png) is one held-out step of a synthetic cycle. The line is the observed next value. The tall bar is the bin that contains it.
+The [histogram figure](images/histogram-bins.png) is one held-out step of a synthetic cycle. The clay bar is the bin that contains the next value.
 
 ## A longer prefix
 

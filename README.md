@@ -18,31 +18,35 @@ CPU is enough. Set `JAX_PLATFORMS=cpu` to run on CPU.
 
 The pictures below are short CPU fits from [`examples/figures.py`](examples/figures.py). The series are synthetic.
 
-![The fit follows the curve in the table](docs/images/tabular-fit.png)
+![The fitted line follows the rows.](docs/images/tabular-fit.png)
 
 One numeric column, a few epochs, then `predict` on a grid. The line is the fit. The dots are the rows.
 
-![Categories with the same effect sit together](docs/images/categorical-embeddings.png)
+![Categories with the same effect sit together.](docs/images/categorical-embeddings.png)
 
 Each category is a learned 2-d vector. Color is that category's effect on the target. Categories that move the target the same way land next to each other. The unknown row, index 0, is left off the plot.
 
-![Expected score stays with the integer label](docs/images/ordinal-score.png)
+![The expected score stays with the integer label.](docs/images/ordinal-score.png)
 
 `predict_score` is the expected label: class probabilities times the integer class values. The mean for each label sits on that integer.
 
-![The 0.1–0.9 band follows the next cycle](docs/images/quantile-forecast.png)
+![The band follows the next cycle.](docs/images/quantile-forecast.png)
 
 A quantile forecaster, rolled one step at a time across a held-out cycle. Each step uses the observed history that ends there. The clay line is `predict`. The band is `quantiles` at 0.1 and 0.9.
 
-![The mixture puts its mass on both modes](docs/images/mixture-density.png)
+![Both modes get the mass.](docs/images/mixture-density.png)
 
 The series jumps between two values. `head="mixture"` is five normals. The curve is `log_prob` of the next step, and both modes get the mass.
 
-![Histogram probability sits on the next step](docs/images/histogram-bins.png)
+![Almost all of the probability sits on the next step.](docs/images/histogram-bins.png)
 
-`head="histogram"` is a softmax over 16 fixed bins. `bin_probabilities` puts almost all of the mass on the bin that holds the held-out next step.
+`head="histogram"` is a softmax over 16 fixed bins. The clay bar is the bin that holds the held-out next step.
 
 ## Fit a table
+
+![A row becomes a prediction.](docs/images/tabular-path.png)
+
+Numeric columns are scaled. Categories become vectors. A backbone reads both, and the head emits the prediction.
 
 ```python
 from ashlar import TabularEstimator
@@ -83,6 +87,10 @@ Defaults, search, and set columns are in [docs/tabular.md](docs/tabular.md).
 
 ## Forecast
 
+![The last token chooses the forecast.](docs/images/forecast-path.png)
+
+A window, or the full history, becomes tokens. The head can be a point, quantiles, a mixture, a flow, or a histogram.
+
 ```python
 from ashlar import TimeSeriesForecaster
 
@@ -91,6 +99,10 @@ model.fit(series)
 point = model.predict(history)       # (horizon,)
 band = model.quantiles(history)      # (horizon, 3) at 0.1, 0.5, 0.9
 ```
+
+![One vector becomes the density.](docs/images/distributional-head.png)
+
+The mixture head splits that vector into a location, a scale, and a weight for each of five normals, then adds them.
 
 `history` is the last `lookback` observations. `predict` is one point on the original scale for every head. `mse`, the default, is squared error. A quantile point is the 0.5 level, a gaussian point is the mean, a mixture point is the mixture mean, a flow point is the median, and a histogram point is the bin-center mean.
 
