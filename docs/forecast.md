@@ -14,13 +14,19 @@ model.predict(history)
 
 `history` has shape `(lookback,)` or `(batch, lookback)`. A batch in, a batch out.
 
-The forecast figures in the README are one-step models on synthetic series, fit for a few epochs on CPU. [`examples/figures.py`](../examples/figures.py) writes them.
+![The last token chooses the forecast.](images/forecast-path.png)
+
+A window, or the full history, becomes tokens. The last token's vector goes to the head.
+
+The forecast figures on this page are one-step models on synthetic series, fit for a few epochs on CPU. [`examples/figures.py`](../examples/figures.py) writes them.
 
 ## Quantile
 
 `head="quantile"` trains a pinball loss at 0.1, 0.5, and 0.9. Softplus gaps keep the three levels in that order. `predict` is the 0.5 level. `quantiles(history)` returns all three, shape `(horizon, 3)` for one window.
 
-The [quantile figure](images/quantile-forecast.png) rolls a one-step model across a held-out cycle. Each window is the observed history ending at that step. That cycle was held out of the fit. The band is the 0.1 and 0.9 levels.
+![The band follows the next cycle.](images/quantile-forecast.png)
+
+The quantile figure rolls a one-step model across a held-out cycle. Each window is the observed history ending at that step. That cycle was held out of the fit. The clay line is `predict`. The band is the 0.1 and 0.9 levels.
 
 ## Gaussian
 
@@ -30,7 +36,15 @@ The [quantile figure](images/quantile-forecast.png) rolls a one-step model acros
 
 `head="mixture"` trains five normals. Component scales use that same positive map, and the weights are a softmax. The loss is the mixture negative log-density. `predict` is the weighted mean of the component locations.
 
-`log_prob(history, value)` evaluates the density at `value`, which has the same shape `predict` returns. The [mixture figure](images/mixture-density.png) is that density on a grid, for a series of independent draws from two normals centered at −2 and 2. The bars are the series itself.
+![One vector becomes the density.](images/distributional-head.png)
+
+The head splits the last token's vector into a location, a scale, and a weight for each of the five normals, then adds them.
+
+`log_prob(history, value)` evaluates the density at `value`, which has the same shape `predict` returns.
+
+![Both modes get the mass.](images/mixture-density.png)
+
+The mixture figure is that density on a grid, for a series of independent draws from two normals centered at −2 and 2. The bars are the series itself.
 
 ## Flow
 
@@ -40,7 +54,9 @@ The [quantile figure](images/quantile-forecast.png) rolls a one-step model acros
 
 `head="histogram"` is a softmax over 16 bins fixed on the standardized interval [−4, 4], plus a small squared error of the probability-weighted bin center. `predict` is that center, mapped back to the original scale. `bin_probabilities(history)` returns the probabilities and the bin centers on the original scale.
 
-The [histogram figure](images/histogram-bins.png) is one held-out step of a synthetic cycle. The clay bar is the bin that contains the next value.
+![Almost all of the probability sits on the next step.](images/histogram-bins.png)
+
+The histogram figure is one held-out step of a synthetic cycle. The clay bar is the bin that contains the next value.
 
 ## A longer prefix
 
