@@ -315,9 +315,9 @@ class ResidualMLP(Module):
         d_in: int,
         *,
         key,
-        n_blocks: int = 2,
-        d_block: int = 64,
-        dropout: float = 0.0,
+        n_blocks: int = 3,
+        d_block: int = 256,
+        dropout: float = 0.1,
         activation: str = "silu",
         scaling_chunks: list[int] | None = None,
     ):
@@ -400,6 +400,136 @@ class LinearReLUEmbeddings(Module):
         return jax.nn.relu(hidden).reshape(x.shape[0], -1)
 
 
+class PeriodicEmbeddings(Module):
+    """Periodic numeric embeddings, the PLR form of Gorishniy et al. (2022).
+
+    Each feature ``x`` becomes ``cos(2π c x)`` and ``sin(2π c x)`` at
+    ``n_frequencies`` learned frequencies ``c``, drawn at init from a normal
+    with standard deviation ``frequency_scale``. A per-feature linear map to
+    ``d_embedding`` and a ReLU follow. Output ``(batch, n_features * d_embedding)``.
+    """
+
+    frequencies: jax.Array
+    weight: jax.Array
+    bias: jax.Array
+    d_embedding: int = field(static=True)
+
+    def __init__(
+        self,
+        n_features: int,
+        d_embedding: int,
+        *,
+        key,
+        n_frequencies: int = 16,
+        frequency_scale: float = 0.1,
+    ):
+        if n_features < 1 or d_embedding < 1 or n_frequencies < 1:
+            raise ShapeError("PeriodicEmbeddings requires positive n_features, d_embedding, and n_frequencies.")
+        freq_key, weight_key, bias_key = jax.random.split(key, 3)
+        width = 2 * n_frequencies
+        self.frequencies = frequency_scale * jax.random.normal(freq_key, (n_features, n_frequencies))
+        self.weight = _rsqrt_uniform(weight_key, (n_features, width, d_embedding), width, jnp.float32)
+        self.bias = _rsqrt_uniform(bias_key, (n_features, d_embedding), width, jnp.float32)
+        self.d_embedding = d_embedding
+
+    def __call__(self, x):
+        if x.ndim != 2 or x.shape[1] != self.frequencies.shape[0]:
+            raise ShapeError(f"PeriodicEmbeddings expected (batch, {self.frequencies.shape[0]}); received {x.shape}.")
+        angle = 2 * math.pi * self.frequencies * x[..., None]
+        periodic = jnp.concatenate([jnp.cos(angle), jnp.sin(angle)], axis=-1)
+        hidden = jnp.einsum("bfp,fpd->bfd", periodic, self.weight) + self.bias
+        return jax.nn.relu(hidden).reshape(x.shape[0], -1)
+
+
+def quantile_edges(numeric_z, n_bins: int, max_rows: int = 200_000, seed: int = 0):
+    """Bin edges for ``PiecewiseLinearEmbeddings``, shape ``(n_features, n_bins + 1)``.
+
+    Edges are training-row quantiles of each scaled feature. A feature with
+    fewer distinct quantiles than ``n_bins + 1`` repeats its top edge; a
+    repeated edge gives a bin that is always zero. Up to ``max_rows`` rows,
+    drawn without replacement, set the quantiles.
+    """
+    import numpy as np
+
+    values = np.asarray(numeric_z, dtype=np.float64)
+    if values.shape[0] > max_rows:
+        rows = np.random.default_rng(seed).choice(values.shape[0], size=max_rows, replace=False)
+        values = values[rows]
+    levels = np.linspace(0.0, 1.0, n_bins + 1)
+    edges = np.empty((values.shape[1], n_bins + 1), dtype=np.float32)
+    for column in range(values.shape[1]):
+        unique = np.unique(np.quantile(values[:, column], levels))
+        if unique.size < 2:
+            unique = np.array([unique[0] - 0.5, unique[0] + 0.5])
+        edges[column, : unique.size] = unique
+        edges[column, unique.size :] = unique[-1]
+    return jnp.asarray(edges)
+
+
+class PiecewiseLinearEmbeddings(Module):
+    """Piecewise-linear numeric embeddings, version B of ``rtdl_num_embeddings``.
+
+    ``edges`` has shape ``(n_features, n_bins + 1)`` and is fit on training
+    quantiles. It is frozen: the forward pass stops its gradient and the
+    optimizer does not decay it. A value's encoding is its fill fraction of
+    each bin, ``clip((x - left) / width, 0, 1)``, with the first bin open
+    below and the last open above. The embedding is a linear map of ``x``
+    plus a per-feature linear map of that encoding, which starts at zero, so
+    training begins from the plain linear embedding. ``activation=True`` adds
+    a ReLU. Output ``(batch, n_features * d_embedding)``.
+    """
+
+    edges: jax.Array
+    linear_weight: jax.Array
+    linear_bias: jax.Array
+    weight: jax.Array
+    bias: jax.Array
+    d_embedding: int = field(static=True)
+    activation: bool = field(static=True)
+
+    def __init__(self, edges, d_embedding: int, *, key, activation: bool = False):
+        edges = jnp.asarray(edges, dtype=jnp.float32)
+        if edges.ndim != 2 or edges.shape[1] < 2 or d_embedding < 1:
+            raise ShapeError("PiecewiseLinearEmbeddings needs edges (n_features, n_bins + 1) and a positive d_embedding.")
+        n_features, n_bins = edges.shape[0], edges.shape[1] - 1
+        weight_key, bias_key = jax.random.split(key)
+        self.edges = edges
+        self.linear_weight = _rsqrt_uniform(weight_key, (n_features, d_embedding), 1, jnp.float32)
+        self.linear_bias = _rsqrt_uniform(bias_key, (n_features, d_embedding), 1, jnp.float32)
+        self.weight = jnp.zeros((n_features, n_bins, d_embedding), dtype=jnp.float32)
+        self.bias = jnp.zeros((n_features, d_embedding), dtype=jnp.float32)
+        self.d_embedding = d_embedding
+        self.activation = bool(activation)
+
+    def encode(self, x):
+        edges = jax.lax.stop_gradient(self.edges)
+        left = edges[:, :-1]
+        width = edges[:, 1:] - left
+        empty = width <= 0
+        fraction = (x[..., None] - left) / jnp.where(empty, 1.0, width)
+        n_bins = left.shape[1]
+        lower = jnp.where(jnp.arange(n_bins) == 0, -jnp.inf, 0.0)
+        upper = jnp.where(jnp.arange(n_bins) == n_bins - 1, jnp.inf, 1.0)
+        fraction = jnp.clip(fraction, lower, upper)
+        return jnp.where(empty, 0.0, fraction)
+
+    def __call__(self, x):
+        if x.ndim != 2 or x.shape[1] != self.edges.shape[0]:
+            raise ShapeError(
+                f"PiecewiseLinearEmbeddings expected (batch, {self.edges.shape[0]}); received {x.shape}."
+            )
+        linear = self.linear_bias + self.linear_weight * x[..., None]
+        piecewise = jnp.einsum("bfn,fnd->bfd", self.encode(x), self.weight) + self.bias
+        hidden = linear + piecewise
+        if self.activation:
+            hidden = jax.nn.relu(hidden)
+        return hidden.reshape(x.shape[0], -1)
+
+
+# Leaves the optimizer must not move: fitted bin edges.
+FROZEN_FIELDS = frozenset({"edges"})
+
+
 class CategoricalEmbeddings(Module):
     """One learned table per named categorical column, including the unknown row.
 
@@ -408,6 +538,7 @@ class CategoricalEmbeddings(Module):
     """
 
     tables: tuple[jax.Array, ...]
+    hidden: tuple[tuple[jax.Array, jax.Array], ...] | None = None
 
     def __call__(self, indices):
         if indices.ndim != 2 or indices.shape[1] != len(self.tables):
@@ -416,7 +547,14 @@ class CategoricalEmbeddings(Module):
             )
         pieces = []
         for column, table in enumerate(self.tables):
-            pieces.append(table[indices[:, column]])
+            vector = table[indices[:, column]]
+            if self.hidden is not None:
+                # A per-column hidden layer: the category vector passes through
+                # its own dense map and ReLU, so the column's contribution is not
+                # a fixed linear read of the one-hot. The residual keeps the lookup.
+                weight, bias = self.hidden[column]
+                vector = vector + jax.nn.relu(vector @ weight + bias)
+            pieces.append(vector)
         return jnp.concatenate(pieces, axis=-1)
 
 

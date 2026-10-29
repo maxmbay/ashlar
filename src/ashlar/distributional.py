@@ -101,8 +101,14 @@ def initial_weight_scale(head: str, d_model: int) -> float:
 
 
 def initial_bias(head: str, horizon: int) -> jax.Array:
-    """Output bias. Mixture means start on a grid; every other head starts at 0."""
+    """Output bias. Mixture means start on a grid, and quantile levels at the
+    standard normal's 0.1, 0.5, and 0.9; every other head starts at 0."""
     width = output_width(head, horizon)
+    if head == "quantile":
+        z = 1.2815515655446004
+        gap = math.log(math.expm1(z))
+        raw = jnp.tile(jnp.asarray([-z, gap, gap], dtype=jnp.float32), int(horizon))
+        return raw
     if head != "mixture":
         return jnp.zeros((width,), dtype=jnp.float32)
     means = jnp.linspace(-2.0, 2.0, MIXTURE_COMPONENTS, dtype=jnp.float32)
@@ -224,6 +230,23 @@ def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
         squared = jnp.square(expected - target)
         return jnp.mean(-chosen + jnp.asarray(HISTOGRAM_LOCATION_WEIGHT, dtype=target.dtype) * squared)
     raise AshlarError("the squared-error head does not use the distributional loss.")
+
+
+def row_loss(head: str, decoded, target: jax.Array) -> jax.Array:
+    """Per-step training loss, same shape as ``target``. Its mean is ``distributional_loss``."""
+    check_output_head(head)
+    target = jnp.asarray(target)
+    if head == "quantile":
+        levels = jnp.asarray(QUANTILE_LEVELS, dtype=target.dtype)
+        gap = target[..., None] - decoded
+        return jnp.mean(jnp.maximum(levels * gap, (levels - 1.0) * gap), axis=-1)
+    if head == "histogram":
+        log_probability = jax.nn.log_softmax(decoded, axis=-1)
+        chosen = jnp.take_along_axis(log_probability, histogram_bin(target)[..., None], axis=-1)[..., 0]
+        expected = jax.nn.softmax(decoded, axis=-1) @ histogram_centers(decoded.dtype)
+        squared = jnp.square(expected - target)
+        return -chosen + jnp.asarray(HISTOGRAM_LOCATION_WEIGHT, dtype=target.dtype) * squared
+    return -log_density(head, decoded, target)
 
 
 def log_density(head: str, decoded, value: jax.Array) -> jax.Array:

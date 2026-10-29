@@ -202,3 +202,35 @@ class NormalHead(_EnsembleHead):
         raw = self.output(hidden)
         batch = raw.shape[0]
         return raw.reshape(batch, self.k, self.n_events, 2)
+
+
+class DistributionHead(_EnsembleHead):
+    """Flat parameters of one ``ashlar.distributional`` head per member. Output ``(batch, member, width)``.
+
+    ``kind`` is ``gaussian``, ``mixture``, ``flow``, ``histogram``, or
+    ``quantile``. One event only. The initialization matches the forecasters:
+    a small projection for the mixture and the flow, mixture means on a grid.
+    """
+
+    kind: str = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, kind="gaussian", **kwargs):
+        from ashlar.distributional import initial_bias, initial_weight_scale, output_width
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"distribution head received unknown arguments {sorted(kwargs)}.")
+        if n_events != 1:
+            raise ShapeError("a distributional table head models one target column.")
+        width = output_width(kind, 1)
+        scale = initial_weight_scale(kind, d_in)
+        weight = scale * jax.random.normal(key, (k, d_in, width), dtype=jnp.float32)
+        bias = jnp.broadcast_to(initial_bias(kind, 1), (k, width))
+        self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
+        self.k = k
+        self.kind = kind
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
