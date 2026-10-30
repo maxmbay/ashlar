@@ -34,7 +34,6 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import lightgbm
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -42,14 +41,13 @@ from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from benchmark_readme import (  # noqa: E402
+from benchmark_readme import (
     DATA_DIR,
     RAW,
     SOURCES,
     _align_categories,
     _crps,
     _fit_gbt,
-    _gbt_frame,
     _path,
     _sample,
     _strings,
@@ -59,7 +57,7 @@ from benchmark_readme import (  # noqa: E402
     taxis,
 )
 
-from ashlar import ASRRegressor, tabm_piecewise  # noqa: E402
+from ashlar import ASRRegressor, tabm_piecewise
 
 SEEDS = (0, 1, 2)
 N_DRAWS = 400
