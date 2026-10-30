@@ -1383,6 +1383,69 @@ class ASRModel(BaseEstimator):
         draws = self.sample(X, n=n_samples, seed=seed)
         return np.quantile(draws, levels, axis=0).T
 
+    def predict_uncertainty(self, X, n_samples: int = 200, seed: int = 0) -> dict:
+        """Split each row's uncertainty into what the members agree on and what they do not.
+
+        An ensemble backbone (``backbone="tabm"``, or any backbone with
+        ``k > 1``) trains several members together; where they disagree, the
+        data did not pin the answer down. A single-member backbone has no
+        disagreement to report, so its ``epistemic`` is zero.
+
+        For a number, each value is a standard deviation on the scale of
+        ``y``, shape ``(rows,)``:
+
+        - ``epistemic``: spread of the members' point predictions.
+        - ``aleatoric``: root mean of each member's predictive variance, read
+          from ``n_samples`` draws. A distribution task only; the point
+          tasks have no noise model, so it is absent.
+        - ``total``: the two combined, by the law of total variance.
+
+        For classes (``classification`` and ``ordinal``), each value is an
+        entropy in nats: ``total`` is the entropy of the mean probabilities,
+        ``aleatoric`` the mean entropy of each member, and ``epistemic`` their
+        difference, the mutual information between the label and the member.
+        """
+        self._require_fitted()
+        raw = jnp.asarray(self.predict_raw(X))
+        if self.task in _LABELED_TASKS:
+            probabilities = np.asarray(jax.nn.softmax(raw, axis=-1), dtype=np.float64)
+            total = _entropy(probabilities.mean(axis=1))
+            aleatoric = _entropy(probabilities).mean(axis=1)
+            return {"epistemic": np.maximum(total - aleatoric, 0.0), "aleatoric": aleatoric, "total": total}
+        if self.task == "regression":
+            if raw.ndim != 3 or raw.shape[-1] != 1:
+                raise AshlarError("predict_uncertainty takes a one-column regression target.")
+            members = np.asarray(raw[..., 0], dtype=np.float64)
+        elif self.task in DISTRIBUTION_TASKS:
+            members = np.asarray(_member_points(self.task, raw), dtype=np.float64)
+        else:
+            raise AshlarError(
+                "predict_uncertainty is for regression, distribution, classification, and ordinal tasks."
+            )
+        mean, std = self._target_affine()
+        epistemic = members.std(axis=1) * std
+        if self.task == "regression" or self.task == "quantile":
+            return {"epistemic": epistemic, "total": epistemic}
+        aleatoric = np.sqrt(self._member_variance(raw, int(n_samples), int(seed))) * std
+        return {
+            "epistemic": epistemic,
+            "aleatoric": aleatoric,
+            "total": np.sqrt(np.square(epistemic) + np.square(aleatoric)),
+        }
+
+    def _member_variance(self, raw, n_samples: int, seed: int) -> np.ndarray:
+        """Mean over members of each member's predictive variance, standardized, ``(rows,)``."""
+        if n_samples < 2:
+            raise AshlarError("predict_uncertainty needs at least 2 samples per member.")
+        key = jax.random.PRNGKey(seed)
+        pieces = []
+        for start in range(0, raw.shape[0], 4096):
+            key, draw_key = jax.random.split(key)
+            decoded, batch, members = _decode_members(self.task, raw[start : start + 4096])
+            draws = np.asarray(sample_values(self.task, decoded, draw_key, n_samples), dtype=np.float64)
+            pieces.append(draws.reshape(n_samples, batch, members).var(axis=0, ddof=1).mean(axis=1))
+        return np.concatenate(pieces)
+
     def predict_dist(self, X, policy: str | None = None):
         raw = self._raw_from_frame(X)
         return _dist_from_raw(self.task, self._policy() if policy is None else policy, raw, self.dist_fn)
@@ -1767,6 +1830,11 @@ def _sklearn_stratified(indices, labels, validation_size, random_state, train_te
 
 def _take_rows(names, columns, indices):
     return {name: np.asarray(values)[indices] for name, values in zip(names, columns, strict=True)}
+
+
+def _entropy(probabilities):
+    clipped = np.clip(probabilities, 1e-12, 1.0)
+    return -np.sum(probabilities * np.log(clipped), axis=-1)
 
 
 def _regression_target(y, n_events):
