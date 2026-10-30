@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ashlar import DEFAULT_RECIPE, tabular
+from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.errors import AshlarError
 from ashlar.priors import (
     BART_DEPTH_COEF,
@@ -18,9 +18,9 @@ from ashlar.priors import (
     GRADIENT_LEARNING_RATE,
     VARIATIONAL_BINS,
     VARIATIONAL_LEARNING_RATE,
-    BartPriorEnsemble,
-    GradientSparseNet,
-    VariationalPairwise,
+    ASRBartPriorEnsemble,
+    ASRGradientSparseNet,
+    ASRVariationalPairwise,
     _category_indices,
     _category_vocabs,
     _embedded_features,
@@ -36,7 +36,7 @@ from ashlar.priors import (
 
 
 def test_residual_default_stays_a_regressor():
-    model = tabular()
+    model = ASRRegressor()
     assert model.task == "regression"
     assert model.standardize_target is True
     assert model.backbone == "residual_mlp"
@@ -59,9 +59,9 @@ def test_residual_default_stays_a_regressor():
 def test_priors_learn_a_conjunction():
     train_x, train_y = _conjunction(900, 0)
     fresh_x, fresh_y = _conjunction(300, 1)
-    bart = BartPriorEnsemble(random_state=0, max_epochs=35, patience=12).fit(train_x, train_y, "classification")
-    variational = VariationalPairwise(random_state=0, max_epochs=25, patience=12).fit(train_x, train_y, "classification")
-    gradient = GradientSparseNet(random_state=0, max_epochs=25, patience=12).fit(train_x, train_y, "classification")
+    bart = ASRBartPriorEnsemble(random_state=0, max_epochs=35, patience=12).fit(train_x, train_y, "classification")
+    variational = ASRVariationalPairwise(random_state=0, max_epochs=25, patience=12).fit(train_x, train_y, "classification")
+    gradient = ASRGradientSparseNet(random_state=0, max_epochs=25, patience=12).fit(train_x, train_y, "classification")
     assert float(np.mean(bart.predict(fresh_x) == fresh_y)) > 0.9
     assert float(np.mean(variational.predict(fresh_x) == fresh_y)) > 0.9
     assert float(np.mean(gradient.predict(fresh_x) == fresh_y)) > 0.9
@@ -69,31 +69,31 @@ def test_priors_learn_a_conjunction():
     assert bart.gate_margin_ < 0.35
 
     labels = np.where(train_y == 1, "UP", "DOWN")
-    named = BartPriorEnsemble(random_state=0, max_epochs=8, patience=4).fit(train_x, labels, "classification")
+    named = ASRBartPriorEnsemble(random_state=0, max_epochs=8, patience=4).fit(train_x, labels, "classification")
     assert set(np.unique(named.predict(fresh_x[:20]))).issubset({"DOWN", "UP"})
 
 
 def test_gradient_penalty_handles_more_than_two_classes():
     rows, labels = _three_class(180, 0)
-    model = GradientSparseNet(random_state=0, max_epochs=20, patience=8).fit(rows, labels, "classification")
+    model = ASRGradientSparseNet(random_state=0, max_epochs=20, patience=8).fit(rows, labels, "classification")
     fresh_rows, fresh_labels = _three_class(90, 1)
     assert model.n_classes_ == 3
     assert model.model_.w3.shape == (128, 3)
     assert float(np.mean(model.predict(fresh_rows) == fresh_labels)) > 0.9
 
     names = np.array(["red", "green", "blue"])[labels]
-    named = GradientSparseNet(random_state=0, max_epochs=12, patience=6).fit(rows, names, "classification")
+    named = ASRGradientSparseNet(random_state=0, max_epochs=12, patience=6).fit(rows, names, "classification")
     assert set(np.unique(named.predict(fresh_rows[:20]))).issubset({"red", "green", "blue"})
 
     binary_rows, binary_labels = _conjunction(80, 0)
-    binary = GradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(binary_rows, binary_labels, "classification")
+    binary = ASRGradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(binary_rows, binary_labels, "classification")
     assert binary.n_classes_ == 2
     assert binary.model_.w3.shape == (128, 1)
     assert binary.model_.embeddings == ()
     assert binary.categorical_ is False
 
     try:
-        GradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(rows[:10], np.zeros(10), "classification")
+        ASRGradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(rows[:10], np.zeros(10), "classification")
     except AshlarError:
         pass
     else:
@@ -184,7 +184,7 @@ def test_gradient_penalty_learns_category_embeddings():
 
     train, train_y = _color_frame(360, 0)
     fresh, fresh_y = _color_frame(120, 1)
-    model = GradientSparseNet(random_state=0, max_epochs=30, patience=12).fit(train, train_y, "classification")
+    model = ASRGradientSparseNet(random_state=0, max_epochs=30, patience=12).fit(train, train_y, "classification")
     assert model.categorical_ is True
     assert model.model_.embeddings[0].shape == (3, 8)
     assert model.model_.w1.shape == (1 + 8, 128)
@@ -197,13 +197,13 @@ def test_gradient_penalty_learns_category_embeddings():
 
     only_color, only_y = _color_frame(80, 2)
     bare = {key: value for key, value in only_color.items() if key == "color"}, only_y
-    smoke = GradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(bare[0], bare[1], "classification")
+    smoke = ASRGradientSparseNet(random_state=0, max_epochs=1, patience=1).fit(bare[0], bare[1], "classification")
     assert smoke.model_.w1.shape == (8, 128)
     assert smoke.mean_.shape == (0,)
     assert smoke.predict({"color": np.array(["green"], dtype=object)}).shape == (1,)
 
     groups, group_y = _three_colors(90, 3)
-    grouped = GradientSparseNet(random_state=0, max_epochs=20, patience=8).fit(groups, group_y, "classification")
+    grouped = ASRGradientSparseNet(random_state=0, max_epochs=20, patience=8).fit(groups, group_y, "classification")
     fresh_groups, fresh_group_y = _three_colors(40, 4)
     assert grouped.n_classes_ == 3
     assert grouped.model_.w3.shape == (128, 3)

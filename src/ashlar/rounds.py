@@ -17,6 +17,7 @@ from equinox import Module
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.model_selection import train_test_split
 
+from ashlar._compat import renamed
 from ashlar.errors import AshlarError
 from ashlar.estimator import _stratified_indices
 
@@ -162,7 +163,7 @@ def _histogram_estimator(task: str, rounds: int, random_state: int):
     return HistGradientBoostingClassifier(loss="log_loss", **kwargs)
 
 
-class HistogramBooster:
+class ASRHistogramBooster:
     """Leaf-wise histogram trees. Ordinal readout is the expected label."""
 
     def __init__(self, random_state: int = 0, verbose: bool = False, max_iter: int = HISTOGRAM_MAX_ITER, patience: int = HISTOGRAM_PATIENCE):
@@ -333,7 +334,7 @@ def _leaf_predict(scaled: np.ndarray, feature: int, threshold: float, beta_left:
     return prediction
 
 
-class LinearLeafBooster:
+class ASRLinearLeafBooster:
     """Boosted depth-1 trees whose leaves are ridge linear models."""
 
     def __init__(self, random_state: int = 0, verbose: bool = False, max_stages: int = LEAF_MAX_STAGES, patience: int = LEAF_PATIENCE):
@@ -584,7 +585,7 @@ def _average(models: list[Encoder]) -> Encoder:
     return jax.tree.unflatten(treedef, averaged)
 
 
-class LearnedNeighborhood:
+class ASRLearnedNeighborhood:
     """Embed the row, then predict from a softmax over training neighbors."""
 
     def __init__(
@@ -783,3 +784,14 @@ class LearnedNeighborhood:
             target = ((numeric - target_mean) / target_std).astype(np.float32)
             return target_mean, target_std, target
         return 0.0, 1.0, _codes(classes, labels)
+
+
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "HistogramBooster": "ASRHistogramBooster",
+        "LinearLeafBooster": "ASRLinearLeafBooster",
+        "LearnedNeighborhood": "ASRLearnedNeighborhood",
+    },
+)

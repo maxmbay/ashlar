@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, r2_score
 
-from ashlar.node import ObliviousEnsemble
+from ashlar.node import ASRObliviousEnsemble
 from ashlar.recipes import DEFAULT_RECIPE
 
 OUT_PATH = Path("/tmp/ashlar-bench/node-results.json")
@@ -102,7 +102,7 @@ def _fit(name: str, payload: dict) -> None:
     parts, task = _dataset(name)
     print(f"start {name} task {task}", flush=True)
     started = time.perf_counter()
-    model = ObliviousEnsemble(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
+    model = ASRObliviousEnsemble(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
     if name == "wine_expected" and (model.n_fit_ != 3637 or model.n_val_ != 910):
         raise SystemExit(f"wine internal split was {model.n_fit_}/{model.n_val_}, expected 3637/910")
     prediction = model.predict(parts["x_test"]) if task == "classification" else model.predict_score(parts["x_test"])

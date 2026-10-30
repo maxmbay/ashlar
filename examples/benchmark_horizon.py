@@ -1,4 +1,4 @@
-"""Rescore ``tabular()`` after regression labels are z-scored by default.
+"""Rescore ``ASRRegressor()`` after regression labels are z-scored by default.
 
 Same coverage splits and the cached houses split. Does not refit
 classification, ordinal, XGBoost, or TabM. Writes
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 
 import benchmark_coverage as coverage
-from ashlar import tabular
+from ashlar import ASRRegressor
 
 OUT_PATH = Path("/tmp/ashlar-bench/horizon-results.json")
 HOUSES_SPLIT = Path("/tmp/ashlar-bench/split-houses.csv")
@@ -60,11 +60,11 @@ def _score_frame(
         "y_val": coverage._label_array(val[target].to_numpy()),
         "y_test": coverage._label_array(test[target].to_numpy()),
     }
-    model = tabular(standardize_target=standardize_target)
+    model = ASRRegressor(standardize_target=standardize_target)
     if model.standardize_target is not standardize_target:
-        raise SystemExit("tabular() did not keep the requested label scale")
+        raise SystemExit("ASRRegressor() did not keep the requested label scale")
     scores = coverage._timed(lambda: coverage._ashlar_regression(model, parts))
-    scores["config"] = "tabular()" if standardize_target else 'tabular(standardize_target=False)'
+    scores["config"] = "ASRRegressor()" if standardize_target else 'ASRRegressor(standardize_target=False)'
     fitted = model if model.standardize_target else None
     if fitted is not None and getattr(fitted, "target_std_", None) is not None:
         scores["target_mean"] = float(fitted.target_mean_)

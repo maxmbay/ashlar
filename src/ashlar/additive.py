@@ -25,6 +25,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.model_selection import train_test_split
 
+from ashlar._compat import renamed
 from ashlar.errors import AshlarError
 from ashlar.estimator import _stratified_indices
 
@@ -516,7 +517,7 @@ def _update_embedding(ids: np.ndarray, table: np.ndarray, design_numeric: np.nda
     return table - EMBED_STEP_SIZE * gradient
 
 
-class AdditiveModel:
+class ASRAdditive:
     """Main effects, a width-8 embedding per categorical, and at most ten pairs."""
 
     def __init__(self, random_state: int = 0, verbose: bool = False):
@@ -723,7 +724,7 @@ def _mode(labels: np.ndarray):
     return values[int(np.argmax(counts))]
 
 
-class GatedAdditive:
+class ASRGatedAdditive:
     """Two additive specialists behind a gate learned from the training labels or one feature."""
 
     def __init__(self, random_state: int = 0, verbose: bool = False):
@@ -1015,7 +1016,7 @@ def _reindex_proba(probabilities, source_classes, target_classes) -> np.ndarray:
     return out
 
 
-class DiagonalNeighborhood:
+class ASRDiagonalNeighborhood:
     """Nadaraya–Watson or a class vote in a learned diagonal metric."""
 
     def __init__(self, random_state: int = 0, verbose: bool = False):
@@ -1171,3 +1172,14 @@ def _weights(distance2: np.ndarray, bandwidth: float) -> np.ndarray:
 
 def _weighted_sum(distance2: np.ndarray, values: np.ndarray, bandwidth: float) -> np.ndarray:
     return _weights(distance2, bandwidth) @ values
+
+
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "AdditiveModel": "ASRAdditive",
+        "GatedAdditive": "ASRGatedAdditive",
+        "DiagonalNeighborhood": "ASRDiagonalNeighborhood",
+    },
+)

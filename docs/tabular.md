@@ -1,6 +1,6 @@
 # Fitting a table
 
-[Ashlar](../README.md) trains a residual MLP on a table. `TabularEstimator()` and `ashlar.tabular()` are the same default path. The pictures on this page use shorter epoch budgets than these defaults.
+[Ashlar](../README.md) trains a residual MLP on a table. `ASRRegressor()` is the default path. Every model is `ASR` plus what it does (`ASRClassifier`, `ASROrdinalClassifier`, `ASROutcomeTree`), each `ASRModel` with its task filled in. The pictures on this page use shorter epoch budgets than these defaults.
 
 ![A row becomes a prediction.](images/tabular-path.png)
 
@@ -45,10 +45,10 @@ model = tabm_piecewise(task="mixture").fit(X, y)         # a distribution
 ## Tasks
 
 ```python
-from ashlar import classifier, ordinal
+from ashlar import ASRClassifier, ASROrdinalClassifier
 
-classifier().fit(X, y)
-ordinal().fit(X, y)
+ASRClassifier().fit(X, y)
+ASROrdinalClassifier().fit(X, y)
 ```
 
 scikit-learn tags a classification or ordinal model as a classifier and anything else as a regressor, so `cross_val_score` stratifies folds and the `roc_auc` scorer reads `predict_proba`. `score` is accuracy for a classifier and R² otherwise.
@@ -61,14 +61,14 @@ An ordinal label has to be a real number. The sorted values are the class order.
 
 `predict_score` is the expected label: class probabilities times the integer class values. The mean for each label sits on that integer.
 
-`outcome_tree(spec)` fits a nested outcome: one shared backbone and one branch softmax per internal node of a tree of labels, such as `{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}`. A leaf's probability is the product of the branch probabilities on its path. A label may stop at an internal node, and then only the splits above it train. `predict_proba` returns the leaves, `predict_node_proba` every node, and `predict_conditional(X, node)` the split at one node. [`examples/benchmark_outcome_tree.py`](../examples/benchmark_outcome_tree.py) runs it on IPL ball-by-ball data.
+`ASROutcomeTree(spec)` fits a nested outcome: one shared backbone and one branch softmax per internal node of a tree of labels, such as `{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}`. A leaf's probability is the product of the branch probabilities on its path. A label may stop at an internal node, and then only the splits above it train. `predict_proba` returns the leaves, `predict_node_proba` every node, and `predict_conditional(X, node)` the split at one node. [`examples/benchmark_outcome_tree.py`](../examples/benchmark_outcome_tree.py) runs it on IPL ball-by-ball data.
 
 `task="normal"` fits a diagonal normal. `predict_dist` returns the distribution. The default regression `predict` is the mean of the member outputs.
 
 ## Distributions
 
 ```python
-model = TabularEstimator(task="mixture").fit(X, y)
+model = ASRRegressor(task="mixture").fit(X, y)
 
 model.predict(X_new)                        # the mean of the predictive distribution
 model.predict_quantiles(X_new, [0.1, 0.9])  # rows by levels, on the scale of y

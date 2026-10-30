@@ -1,13 +1,13 @@
 # Forecast heads
 
-[Ashlar](../README.md) forecasts one series at a time. `TimeSeriesForecaster` reads a window of `lookback` steps and emits the next `horizon` values. The default lookback is 48 and the default horizon is 12. The default head is `mse`.
+[Ashlar](../README.md) forecasts one series at a time. `ASRForecaster` reads a window of `lookback` steps and emits the next `horizon` values. The default lookback is 48 and the default horizon is 12. The default head is `mse`.
 
 `fit(series)` holds out the last 10% of that series, on the clock, and uses it only to choose the epoch. It then starts again from the same initialization and trains that many epochs on every window in the series you passed. `predict` reads the last `lookback` observations and returns one point per horizon step, on the original scale.
 
 ```python
-from ashlar import TimeSeriesForecaster
+from ashlar import ASRForecaster
 
-model = TimeSeriesForecaster(lookback=48, horizon=1, head="quantile")
+model = ASRForecaster(lookback=48, horizon=1, head="quantile")
 model.fit(series)
 model.predict(history)
 ```
@@ -60,4 +60,4 @@ The histogram figure is one held-out step of a synthetic cycle. The clay bar is 
 
 ## A longer prefix
 
-`FullHistoryForecaster` uses the same six heads. The last `lookback` observations are one token each. Every older observation sits in one non-overlapping patch of that length. `predict(series)` forecasts the horizon after the last observation. Pass `origins` to forecast at earlier cut points. `quantiles`, `log_prob`, `gaussian`, `sample`, and `bin_probabilities` take the same `origins` argument.
+`ASRHistoryForecaster` uses the same six heads. The last `lookback` observations are one token each. Every older observation sits in one non-overlapping patch of that length. `predict(series)` forecasts the horizon after the last observation. Pass `origins` to forecast at earlier cut points. `quantiles`, `log_prob`, `gaussian`, `sample`, and `bin_probabilities` take the same `origins` argument.

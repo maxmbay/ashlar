@@ -1,6 +1,6 @@
 """Ablations behind the new defaults: which change buys what, one at a time.
 
-Each config is a dict of ``TabularEstimator`` arguments. A run is one
+Each config is a dict of ``ASRModel`` arguments. A run is one
 (dataset, config, seed) triple, appended as one JSON line, so runs can go side
 by side and a finished run is skipped. Same 80/20 splits as
 ``benchmark_readme.py``.
@@ -25,7 +25,7 @@ from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ashlar import TabularEstimator
+from ashlar import ASRModel
 from benchmark_readme import adult, california, diamonds
 
 WIDE = {"n_blocks": 3, "d_block": 256, "dropout": 0.1}
@@ -118,7 +118,7 @@ def run(data: str, config: str, seed: int, out: Path, extra: dict | None = None)
     if task == "classification":
         params.update(task="classification", standardize_target=False, prediction_policy="mean_probabilities")
     start = time.time()
-    model = TabularEstimator(random_state=seed, **params).fit(x_train, y_train)
+    model = ASRModel(random_state=seed, **params).fit(x_train, y_train)
     seconds = time.time() - start
     record = {"data": data, "config": config, "seed": seed, "seconds": round(seconds, 1),
               "epochs": len(model.history_["train_loss"])}

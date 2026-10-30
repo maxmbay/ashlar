@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ashlar.distributional import HISTOGRAM_BINS, histogram_bin
-from ashlar.forecast import TimeSeriesForecaster, _forecast_windows
+from ashlar.forecast import ASRForecaster, _forecast_windows
 
 LOOKBACK = 24
 HORIZON = 1
@@ -29,9 +29,9 @@ TEMPERATURES = Path("/tmp/ashlar-dist/daily-min-temperatures.csv")
 _NORMAL_80 = 1.2815515655446004
 
 
-def _fit(series: np.ndarray, head: str) -> TimeSeriesForecaster:
+def _fit(series: np.ndarray, head: str) -> ASRForecaster:
     cut = int(len(series) * 0.8)
-    return TimeSeriesForecaster(
+    return ASRForecaster(
         lookback=LOOKBACK,
         horizon=HORIZON,
         head=head,

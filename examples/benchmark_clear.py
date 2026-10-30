@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, r2_score
 
-from ashlar.additive import AdditiveModel, DiagonalNeighborhood, GatedAdditive
+from ashlar.additive import ASRAdditive, ASRDiagonalNeighborhood, ASRGatedAdditive
 from ashlar.recipes import DEFAULT_RECIPE
 
 OUT_PATH = Path("/tmp/ashlar-bench/clear-benchmark-results.json")
@@ -149,11 +149,11 @@ def _fit_stage(stage: str, name: str, payload: dict) -> None:
     print(f"start {stage} {name} task {task}", flush=True)
     started = time.perf_counter()
     if stage == "additive":
-        model = AdditiveModel(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
+        model = ASRAdditive(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
     elif stage == "gate":
-        model = GatedAdditive(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
+        model = ASRGatedAdditive(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
     else:
-        model = DiagonalNeighborhood(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
+        model = ASRDiagonalNeighborhood(random_state=0, verbose=True).fit(parts["x_train"], parts["y_train"], task)
     if stage == "additive" and name == "wine_expected" and (model.n_fit_ != 3637 or model.n_val_ != 910):
         raise SystemExit(f"wine internal split was {model.n_fit_}/{model.n_val_}, expected 3637/910")
     row = _record(model, parts, task, name, started)

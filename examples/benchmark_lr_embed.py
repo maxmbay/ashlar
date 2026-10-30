@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 import benchmark
-from ashlar import tabular
+from ashlar import ASRRegressor
 
 OUT_PATH = Path("/tmp/ashlar-bench/lr-embed-results.json")
 BASELINE_R2 = 0.7615
@@ -46,7 +46,7 @@ def _houses():
 
 
 def _fit_score(train, val, test, target, name, **overrides):
-    model = tabular(**overrides)
+    model = ASRRegressor(**overrides)
     started = time.perf_counter()
     model.fit(train.drop(columns=[target]), train[target].to_numpy())
     paper_val = benchmark.regression_scores(val[target].to_numpy(), model.predict(val.drop(columns=[target])))

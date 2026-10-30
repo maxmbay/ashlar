@@ -1,6 +1,6 @@
 """Default classifier: labels, probabilities, search, and a learned category.
 
-``ashlar.classifier()`` is the classification recipe. ``TabularEstimator(task="classification")``
+``ashlar.ASRClassifier()`` is the classification recipe. ``ASRModel(task="classification")``
 is the same task flag. ``predict`` returns labels. ``predict_proba`` returns one
 column per class. ``fit(..., search=True)`` ranks trials by weighted accuracy,
 not by squared error. Omitting ``search`` does not score that metric.
@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from ashlar import __version__, classifier
+from ashlar import __version__, ASRClassifier
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
     city = rng.choice(["ny", "sf", "la"], size=n).astype(object)
     score = np.nan_to_num(rooms, nan=0.0) + np.where(city == "sf", 0.6, 0.0)
     labels = np.where(score > 0.4, "high", np.where(score < -0.4, "low", "mid"))
-    model = classifier(max_epochs=6, patience=3, batch_size=16, learning_rate=1e-2, random_state=0)
+    model = ASRClassifier(max_epochs=6, patience=3, batch_size=16, learning_rate=1e-2, random_state=0)
     started = time.perf_counter()
     model.fit({"rooms": rooms, "city": city}, labels)
     fit_seconds = time.perf_counter() - started
@@ -37,14 +37,14 @@ def main():
 
     binary_x = rng.normal(size=(36, 2)).astype(np.float32)
     binary_y = (binary_x[:, 0] > 0).astype(int)
-    searched = classifier(max_epochs=3, patience=2, batch_size=12, learning_rate=1e-3, random_state=0)
+    searched = ASRClassifier(max_epochs=3, patience=2, batch_size=12, learning_rate=1e-3, random_state=0)
     search_started = time.perf_counter()
     searched.fit(binary_x, binary_y, search=True, sample_weight=np.linspace(0.5, 1.5, len(binary_y)))
     search_seconds = time.perf_counter() - search_started
     trial_metrics = [trial["metric"] for trial in searched.search_["trials"]]
     trial_scores = [trial["val_score"] for trial in searched.search_["trials"]]
 
-    embedded = classifier(
+    embedded = ASRClassifier(
         backbone="transformer",
         backbone_kwargs={"n_blocks": 1, "d_block": 8, "n_heads": 2, "dropout": 0.0},
         categorical_embeddings=["city"],

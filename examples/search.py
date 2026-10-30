@@ -31,7 +31,7 @@ import time
 import numpy as np
 
 from ashlar import __version__
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 from ashlar.search import DEFAULT_SEARCH
 
 
@@ -39,7 +39,7 @@ def main():
     rng = np.random.default_rng(4)
     x = rng.normal(size=(32, 2)).astype(np.float32)
     y = (x[:, 0] - 0.5 * x[:, 1]).astype(np.float32)
-    model = TabularEstimator(max_epochs=3, patience=2, batch_size=16, learning_rate=1e-3, random_state=0)
+    model = ASRModel(max_epochs=3, patience=2, batch_size=16, learning_rate=1e-3, random_state=0)
     started = time.perf_counter()
     model.fit(x, y, search=True)
     fit_seconds = time.perf_counter() - started

@@ -17,6 +17,7 @@ import optax
 from equinox import Module
 from sklearn.model_selection import train_test_split
 
+from ashlar._compat import renamed
 from ashlar.errors import AshlarError
 from ashlar.estimator import _stratified_indices
 
@@ -234,7 +235,7 @@ def _average(models: list[ObliviousLayer]) -> ObliviousLayer:
     return jax.tree.unflatten(treedef, averaged)
 
 
-class ObliviousEnsemble:
+class ASRObliviousEnsemble:
     """End-to-end differentiable depth-6 oblivious ensemble for one tabular task."""
 
     def __init__(
@@ -410,3 +411,12 @@ def _class_index(classes: np.ndarray, labels: np.ndarray) -> np.ndarray:
         key = value.item() if isinstance(value, np.generic) else value
         coded.append(mapping[key])
     return np.asarray(coded, dtype=np.int32)
+
+
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "ObliviousEnsemble": "ASRObliviousEnsemble",
+    },
+)

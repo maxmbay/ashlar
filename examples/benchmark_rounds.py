@@ -16,7 +16,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, r2_score
 
 from ashlar.recipes import DEFAULT_RECIPE
-from ashlar.rounds import HistogramBooster, LearnedNeighborhood, LinearLeafBooster
+from ashlar.rounds import ASRHistogramBooster, ASRLearnedNeighborhood, ASRLinearLeafBooster
 
 OUT_PATH = Path("/tmp/ashlar-bench/rounds-results.json")
 WINE_PATH = Path("/tmp/ashlar-bench/extra-regression-splits/wine_quality.npz")
@@ -32,9 +32,9 @@ CUTS = {
 }
 ORDER = ("wine_expected", "wine_regression", "electricity", "eye_movements", "california")
 MODELS = (
-    ("histogram", HistogramBooster),
-    ("linear_leaf", LinearLeafBooster),
-    ("learned_neighborhood", LearnedNeighborhood),
+    ("histogram", ASRHistogramBooster),
+    ("linear_leaf", ASRLinearLeafBooster),
+    ("learned_neighborhood", ASRLearnedNeighborhood),
 )
 
 

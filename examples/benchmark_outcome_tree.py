@@ -22,8 +22,8 @@ Models:
 * ``lgbm_flat``: one LightGBM multiclass over the 12 leaves.
 * ``lgbm_nodes``: one LightGBM per internal node, on the rows that reach it;
   a leaf is the product of its branch probabilities.
-* ``ashlar_flat``: ``classifier()`` over the 12 leaves.
-* ``ashlar_tree``: ``outcome_tree(TREE)``: one backbone, one branch softmax per node.
+* ``ashlar_flat``: ``ASRClassifier()`` over the 12 leaves.
+* ``ashlar_tree``: ``ASROutcomeTree(TREE)``: one backbone, one branch softmax per node.
 * ``prior``: training frequencies of each branch, no features.
 
 ``--coarse YEAR`` keeps only depth-one labels (``wicket``, ``extra``,
@@ -378,10 +378,10 @@ def _ashlar_kwargs(train):
 
 
 def fit_ashlar_flat(train, val, test, tree):
-    from ashlar import classifier
+    from ashlar import ASRClassifier
 
     train = _leaf_rows(train, tree)
-    model = classifier(**_ashlar_kwargs(train)).fit(train[FEATURES], train.y.astype(str).to_numpy(), validation=(val[FEATURES], val.y.astype(str).to_numpy()))
+    model = ASRClassifier(**_ashlar_kwargs(train)).fit(train[FEATURES], train.y.astype(str).to_numpy(), validation=(val[FEATURES], val.y.astype(str).to_numpy()))
     proba = model.predict_proba(test[FEATURES])
     full = np.zeros((len(test), len(tree.leaf_names)))
     for column, name in enumerate(model.classes_):
@@ -390,9 +390,9 @@ def fit_ashlar_flat(train, val, test, tree):
 
 
 def fit_ashlar_tree(train, val, test, tree):
-    from ashlar import outcome_tree
+    from ashlar import ASROutcomeTree
 
-    model = outcome_tree(TREE, **_ashlar_kwargs(train)).fit(
+    model = ASROutcomeTree(TREE, **_ashlar_kwargs(train)).fit(
         train[FEATURES], train.y.to_numpy(dtype=object), validation=(val[FEATURES], val.y.to_numpy(dtype=object))
     )
     return model.predict_node_proba(test[FEATURES])

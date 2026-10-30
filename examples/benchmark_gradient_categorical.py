@@ -45,7 +45,7 @@ from ashlar.priors import (
     GRADIENT_MAX_EPOCHS,
     GRADIENT_PATIENCE,
     GRADIENT_WIDTH,
-    GradientSparseNet,
+    ASRGradientSparseNet,
     _embedded_features,
     _embedded_loss,
     _embedded_multi_loss,
@@ -261,7 +261,7 @@ def _parts(spec: dict):
 
 def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
     started = time.perf_counter()
-    model = GradientSparseNet(random_state=0, verbose=True)
+    model = ASRGradientSparseNet(random_state=0, verbose=True)
     model.fit(x_train, y_train, "classification")
     if not model.categorical_:
         raise SystemExit("categorical columns were fit as numeric")
@@ -282,7 +282,7 @@ def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
         "embedding_shapes": [list(np.asarray(table).shape) for table in model.model_.embeddings],
         "wall_seconds": time.perf_counter() - started,
         "config": (
-            "GradientSparseNet(random_state=0): width 128, SiLU, embedding dim 8, "
+            "ASRGradientSparseNet(random_state=0): width 128, SiLU, embedding dim 8, "
             "init scale 0.02, index 0 unknown, known levels 1..V in first-seen order, "
             "z-scored numerics concatenated with embeddings, cross-entropy plus 0.01 "
             "times the mean absolute Jacobian of the logits with respect to that vector, "

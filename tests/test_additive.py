@@ -3,23 +3,23 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ashlar import DEFAULT_RECIPE, tabular
+from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.additive import (
     BASIS_WIDTH,
     EMBED_DIM,
     PAIR_CAP,
     RIDGE_GRID,
     AdditiveBody,
-    AdditiveModel,
-    DiagonalNeighborhood,
-    GatedAdditive,
+    ASRAdditive,
+    ASRDiagonalNeighborhood,
+    ASRGatedAdditive,
     NeighborhoodBody,
     _fit_ridge,
 )
 
 
 def test_residual_default_stays_a_regressor():
-    model = tabular()
+    model = ASRRegressor()
     assert model.task == "regression"
     assert model.standardize_target is True
     assert model.backbone == "residual_mlp"
@@ -81,7 +81,7 @@ def test_pair_selection_recovers_a_product_and_stops_at_the_cap():
     rng = np.random.default_rng(0)
     rows = rng.normal(size=(360, 4))
     target = 3.0 * rows[:, 0] * rows[:, 1] + 0.05 * rng.normal(size=360)
-    model = AdditiveModel(random_state=0).fit(rows, target, "regression")
+    model = ASRAdditive(random_state=0).fit(rows, target, "regression")
     assert len(model.pairs_) <= PAIR_CAP
     assert (0, 1) in model.pairs_
     assert model.predict_score(rows).shape == (360,)
@@ -92,7 +92,7 @@ def test_ordinal_expectation_uses_the_observed_class_values():
     rng = np.random.default_rng(1)
     rows = rng.normal(size=(240, 2))
     labels = np.where(rows[:, 0] + rows[:, 1] > 0, 7.0, 3.0)
-    model = AdditiveModel(random_state=0).fit(rows, labels, "ordinal")
+    model = ASRAdditive(random_state=0).fit(rows, labels, "ordinal")
     score = model.predict_score(rows)
     assert score.min() >= 2.5
     assert score.max() <= 7.5
@@ -110,7 +110,7 @@ def test_categorical_embedding_is_width_eight_and_changes_the_fit():
         }
     )
     labels = (frame["group"] == "a").astype(np.int32)
-    model = AdditiveModel(random_state=0).fit(frame, labels.to_numpy(), "classification")
+    model = ASRAdditive(random_state=0).fit(frame, labels.to_numpy(), "classification")
     assert model.embedding_tables_[0].shape == (3, EMBED_DIM)
     prediction = model.predict(frame)
     assert accuracy(labels.to_numpy(), prediction) > 0.8
@@ -124,10 +124,10 @@ def test_gate_and_neighborhood_fit_a_binary_table():
     rng = np.random.default_rng(3)
     rows = rng.normal(size=(280, 2))
     labels = (rows[:, 0] > 0).astype(np.int32)
-    gate = GatedAdditive(random_state=0).fit(rows, labels, "classification")
+    gate = ASRGatedAdditive(random_state=0).fit(rows, labels, "classification")
     assert gate.kind_ == "feature"
     assert gate.predict(rows).shape == (280,)
-    neighborhood = DiagonalNeighborhood(random_state=0).fit(rows, labels, "classification")
+    neighborhood = ASRDiagonalNeighborhood(random_state=0).fit(rows, labels, "classification")
     assert neighborhood.scales_.shape == (2,)
     assert neighborhood.predict(rows).shape == (280,)
     body = NeighborhoodBody(

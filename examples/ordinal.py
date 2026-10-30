@@ -1,6 +1,6 @@
 """Ordinal classifier: ordered labels, probabilities, and an expected score.
 
-``ashlar.ordinal()`` uses a cumulative logit. ``predict`` returns the most
+``ashlar.ASROrdinalClassifier()`` uses a cumulative logit. ``predict`` returns the most
 likely label. ``predict_score`` returns ``probabilities @ classes_``.
 
 Run from the package root:
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ashlar import __version__, ordinal
+from ashlar import __version__, ASROrdinalClassifier
 
 
 def main():
@@ -20,7 +20,7 @@ def main():
     n = 80
     x = rng.normal(size=(n, 1)).astype(np.float32)
     y = np.where(x[:, 0] < -0.4, 3, np.where(x[:, 0] < 0.4, 6, 8)).astype(np.int32)
-    model = ordinal(
+    model = ASROrdinalClassifier(
         max_epochs=8,
         patience=4,
         batch_size=16,

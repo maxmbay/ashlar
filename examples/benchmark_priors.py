@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score
 
-from ashlar.priors import BartPriorEnsemble, GradientSparseNet, VariationalPairwise
+from ashlar.priors import ASRBartPriorEnsemble, ASRGradientSparseNet, ASRVariationalPairwise
 from ashlar.recipes import DEFAULT_RECIPE
 
 OUT_PATH = Path("/tmp/ashlar-bench/prior-results.json")
@@ -34,9 +34,9 @@ EXPECTED_SPLIT = {
     "california": (8000, 2000),
 }
 MODELS = (
-    ("bart_prior", BartPriorEnsemble),
-    ("variational_pairwise", VariationalPairwise),
-    ("gradient_penalty", GradientSparseNet),
+    ("bart_prior", ASRBartPriorEnsemble),
+    ("variational_pairwise", ASRVariationalPairwise),
+    ("gradient_penalty", ASRGradientSparseNet),
 )
 
 

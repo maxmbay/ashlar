@@ -7,7 +7,7 @@
 
 Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
 
-It slots in wherever a gradient-boosted model does. It follows the scikit-learn estimator interface, takes a pandas or Polars frame as it is, string columns included, and works with `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`. Swap `LGBMRegressor()` or `XGBRegressor()` for `TabularEstimator()`, and `LGBMClassifier()` for `classifier()`. On eight public tables of half a million to two million rows, the defaults win or tie on five and are close behind on two. For a predictive distribution they beat the trees on most tables: [the comparison below](#ashlar-beside-gradient-boosted-trees) has every number, including where the trees still win.
+It slots in wherever a gradient-boosted model does. It follows the scikit-learn estimator interface, takes a pandas or Polars frame as it is, string columns included, and works with `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`. Swap `LGBMRegressor()` or `XGBRegressor()` for `ASRRegressor()`, and `LGBMClassifier()` for `ASRClassifier()`. On eight public tables of half a million to two million rows, the defaults win or tie on five and are close behind on two. For a predictive distribution they beat the trees on most tables: [the comparison below](#ashlar-beside-gradient-boosted-trees) has every number, including where the trees still win.
 
 - [Install](#install)
 - [Quick start](#quick-start)
@@ -31,23 +31,23 @@ The import name is `ashlar`. The distribution name is `ashlar-tabular`. The PyPI
 A table. `X` is a NumPy array, a dict of columns, or a pandas or Polars frame. Numeric columns are imputed and scaled. String columns get a learned embedding.
 
 ```python
-from ashlar import TabularEstimator, classifier, ordinal, outcome_tree
+from ashlar import ASRRegressor, ASRClassifier, ASROrdinalClassifier, ASROutcomeTree
 
-model = TabularEstimator().fit(X, y)        # where you had LGBMRegressor()
+model = ASRRegressor().fit(X, y)              # where you had LGBMRegressor()
 model.predict(X_new)
 
-clf = classifier().fit(X, labels)           # where you had LGBMClassifier(); predict, predict_proba
-rank = ordinal().fit(X, ratings)            # predict, predict_score (expected label)
-tree = outcome_tree({"wicket": None, "runs": {"dot": None, "scoring": ["four", "six", "ran"]}}).fit(X, outcomes)
-                                            # one branch softmax per node; predict_conditional(X, "scoring")
+clf = ASRClassifier().fit(X, labels)          # where you had LGBMClassifier(); predict, predict_proba
+rank = ASROrdinalClassifier().fit(X, ratings) # predict, predict_score (expected label)
+tree = ASROutcomeTree({"wicket": None, "runs": {"dot": None, "scoring": ["four", "six", "ran"]}}).fit(X, outcomes)
+                                              # one branch softmax per node; predict_conditional(X, "scoring")
 ```
 
-`score` is accuracy for a classifier and R² for a regressor, and scikit-learn tags `classifier()` as a classifier, so `cross_val_score` stratifies its folds and the `roc_auc` scorer reads `predict_proba`.
+`score` is accuracy for a classifier and R² for a regressor, and scikit-learn tags `ASRClassifier()` as a classifier, so `cross_val_score` stratifies its folds and the `roc_auc` scorer reads `predict_proba`.
 
 A regression can return its whole predictive distribution:
 
 ```python
-model = TabularEstimator(task="mixture").fit(X, y)   # or gaussian, flow, histogram, quantile
+model = ASRRegressor(task="mixture").fit(X, y)   # or gaussian, flow, histogram, quantile
 model.predict_quantiles(X_new, [0.1, 0.5, 0.9])
 model.sample(X_new, n=1000)
 model.log_prob(X_new, y_new)
@@ -56,19 +56,19 @@ model.log_prob(X_new, y_new)
 A series, with a distributional head.
 
 ```python
-from ashlar import TimeSeriesForecaster
+from ashlar import ASRForecaster
 
-model = TimeSeriesForecaster(lookback=48, horizon=1, head="mixture").fit(series)
+model = ASRForecaster(lookback=48, horizon=1, head="mixture").fit(series)
 model.predict(history)                     # one point per horizon step
 model.log_prob(history, value)             # density of a value
 model.sample(history, key, n=1000)         # draws
 ```
 
-The heads are `mse` (the default), `quantile`, `gaussian`, `mixture`, `flow`, and `histogram`. `FullHistoryForecaster` takes the same heads and reads the whole prefix instead of a window.
+The heads are `mse` (the default), `quantile`, `gaussian`, `mixture`, `flow`, and `histogram`. `ASRHistoryForecaster` takes the same heads and reads the whole prefix instead of a window.
 
 ## Ashlar beside gradient-boosted trees
 
-Eight public tables from OpenML, from 515 thousand to 2 million rows, against LightGBM, XGBoost, and CatBoost. Ashlar is `TabularEstimator()` or `classifier()` with no arguments. Every model holds out the same share of the training rows for early stopping, and the trees are early-stopped at learning rate 0.05 with up to 4,000 trees. One 80/20 split per table for now; more seeds are running.
+Eight public tables from OpenML, from 515 thousand to 2 million rows, against LightGBM, XGBoost, and CatBoost. Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments. Every model holds out the same share of the training rows for early stopping, and the trees are early-stopped at learning rate 0.05 with up to 4,000 trees. One 80/20 split per table for now; more seeds are running.
 
 | Table | Rows | Target, metric | Ashlar | LightGBM | XGBoost | CatBoost |
 |---|---:|---|---:|---:|---:|---:|
@@ -126,7 +126,7 @@ A tree regressor predicts a mean. For an interval you fit one more model per qua
 | Only the interval matters | `quantile` | Pinball loss at 0.1, 0.5, and 0.9. No density and no draws. |
 
 ```python
-model = TabularEstimator(task="mixture").fit(X, y)
+model = ASRRegressor(task="mixture").fit(X, y)
 model.predict(X_new)                       # the mean
 model.predict_quantiles(X_new, [0.1, 0.9])
 model.sample(X_new, n=1000)                # draws, on the scale of y
@@ -179,7 +179,7 @@ The intervals are better calibrated too. With an interval that promises 80%, the
 Every string column becomes a learned vector, 8 numbers by default. Row 0 of each table is for a missing value or a category that never appeared in training, so new categories at prediction time are not an error. The vectors are ordinary arrays you can read back:
 
 ```python
-model = TabularEstimator().fit(X, y)
+model = ASRRegressor().fit(X, y)
 names = [column.name for column in model.encoder_.embedding_columns]
 zones = model.core_.categorical_embeddings.tables[names.index("pickup_zone")]   # (1 + levels, 8)
 ```

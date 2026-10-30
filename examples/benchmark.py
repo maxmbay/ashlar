@@ -35,7 +35,7 @@ from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
 
 import ashlar
-from ashlar import classifier, tabular
+from ashlar import ASRClassifier, ASRRegressor
 
 DATA_DIR = Path("/tmp/ashlar-bench")
 OUT_PATH = DATA_DIR / "jax-results.json"
@@ -177,16 +177,16 @@ def run_dataset(spec: dict) -> dict:
     print(f"== {spec['name']} rows train/val/test {split_info['n_train']}/{split_info['n_val']}/{split_info['n_test']}", flush=True)
 
     if spec["task"] == "regression":
-        default_model = tabular()
-        search_model = tabular()
+        default_model = ASRRegressor()
+        search_model = ASRRegressor()
     else:
-        default_model = classifier()
-        search_model = classifier()
+        default_model = ASRClassifier()
+        search_model = ASRClassifier()
 
     print("  ashlar default", flush=True)
     default = timed_fit_predict(default_model, train, val, test, target, spec["task"])
     default["details"] = ashlar_details(default_model)
-    default["recipe"] = "tabular()" if spec["task"] == "regression" else "classifier()"
+    default["recipe"] = "ASRRegressor()" if spec["task"] == "regression" else "ASRClassifier()"
     print("   ", default["test"], "wall", round(default["wall_seconds"], 2), flush=True)
 
     print("  ashlar search", flush=True)

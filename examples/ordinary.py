@@ -16,7 +16,7 @@ import pandas as pd
 import polars as pl
 
 from ashlar import __version__
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 
 
 def main():
@@ -35,7 +35,7 @@ def main():
     target = target + np.where(frame["city"].fillna("ny").eq("sf"), 0.5, 0.0)
     # Default recipe: residual MLP, robust scale, categorical embeddings, no search.
     # The overrides only shorten the toy run and raise the learning rate.
-    model = TabularEstimator(max_epochs=8, patience=4, batch_size=16, learning_rate=1e-2, random_state=0)
+    model = ASRModel(max_epochs=8, patience=4, batch_size=16, learning_rate=1e-2, random_state=0)
     started = time.perf_counter()
     model.fit(frame, target.astype(np.float32))
     fit_seconds = time.perf_counter() - started
@@ -54,7 +54,7 @@ def main():
     numpy_pred = np.asarray(model.predict(test_np))
     with tempfile.TemporaryDirectory() as directory:
         path = model.save(Path(directory) / "ordinary")
-        restored = TabularEstimator.load(path)
+        restored = ASRModel.load(path)
         reloaded = np.asarray(restored.predict(test_pd))
     print(f"ashlar {__version__} ordinary")
     print(f"backbone {model.backbone}")

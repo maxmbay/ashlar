@@ -15,11 +15,12 @@ not silently replace a value the caller set.
 
 from __future__ import annotations
 
+import warnings
 from copy import deepcopy
 
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRClassifier, ASRModel, ASROrdinalClassifier, ASROutcomeTree, ASRRegressor
 
-# Constructor defaults of ``TabularEstimator``. ``fit(X, y)`` with no other
+# Constructor defaults of ``ASRModel``. ``fit(X, y)`` with no other
 # arguments uses this path: residual MLP, median impute, robust scale with a
 # smooth clip, a train-only z-score of regression labels, learned embeddings
 # for inferred categoricals, no set columns, and no hyperparameter search.
@@ -143,7 +144,7 @@ def _merge(base: dict, updates: dict) -> dict:
     return merged
 
 
-def tabm(**overrides) -> TabularEstimator:
+def tabm(**overrides) -> ASRModel:
     """Paper-shaped TabM recipe, with caller overrides applied on top.
 
     ``task="classification"`` is legal. It keeps one shared minibatch for
@@ -165,7 +166,7 @@ def tabm(**overrides) -> TabularEstimator:
     if task == "classification" and "standardize_target" not in overrides:
         params["standardize_target"] = False
     params = _merge(params, overrides)
-    return TabularEstimator(**params)
+    return ASRModel(**params)
 
 
 CLASSIFIER_RECIPE = {
@@ -184,7 +185,7 @@ ORDINAL_RECIPE = {
 }
 
 
-def tabm_piecewise(**overrides) -> TabularEstimator:
+def tabm_piecewise(**overrides) -> ASRModel:
     """TabM on piecewise-linear numeric embeddings: the accuracy recipe.
 
     Works for every task. Classification and ordinal turn the label z-score
@@ -197,38 +198,23 @@ def tabm_piecewise(**overrides) -> TabularEstimator:
         params.setdefault("prediction_policy", "mean_probabilities")
         if "standardize_target" not in overrides:
             params["standardize_target"] = False
-    return TabularEstimator(**_merge(params, overrides))
+    return ASRModel(**_merge(params, overrides))
 
 
-def ordinal(**overrides) -> TabularEstimator:
-    """Ordered numeric labels, with caller overrides applied on top.
-
-    Same preprocessing as ``classifier()``. Training labels are real numbers.
-    Their sorted order is the class order. The default head is a cumulative
-    logit, so a neighboring score is closer than a distant one. ``head="softmax"``
-    gives each class its own score instead. ``expectation_weight`` adds that
-    coefficient times the squared error of ``probabilities @ class_values``
-    beside the class negative log-likelihood. The default leaves it off.
-    ``histogram_variance`` with that head
-    trains on a truncated Gaussian over the class bins instead of the one-hot
-    class. ``head_kwargs={"class_prior": "empirical"}``
-    freezes the cuts at a Jeffreys prior from the training counts. ``predict`` returns the most
-    likely label. ``predict_score`` returns the expected label.
-    """
-    return TabularEstimator(**_merge(deepcopy(ORDINAL_RECIPE), overrides))
+def _renamed(old: str, new: str):
+    warnings.warn(f"{old} is now {new}.", DeprecationWarning, stacklevel=3)
 
 
-def classifier(**overrides) -> TabularEstimator:
-    """Default classification path.
+def ordinal(**overrides) -> ASROrdinalClassifier:
+    """Deprecated: use ``ASROrdinalClassifier``."""
+    _renamed("ordinal()", "ASROrdinalClassifier()")
+    return ASROrdinalClassifier(**_merge(deepcopy(ORDINAL_RECIPE), overrides))
 
-    Same feature preprocessing as ``tabular()``: median impute, robust scale,
-    and a learned embedding for every categorical column unless you pass
-    ``categorical_embeddings=[]`` or name set features. Labels are not
-    z-scored. ``predict``
-    returns labels. ``predict_proba`` returns probabilities with one column per
-    class, in ``classes_`` order. Binary targets are two classes, not one logit.
-    """
-    return TabularEstimator(**_merge(deepcopy(CLASSIFIER_RECIPE), overrides))
+
+def classifier(**overrides) -> ASRClassifier:
+    """Deprecated: use ``ASRClassifier``."""
+    _renamed("classifier()", "ASRClassifier()")
+    return ASRClassifier(**_merge(deepcopy(CLASSIFIER_RECIPE), overrides))
 
 
 TREE_RECIPE = {
@@ -240,31 +226,22 @@ TREE_RECIPE = {
 }
 
 
-def outcome_tree(tree, **overrides) -> TabularEstimator:
-    """Nested outcome model: a shared backbone and one branch softmax per internal node.
-
-    ``tree`` is a nested dict, for example
-    ``{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}``.
-    Labels are node names. A label may stop at an internal node (``"runs"``),
-    and the loss is then that node's log-probability. ``predict_proba``
-    returns leaf probabilities in ``classes_`` order; ``predict_node_proba``
-    returns every node; ``predict_conditional(X, node)`` returns
-    ``P(child | node, x)``. The branch biases start at the training
-    frequencies of each split.
-    """
-    return TabularEstimator(**_merge(deepcopy(TREE_RECIPE), {"tree": tree, **overrides}))
+def outcome_tree(tree, **overrides) -> ASROutcomeTree:
+    """Deprecated: use ``ASROutcomeTree(tree)``."""
+    _renamed("outcome_tree()", "ASROutcomeTree()")
+    return ASROutcomeTree(**_merge(deepcopy(TREE_RECIPE), {"tree": tree, **overrides}))
 
 
-def tabular(**overrides) -> TabularEstimator:
-    """The default recipe, with caller overrides applied on top.
+def tabular(**overrides) -> ASRRegressor:
+    """Deprecated: use ``ASRRegressor``, or ``ASRModel`` for a non-regression task."""
+    _renamed("tabular()", "ASRRegressor()")
+    params = _merge(deepcopy(DEFAULT_RECIPE), overrides)
+    model = ASRRegressor if params["task"] in ASRRegressor._tasks else ASRModel
+    return model(**params)
 
-    ``TabularEstimator()`` is this recipe. Overrides change only the keys you pass.
-    """
-    return TabularEstimator(**_merge(deepcopy(DEFAULT_RECIPE), overrides))
 
-
-def residual_mlp(**overrides) -> TabularEstimator:
+def residual_mlp(**overrides) -> ASRModel:
     """Small residual MLP. This is the interchangeable baseline, not a paper recipe."""
     params = _merge(deepcopy(RESIDUAL_PROBE), overrides)
     params.setdefault("max_epochs", 50)
-    return TabularEstimator(**params)
+    return ASRModel(**params)

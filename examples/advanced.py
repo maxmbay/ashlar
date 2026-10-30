@@ -16,7 +16,7 @@ import numpy as np
 
 from ashlar import __version__
 from ashlar.demos.linked import LinkedHead, linked_dist, linked_objective, linked_point
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 from ashlar.predict import MeanParameterNormal, NormalMixture
 from ashlar.recipes import TABM_PROBE
 
@@ -43,7 +43,7 @@ def main():
         max_epochs=8,
         categorical=["city"],
     )
-    model = TabularEstimator(**params)
+    model = ASRModel(**params)
     started = time.perf_counter()
     model.fit(x, y, sample_weight=weights)
     fit_seconds = time.perf_counter() - started
@@ -61,7 +61,7 @@ def main():
     reference_mixture = float(NormalMixture(loc=loc, scale=scale).variance()[0, 0])
     reference_average = float(MeanParameterNormal(loc=jnp.mean(loc, axis=1), scale=jnp.mean(scale, axis=1)).variance()[0, 0])
     with tempfile.TemporaryDirectory() as directory:
-        restored = TabularEstimator.load(model.save(Path(directory) / "linked"))
+        restored = ASRModel.load(model.save(Path(directory) / "linked"))
         reloaded = np.asarray(restored.predict({"rooms": np.array([0.0], dtype=np.float32), "city": np.array(["sf"], dtype=object)}))
     print(f"ashlar {__version__} advanced")
     print(f"fit_seconds {fit_seconds:.4f}")
