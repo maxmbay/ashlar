@@ -58,9 +58,13 @@ The mixture figure is that density on a grid, for a series of independent draws 
 
 The histogram figure is one held-out step of a synthetic cycle. The clay bar is the bin that contains the next value.
 
+## Student-t
+
+`head="student_t"` is a location, a scale, and degrees of freedom per horizon step, the degrees of freedom held above 2 so the variance stays finite. The loss is the Student-t negative log-density, so one large shock costs less than it does under a normal. `predict` is the location. `sample` and `log_prob` work as for the gaussian.
+
 ## A longer prefix
 
-`ASRHistoryForecaster` uses the same six heads. The last `lookback` observations are one token each. Every older observation sits in one non-overlapping patch of that length. `predict(series)` forecasts the horizon after the last observation. Pass `origins` to forecast at earlier cut points. `quantiles`, `log_prob`, `gaussian`, `sample`, and `bin_probabilities` take the same `origins` argument.
+`ASRHistoryForecaster` uses the same seven heads. The last `lookback` observations are one token each. Every older observation sits in one non-overlapping patch of that length. `predict(series)` forecasts the horizon after the last observation. Pass `origins` to forecast at earlier cut points. `quantiles`, `log_prob`, `gaussian`, `sample`, and `bin_probabilities` take the same `origins` argument.
 
 ## Save and load
 

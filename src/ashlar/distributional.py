@@ -19,6 +19,20 @@ summary for absolute error:
 - ``histogram``: softmax over fixed bins on the standardized axis, plus a
   small squared error of the probability-weighted bin center. The point is
   that center.
+- ``student_t``: location, scale, and degrees of freedom, for heavy tails.
+  The scale uses the same positive map and the degrees of freedom are
+  ``2 + softplus(raw)``, so the variance stays finite. The location is the
+  point.
+
+Two count heads read the raw target, not a standardized one, and only the
+tabular estimator takes them:
+
+- ``poisson``: a log rate. The loss is the Poisson negative log-mass.
+- ``negative_binomial``: a log mean and a dispersion ``softplus(raw) + 1e-4``,
+  the variance being ``mean + dispersion * mean**2``.
+
+Either count head can be zero-inflated: one more output is the logit of a
+structural zero, mixed with the count distribution. The point is the mean.
 
 Squared error stays the ``mse`` head. Losses average over the batch and the
 horizon. Quantile loss also averages the three levels.
@@ -43,7 +57,14 @@ FLOW_MIN_DERIVATIVE = 1e-3
 HISTOGRAM_BINS = 16
 HISTOGRAM_LIMIT = 4.0
 HISTOGRAM_LOCATION_WEIGHT = 0.1
-OUTPUT_HEADS = ("mse", "quantile", "gaussian", "mixture", "flow", "histogram")
+STUDENT_T_MIN_DF = 2.0
+STUDENT_T_INITIAL_DF = 5.0
+COUNT_LOG_LIMIT = 20.0
+ZERO_INITIAL_LOGIT = -2.0
+OUTPUT_HEADS = ("mse", "quantile", "gaussian", "mixture", "flow", "histogram", "student_t")
+COUNT_HEADS = ("poisson", "negative_binomial")
+TABLE_HEADS = (*OUTPUT_HEADS, *COUNT_HEADS)
+_COUNT_WIDTH = {"poisson": 1, "negative_binomial": 2}
 _FLOW_DERIVATIVE_BETA = math.log(2.0) / (1.0 - FLOW_MIN_DERIVATIVE)
 
 
@@ -51,9 +72,16 @@ def check_output_head(head: str) -> str:
     """Return ``head`` when it names a forecast output. Raise otherwise."""
     if head not in OUTPUT_HEADS:
         raise AshlarError(
-            "forecast head must be 'mse', 'quantile', 'gaussian', 'mixture', 'flow', or 'histogram'; "
-            f"received {head!r}."
+            "forecast head must be 'mse', 'quantile', 'gaussian', 'mixture', 'flow', 'histogram', "
+            f"or 'student_t'; received {head!r}."
         )
+    return head
+
+
+def check_head(head: str) -> str:
+    """Return ``head`` when it names a forecast or a tabular output, the count heads included."""
+    if head not in TABLE_HEADS:
+        raise AshlarError(f"head must be one of {', '.join(TABLE_HEADS)}; received {head!r}.")
     return head
 
 
@@ -66,14 +94,17 @@ def flow_parameter_count() -> int:
     return 3 * FLOW_BINS - 1
 
 
-def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS) -> int:
+def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS, zero_inflated: bool = False) -> int:
     """Width of the flat last-token projection for this head.
 
     ``bins`` is the histogram head's bin count and is ignored by every other
     head. More bins buy resolution: the density a histogram head can draw is
-    piecewise constant on its bins.
+    piecewise constant on its bins. ``zero_inflated`` adds the structural-zero
+    logit to a count head.
     """
-    check_output_head(head)
+    check_head(head)
+    if zero_inflated and head not in COUNT_HEADS:
+        raise AshlarError(f"zero inflation is for the count heads; the {head} head does not take it.")
     if horizon < 1:
         raise AshlarError("horizon must be at least 1.")
     if head == "mse":
@@ -86,6 +117,10 @@ def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS) -> int:
         return int(horizon) * MIXTURE_COMPONENTS * 3
     if head == "flow":
         return int(horizon) * flow_parameter_count()
+    if head == "student_t":
+        return int(horizon) * 3
+    if head in COUNT_HEADS:
+        return int(horizon) * (_COUNT_WIDTH[head] + int(bool(zero_inflated)))
     return int(horizon) * check_histogram_bins(bins)
 
 
@@ -97,18 +132,32 @@ def initial_weight_scale(head: str, d_model: int) -> float:
     is kept small. The other heads use the same ``1/sqrt(width)`` scale as the
     squared-error forecast.
     """
-    check_output_head(head)
+    check_head(head)
     if d_model < 1:
         raise AshlarError("forecast width must be positive.")
-    if head in {"flow", "mixture"}:
+    if head in {"flow", "mixture", *COUNT_HEADS}:
         return 0.01
     return float(math.sqrt(1.0 / d_model))
 
 
-def initial_bias(head: str, horizon: int, bins: int = HISTOGRAM_BINS) -> jax.Array:
+def initial_bias(
+    head: str, horizon: int, bins: int = HISTOGRAM_BINS, *, zero_inflated: bool = False, log_mean: float = 0.0
+) -> jax.Array:
     """Output bias. Mixture means start on a grid, and quantile levels at the
-    standard normal's 0.1, 0.5, and 0.9; every other head starts at 0."""
-    width = output_width(head, horizon, bins)
+    standard normal's 0.1, 0.5, and 0.9. A Student-t starts at 5 degrees of
+    freedom. A count head starts at ``exp(log_mean)``, unit dispersion, and a
+    small structural zero. Every other head starts at 0."""
+    width = output_width(head, horizon, bins, zero_inflated)
+    if head == "student_t":
+        df_raw = math.log(math.expm1(STUDENT_T_INITIAL_DF - STUDENT_T_MIN_DF))
+        return jnp.tile(jnp.asarray([0.0, 0.0, df_raw], dtype=jnp.float32), int(horizon))
+    if head in COUNT_HEADS:
+        row = [float(log_mean)]
+        if head == "negative_binomial":
+            row.append(math.log(math.expm1(1.0)))
+        if zero_inflated:
+            row.append(ZERO_INITIAL_LOGIT)
+        return jnp.tile(jnp.asarray(row, dtype=jnp.float32), int(horizon))
     if head == "quantile":
         z = 1.2815515655446004
         gap = math.log(math.expm1(z))
@@ -155,18 +204,26 @@ def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
     ``(loc, scale)`` each ``(batch, horizon)``. ``mixture`` returns
     ``(loc, scale, weight)`` each ``(batch, horizon, component)``. ``flow``
     returns unconstrained spline parameters ``(batch, horizon, parameters)``.
-    ``histogram`` returns logits ``(batch, horizon, bin)``.
+    ``histogram`` returns logits ``(batch, horizon, bin)``. ``student_t``
+    returns ``(loc, scale, df)``, ``poisson`` returns ``(mean, zero)``, and
+    ``negative_binomial`` returns ``(mean, dispersion, zero)``, each
+    ``(batch, horizon)``; ``zero`` is the structural-zero probability, 0 for a
+    head that is not zero-inflated.
 
-    A histogram projection carries its own bin count in its width, so ``bins``
-    is only needed to check a width that should have been built differently.
+    A histogram projection carries its own bin count in its width, and a count
+    projection its zero inflation, so ``bins`` is only needed to check a width
+    that should have been built differently.
     """
-    check_output_head(head)
+    check_head(head)
     if head == "mse":
         raise AshlarError("the squared-error head has no distributional parameters.")
     flat = jnp.asarray(flat)
     if head == "histogram" and bins is None and flat.ndim == 2 and flat.shape[-1] % int(horizon) == 0:
         bins = flat.shape[-1] // int(horizon)
-    width = output_width(head, horizon, HISTOGRAM_BINS if bins is None else bins)
+    zero_inflated = (
+        head in COUNT_HEADS and flat.ndim == 2 and flat.shape[-1] == int(horizon) * (_COUNT_WIDTH[head] + 1)
+    )
+    width = output_width(head, horizon, HISTOGRAM_BINS if bins is None else bins, zero_inflated)
     if flat.ndim != 2 or flat.shape[-1] != width:
         raise ShapeError(
             f"{head} projection must have shape (batch, {width}); received {flat.shape}."
@@ -186,12 +243,27 @@ def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
         return raw[..., 0], positive_scale(raw[..., 1]), jax.nn.softmax(raw[..., 2], axis=-1)
     if head == "flow":
         return flat.reshape(batch, int(horizon), flow_parameter_count())
+    if head == "student_t":
+        raw = flat.reshape(batch, int(horizon), 3)
+        df = jax.nn.softplus(raw[..., 2]) + jnp.asarray(STUDENT_T_MIN_DF, dtype=raw.dtype)
+        return raw[..., 0], positive_scale(raw[..., 1]), df
+    if head in COUNT_HEADS:
+        raw = flat.reshape(batch, int(horizon), width // int(horizon))
+        mean = jnp.exp(jnp.clip(raw[..., 0], -COUNT_LOG_LIMIT, COUNT_LOG_LIMIT))
+        zero = jax.nn.sigmoid(raw[..., -1]) if zero_inflated else jnp.zeros_like(mean)
+        if head == "poisson":
+            return mean, zero
+        return mean, positive_scale(raw[..., 1]), zero
     return flat.reshape(batch, int(horizon), width // int(horizon))
 
 
 def point_values(head: str, decoded) -> jax.Array:
-    """Standardized point forecast. Shape ``(batch, horizon)``."""
-    check_output_head(head)
+    """Standardized point forecast. Shape ``(batch, horizon)``. A count head's point is its raw mean."""
+    check_head(head)
+    if head == "student_t":
+        return decoded[0]
+    if head in COUNT_HEADS:
+        return (1.0 - decoded[-1]) * decoded[0]
     if head == "quantile":
         return decoded[..., 1]
     if head == "gaussian":
@@ -211,7 +283,9 @@ def point_values(head: str, decoded) -> jax.Array:
 
 def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
     """Mean training loss. ``target`` is standardized ``(batch, horizon)``."""
-    check_output_head(head)
+    check_head(head)
+    if head in {"student_t", *COUNT_HEADS}:
+        return jnp.mean(-log_density(head, decoded, target))
     target = jnp.asarray(target)
     if head == "quantile":
         if decoded.ndim != 3 or decoded.shape[-1] != 3 or decoded.shape[:-1] != target.shape:
@@ -261,7 +335,7 @@ def _log_weight(weight):
 
 def row_loss(head: str, decoded, target: jax.Array) -> jax.Array:
     """Per-step training loss, same shape as ``target``. Its mean is ``distributional_loss``."""
-    check_output_head(head)
+    check_head(head)
     target = jnp.asarray(target)
     if head == "quantile":
         levels = jnp.asarray(QUANTILE_LEVELS, dtype=target.dtype)
@@ -278,9 +352,25 @@ def row_loss(head: str, decoded, target: jax.Array) -> jax.Array:
 
 
 def log_density(head: str, decoded, value: jax.Array) -> jax.Array:
-    """Per-step log density of standardized ``value``. Same shape as ``value``."""
-    check_output_head(head)
+    """Per-step log density of standardized ``value``. Same shape as ``value``.
+
+    A count head reads the raw count and returns its log mass.
+    """
+    check_head(head)
     value = jnp.asarray(value)
+    if head == "student_t":
+        loc, scale, df = decoded
+        _same_shape(loc, value, "student_t location")
+        return student_t_log_prob(value, loc, scale, df)
+    if head in COUNT_HEADS:
+        _same_shape(decoded[0], value, f"{head} mean")
+        if head == "poisson":
+            mean, zero = decoded
+            log_count = poisson_log_prob(value, mean)
+        else:
+            mean, dispersion, zero = decoded
+            log_count = negative_binomial_log_prob(value, mean, dispersion)
+        return zero_inflated_log_prob(value, log_count, zero)
     if head == "gaussian":
         loc, scale = decoded
         _same_shape(loc, value, "gaussian location")
@@ -317,10 +407,25 @@ def sample_values(head: str, decoded, key, n: int) -> jax.Array:
     noise. The gaussian, mixture, and histogram draws are one sample from
     those densities. A quantile head has no draw.
     """
-    check_output_head(head)
+    check_head(head)
     count = int(n)
     if count < 1:
         raise AshlarError("the number of samples must be positive.")
+    if head == "student_t":
+        loc, scale, df = decoded
+        noise = jax.random.t(key, df, (count,) + loc.shape, dtype=loc.dtype)
+        return loc[None, ...] + scale[None, ...] * noise
+    if head in COUNT_HEADS:
+        mean, zero = decoded[0], decoded[-1]
+        rate_key, count_key, zero_key = jax.random.split(key, 3)
+        shape = (count,) + mean.shape
+        rate = jnp.broadcast_to(mean, shape)
+        if head == "negative_binomial":
+            size = 1.0 / decoded[1]
+            rate = rate * jax.random.gamma(rate_key, jnp.broadcast_to(size, shape), dtype=mean.dtype) / size
+        draws = jax.random.poisson(count_key, rate, shape).astype(mean.dtype)
+        structural = jax.random.bernoulli(zero_key, jnp.broadcast_to(zero, shape))
+        return jnp.where(structural, jnp.zeros_like(draws), draws)
     if head == "gaussian":
         loc, scale = decoded
         noise = jax.random.normal(key, (count,) + loc.shape, dtype=loc.dtype)
@@ -351,6 +456,43 @@ def sample_values(head: str, decoded, key, n: int) -> jax.Array:
         uniform = jax.random.uniform(uniform_key, choices.shape, dtype=decoded.dtype)
         return left + uniform * (right - left)
     raise AshlarError(f"the {head} head has no sampler.")
+
+
+def student_t_log_prob(value, loc, scale, df):
+    """Elementwise Student-t log density with location, scale, and degrees of freedom."""
+    z = (value - loc) / scale
+    return (
+        jax.scipy.special.gammaln(0.5 * (df + 1.0))
+        - jax.scipy.special.gammaln(0.5 * df)
+        - 0.5 * jnp.log(df * jnp.pi)
+        - jnp.log(scale)
+        - 0.5 * (df + 1.0) * jnp.log1p(z * z / df)
+    )
+
+
+def poisson_log_prob(value, mean):
+    """Elementwise Poisson log mass of a count."""
+    return value * jnp.log(mean) - mean - jax.scipy.special.gammaln(value + 1.0)
+
+
+def negative_binomial_log_prob(value, mean, dispersion):
+    """Negative binomial log mass with mean ``mean`` and variance ``mean + dispersion * mean**2``."""
+    size = 1.0 / dispersion
+    log_total = jnp.log(size + mean)
+    return (
+        jax.scipy.special.gammaln(value + size)
+        - jax.scipy.special.gammaln(size)
+        - jax.scipy.special.gammaln(value + 1.0)
+        + size * (jnp.log(size) - log_total)
+        + value * (jnp.log(mean) - log_total)
+    )
+
+
+def zero_inflated_log_prob(value, log_count, zero):
+    """Mix a count log mass with a structural zero of probability ``zero``."""
+    log_keep = jnp.log1p(-jnp.minimum(zero, 1.0 - 1e-6))
+    at_zero = jnp.logaddexp(_log_weight(zero), log_keep + log_count)
+    return jnp.where(value == 0, at_zero, log_keep + log_count)
 
 
 def _same_shape(left, right, name: str) -> None:

@@ -9,7 +9,7 @@ and ``LGBMClassifier``: ``ASRRegressor``, ``ASRClassifier``,
 ``ASRHistoryForecaster``, all on the generic ``ASRModel``. The old names
 still import, with a ``DeprecationWarning``.
 Forecast heads are the ``head`` argument of the two forecasters: ``mse``
-(default), ``quantile``, ``gaussian``, ``mixture``, ``flow``, and ``histogram``.
+(default), ``quantile``, ``gaussian``, ``mixture``, ``flow``, ``histogram``, and ``student_t``.
 """
 
 from ashlar._compat import renamed
