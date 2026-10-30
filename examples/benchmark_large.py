@@ -1,6 +1,6 @@
 """Ashlar beside LightGBM, XGBoost, and CatBoost on large public tables.
 
-Every table comes from OpenML (or the vega flights mirror) and is capped at
+Every table comes from OpenML and is capped at
 2,000,000 rows by a fixed random sample. Each run is one (table, model, seed)
 triple: the seed draws the 80/20 test split, every model holds out the same
 20% of the training rows for early stopping, and the scores are on the test
@@ -109,37 +109,6 @@ def year():
     return _cap(_strings(X), np.asarray(y, dtype=np.float64))
 
 
-def flights_3m():
-    """US arrival delay in minutes, January to June 2001 (vega flights-3m).
-
-    Only what a schedule tells you: day of year and scheduled hour, each as a
-    point on a circle (sin, cos), weekday, distance, origin, and destination.
-    ``__group__`` is the calendar date. Test rows are a random 20% of dates,
-    and every model's early-stopping slice is also a set of whole dates, so no
-    model meets a day whose weather it has already seen.
-    """
-    from benchmark_readme import _path
-
-    raw = pd.read_parquet(_path("flights-3m.parquet"))
-    date = raw["date"]
-    day = date.dt.dayofyear.to_numpy(np.float64)
-    hour = (date.dt.hour + date.dt.minute / 60).to_numpy(np.float64)
-    frame = pd.DataFrame(
-        {
-            "day_sin": np.sin(2 * np.pi * day / 365.25),
-            "day_cos": np.cos(2 * np.pi * day / 365.25),
-            "hour_sin": np.sin(2 * np.pi * hour / 24),
-            "hour_cos": np.cos(2 * np.pi * hour / 24),
-            "weekday": date.dt.dayofweek.astype(np.float64),
-            "distance": raw["distance"].astype(np.float64),
-            "origin": raw["origin"],
-            "dest": raw["destination"],
-            "__group__": date.dt.strftime("%Y-%m-%d"),
-        }
-    )
-    return _cap(_strings(frame), raw["delay"].to_numpy(np.float64))
-
-
 def higgs():
     """Signal against background in particle collisions (OpenML 45664, a 5.1M-row subset of HIGGS)."""
     X, y = _openml(45664)
@@ -167,7 +136,6 @@ def click():
 TABLES = {
     "zurich": ("regression", zurich),
     "airlines_delay": ("regression", airlines_delay),
-    "flights_3m": ("regression", flights_3m),
     "taxi_tip": ("regression", taxi_tip),
     "year": ("regression", year),
     "higgs": ("classification", higgs),
@@ -515,6 +483,56 @@ def model_runner(name):
     raise SystemExit(f"unknown model {name}")
 
 
+LABELS = {
+    "ashlar": "Ashlar, default",
+    "ashlar_tabm": "Ashlar, `tabm_piecewise()`",
+    "ashlar_mixture": "Ashlar, `task=\"mixture\"`",
+    "lightgbm": "LightGBM",
+    "xgboost": "XGBoost",
+    "catboost": "CatBoost",
+    "catboost_uncertainty": "CatBoost, `RMSEWithUncertainty`",
+    "realmlp": "RealMLP (pytabkit)",
+    "tabm_pytabkit": "TabM (pytabkit)",
+    "ftt": "FT-Transformer (pytabkit)",
+    "mlp_plr": "MLP-PLR (pytabkit)",
+}
+
+
+def report(out, variant_for=None, seeds=None):
+    """Markdown tables: mean ± std over the seeds that ran, per table and model."""
+    variant_for = variant_for or {}
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    frame = pd.DataFrame(rows)
+    frame["variant"] = frame["variant"].fillna("")
+    keep = frame.apply(lambda r: r["variant"] == variant_for.get(r["model"], ""), axis=1)
+    frame = frame[keep]
+    if seeds is not None:
+        frame = frame[frame["seed"].isin(seeds)]
+    for table, (task, _loader) in TABLES.items():
+        part = frame[frame["table"] == table]
+        if part.empty:
+            continue
+        metrics = (["accuracy", "auc", "log_loss"] if task == "classification"
+                   else ["rmse", "mae", "crps", "nll", "coverage80", "width80"])
+        print(f"\n### {table}\n")
+        print("| Model | Seeds | " + " | ".join(metrics) + " | Seconds |")
+        print("|---|---:|" + "---:|" * (len(metrics) + 1))
+        for model in LABELS:
+            group = part[part["model"] == model]
+            if group.empty:
+                continue
+            cells = []
+            for metric in metrics:
+                values = group[metric].dropna() if metric in group else pd.Series(dtype=float)
+                if values.empty:
+                    cells.append("—")
+                elif len(values) == 1:
+                    cells.append(f"{values.iloc[0]:.4g}")
+                else:
+                    cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
+            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {group['seconds'].mean():.0f} |")
+
+
 def done_runs(out):
     if not out.exists():
         return set()
@@ -534,8 +552,12 @@ def main():
     parser.add_argument("--params", default="{}", help="JSON overrides for the Ashlar estimator")
     parser.add_argument("--out", default=str(OUT))
     parser.add_argument("--prepare", action="store_true", help="download and cache the tables, then stop")
+    parser.add_argument("--report", action="store_true", help="print markdown tables of the results, then stop")
     args = parser.parse_args()
     out = Path(args.out)
+    if args.report:
+        report(out, {"ashlar": "v3", "ashlar_mixture": "v3"}, seeds=args.seeds)
+        return
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.prepare:
         for table in args.tables:

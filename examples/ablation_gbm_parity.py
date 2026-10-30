@@ -34,6 +34,11 @@ TABM_EMB = {"n_blocks": 2, "d_block": 256, "dropout": 0.1, "k": 32, "start_scali
 LONG = {"max_epochs": 100, "patience": 16}
 
 CONFIGS = {
+    # The defaults before this round: two blocks of 64, no numeric embeddings,
+    # batch 64, constant 1e-3, 50 epochs, patience 10.
+    "v0": {"backbone_kwargs": {"n_blocks": 2, "d_block": 64, "dropout": 0.0}, "num_embeddings": None,
+           "batch_size": 64, "max_epochs": 50, "patience": 10, "learning_rate": 1e-3,
+           "learning_rate_schedule": "constant"},
     "default": {},
     "bs256": {"batch_size": 256, "learning_rate": 2e-3},
     "wide": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 1e-3, **LONG},

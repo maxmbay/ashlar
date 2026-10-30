@@ -1,6 +1,6 @@
 # Fitting a table
 
-[Ashlar](../README.md) trains a small residual MLP on a table. `TabularEstimator()` and `ashlar.tabular()` are the same default path. The pictures on this page use shorter epoch budgets than these defaults.
+[Ashlar](../README.md) trains a residual MLP on a table. `TabularEstimator()` and `ashlar.tabular()` are the same default path. The pictures on this page use shorter epoch budgets than these defaults.
 
 ![A row becomes a prediction.](images/tabular-path.png)
 
@@ -18,11 +18,29 @@ Numeric columns are filled with the training-row median, centered on that median
 
 Regression labels are z-scored on the training rows. `predict` maps them back. `standardize_target=False` leaves `y` alone. Classification and ordinal labels stay on their original scale.
 
-Every other column is categorical. It gets a learned embedding of width 8. Pass `categorical_embeddings=[]` for one-hot, or a list of names to embed those columns and one-hot the rest. Index 0 is the row for a missing value or a category that was not in the training rows.
+Every other column is categorical. It gets a learned embedding of width 8. Pass `categorical_embeddings=[]` for one-hot, or a list of names to embed those columns and one-hot the rest. Index 0 is the row for a missing value or a category that was not in the training rows. `categorical_embedding_hidden=True` passes each category vector through its own dense layer and ReLU, with a residual, so a column's contribution is not a fixed linear read of the one-hot.
 
-The fit holds out 20% of the rows at random, then trains for up to 50 epochs with batch size 64, learning rate `1e-3`, and patience 10. Weight decay is `1e-4`. Feature dropout stays at 0. `patience=0` trains the full epoch budget. `validation_size=0` trains on every row.
+Each numeric column gets a piecewise-linear embedding of width 16. Its 48 bins are training-row quantiles of the scaled column. A value becomes its fill fraction of each bin, and a per-column linear map of that encoding is added to a plain linear embedding of the value. The piecewise part starts at zero, so training begins from the linear embedding and bends it where the data asks. The bin edges are fitted, not trained. `num_embeddings="periodic"` uses learned sine and cosine features instead, `"piecewise_relu"` adds a ReLU, `"linear_relu"` is one linear map and a ReLU per column, and `None` feeds the scaled numbers straight to the backbone. `num_embedding_bins` and `num_embedding_dim` set the bins and the width.
 
-The backbone is a residual MLP with two blocks of width 64 and a SiLU activation. `backbone_kwargs` can set `n_blocks`, `d_block`, `dropout`, and `activation` (`silu`, `relu`, or `gelu`).
+`cyclical={"hour": 24, "day_of_year": 365.25}` turns each named column into the sine and cosine of `2π value / period`, at fit and at predict, so the last hour of the day sits next to the first.
+
+The fit holds out 20% of the rows at random. The batch is 256 rows up to 50,000 training rows, and doubles for each doubling of the rows beyond that, up to 2,048. The epoch budget is about 20 million row passes, between 20 and 100 epochs. The learning rate is `2e-3` on a cosine schedule: a linear warmup over the first 5% of steps, then a half cosine to zero at the end of the budget. Patience is 16. Weight decay is `1e-4`. `batch_size` and `max_epochs` take an integer instead of `"auto"`. `learning_rate_schedule` takes `constant`, `linear`, or `surface`. `patience=0` trains the full epoch budget. `validation_size=0` trains on every row.
+
+The backbone is a residual MLP with three blocks of width 256, dropout 0.1, and a SiLU activation. `backbone_kwargs` can set `n_blocks`, `d_block`, `dropout`, and `activation` (`silu`, `relu`, or `gelu`).
+
+Training compiles one epoch at a time and predicts in chunks of 8,192 rows, so a table with millions of rows fits in memory and an epoch costs one host round trip. [`examples/ablation_gbm_parity.py`](../examples/ablation_gbm_parity.py) has the ablations behind these defaults, and [docs/benchmarks.md](benchmarks.md#what-each-change-buys) lists what each one bought.
+
+## Recipes
+
+```python
+from ashlar import tabm_piecewise
+
+model = tabm_piecewise().fit(X, y)                       # regression
+model = tabm_piecewise(task="classification").fit(X, y)
+model = tabm_piecewise(task="mixture").fit(X, y)         # a distribution
+```
+
+`tabm_piecewise()` is the most accurate recipe in the ablations: a TabM batch ensemble of 32 members, two blocks of width 256, on piecewise embeddings of quantile-normalized columns, with a constant learning rate. It costs 5 to 10 times the default on a CPU. `tabm()` keeps the paper's architecture without numeric embeddings.
 
 ## Tasks
 
@@ -32,6 +50,8 @@ from ashlar import classifier, ordinal
 classifier().fit(X, y)
 ordinal().fit(X, y)
 ```
+
+scikit-learn tags a classification or ordinal model as a classifier and anything else as a regressor, so `cross_val_score` stratifies folds and the `roc_auc` scorer reads `predict_proba`. `score` is accuracy for a classifier and R² otherwise.
 
 `predict` on a classifier returns the class label. `predict_proba` returns one probability column per class, in `classes_` order, and the columns sum to one. A binary problem is two classes.
 
@@ -43,7 +63,20 @@ An ordinal label has to be a real number. The sorted values are the class order.
 
 `task="normal"` fits a diagonal normal. `predict_dist` returns the distribution. The default regression `predict` is the mean of the member outputs.
 
-The mixture, flow, histogram, and quantile heads of the forecasters are not built into `TabularEstimator`. [`examples/table_heads.py`](../examples/table_heads.py) attaches any of them to a table through `task="custom"`, and the [README](../README.md#pick-a-head-for-the-shape-of-the-target) compares them on public tables.
+## Distributions
+
+```python
+model = TabularEstimator(task="mixture").fit(X, y)
+
+model.predict(X_new)                        # the mean of the predictive distribution
+model.predict_quantiles(X_new, [0.1, 0.9])  # rows by levels, on the scale of y
+model.sample(X_new, n=1000)                 # draws by rows
+model.log_prob(X_new, y_new)                # log density of each observed value
+```
+
+`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (16 bins over ±4 standard deviations), or `quantile` (pinball loss at 0.1, 0.5, and 0.9). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels.
+
+A distribution task caps the global gradient norm at 1, because a density head on a target with a spike, such as tips that are exactly zero, can shrink a component until one minibatch's gradient blows up. `gradient_clip` sets the cap for any task, and `0` turns it off.
 
 ## Embeddings
 

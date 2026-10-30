@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
 import urllib.request
 import warnings
@@ -39,7 +38,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import jax
-import jax.numpy as jnp
 import lightgbm
 import numpy as np
 import pandas as pd
@@ -48,18 +46,9 @@ from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
 
 from ashlar import TabularEstimator, TimeSeriesForecaster, classifier
-from ashlar.distributional import (
-    QUANTILE_LEVELS,
-    decode,
-    log_density,
-    point_values,
-    sample_values,
-)
+from ashlar.distributional import QUANTILE_LEVELS
 from ashlar.forecast import _forecast_windows
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from table_heads import flatten_members, table_head
 
 DATA_DIR = Path("/tmp/ashlar-bench")
 SEEDS = (0, 1, 2)
@@ -73,8 +62,6 @@ SOURCES = {
     "adult.csv": f"{RAW}/jbrownlee/Datasets/master/adult-all.csv",
     "ames.csv": f"{RAW}/wblakecannon/ames/master/data/housing.csv",
     "temperatures.csv": f"{RAW}/jbrownlee/Datasets/master/daily-min-temperatures.csv",
-    "flights.csv": f"{RAW}/byuidatascience/data4python4ds/master/data-raw/flights/flights.csv",
-    "flights-3m.parquet": f"{RAW}/vega/vega-datasets/main/data/flights-3m.parquet",
 }
 N_DRAWS = 400
 Z80 = 1.2815515655446004
@@ -139,53 +126,6 @@ def adult():
 def _sample(frame, y, n, seed=0):
     rows = np.random.default_rng(seed).choice(len(y), size=n, replace=False)
     return frame.iloc[rows].reset_index(drop=True), y[rows]
-
-
-def flights():
-    """NYC 2013 departures, arrival delay in minutes, from what is known before pushback.
-
-    Departure delay, actual times, and air time are left out: they would give the answer away.
-    """
-    frame = pd.read_csv(_path("flights.csv"))
-    frame = frame[frame["arr_delay"].notna()].reset_index(drop=True)
-    date = pd.to_datetime(frame[["year", "month", "day"]])
-    out = pd.DataFrame(
-        {
-            "month": frame["month"].astype(np.float64),
-            "day_of_year": date.dt.dayofyear.astype(np.float64),
-            "weekday": date.dt.dayofweek.astype(np.float64),
-            "departure": (frame["sched_dep_time"] // 100 + frame["sched_dep_time"] % 100 / 60).astype(np.float64),
-            "arrival": (frame["sched_arr_time"] // 100 + frame["sched_arr_time"] % 100 / 60).astype(np.float64),
-            "distance": frame["distance"].astype(np.float64),
-            "carrier": frame["carrier"],
-            "origin": frame["origin"],
-            "dest": frame["dest"],
-            "tailnum": frame["tailnum"],
-        }
-    )
-    return _strings(out), frame["arr_delay"].to_numpy(np.float64)
-
-
-def flights_3m():
-    """Three million US flights, January to June 2001, arrival delay in minutes.
-
-    The source has only the scheduled time, distance, origin, and destination.
-    Needs ``pyarrow`` to read the parquet file.
-    """
-    frame = pd.read_parquet(_path("flights-3m.parquet"))
-    date = frame["date"]
-    out = pd.DataFrame(
-        {
-            "month": date.dt.month.astype(np.float64),
-            "day_of_year": date.dt.dayofyear.astype(np.float64),
-            "weekday": date.dt.dayofweek.astype(np.float64),
-            "departure": (date.dt.hour + date.dt.minute / 60).astype(np.float64),
-            "distance": frame["distance"].astype(np.float64),
-            "origin": frame["origin"],
-            "dest": frame["destination"],
-        }
-    )
-    return _strings(out), frame["delay"].to_numpy(np.float64)
 
 
 def taxis(target: str):
@@ -325,29 +265,22 @@ def stage_point(results):
 
 
 def fit_distribution(kind, x_train, z_train, seed, **overrides):
-    """``z_train`` is the standardized target. The fixed histogram bins assume that axis."""
-    return table_head(kind, random_state=seed, **overrides).fit(x_train, z_train)
+    """``z_train`` is the standardized target, so the built-in z-score is close to the identity."""
+    return TabularEstimator(task=kind, random_state=seed, **overrides).fit(x_train, z_train)
 
 
 def distribution_scores(kind, model, x_test, y_test, mean, std, seed):
-    raw = jnp.asarray(model.predict_raw(x_test))
-    flat, batch, members = flatten_members(raw)
-    decoded = decode(kind, flat, 1)
-    z_test = (y_test - mean) / std
+    """Scores on the original scale. The model predicts the standardized target."""
     scores = {}
     if kind == "quantile":
-        levels = np.asarray(decoded).reshape(batch, members, 3).mean(axis=1) * std + mean
+        levels = model.predict_quantiles(x_test) * std + mean
         point = levels[:, 1]
     else:
-        draws = np.asarray(sample_values(kind, decoded, jax.random.PRNGKey(seed), N_DRAWS))
-        draws = draws.reshape(N_DRAWS, batch, members).transpose(1, 0, 2).reshape(batch, -1) * std + mean
+        draws = model.sample(x_test, n=N_DRAWS, seed=seed).T * std + mean
         levels = np.quantile(draws, QUANTILE_LEVELS, axis=1).T
-        point = np.asarray(point_values(kind, decoded)).reshape(batch, members).mean(axis=1) * std + mean
+        point = model.predict(x_test) * std + mean
         scores["crps"] = _crps(draws, y_test)
-        repeated = jnp.repeat(jnp.asarray(z_test, dtype=flat.dtype), members)[:, None]
-        logp = np.asarray(log_density(kind, decoded, repeated)).reshape(batch, members)
-        logp = np.logaddexp.reduce(logp, axis=1) - np.log(members) - np.log(std)
-        scores["nll"] = float(-np.mean(logp))
+        scores["nll"] = float(-np.mean(model.log_prob(x_test, (y_test - mean) / std) - np.log(std)))
     scores.update(_interval_scores(levels, y_test, point))
     return scores
 
@@ -450,70 +383,6 @@ def stage_dist(results):
             rows["runs"][key] = run
             print(name, seed, json.dumps({k: round(v.get("crps", v.get("pinball", v["rmse"])), 4) for k, v in run.items()}), flush=True)
             _save(results)
-
-
-# ---------------------------------------------------------------- stage: large
-
-# 260k training rows. Every Ashlar head gets the same larger batch and step, so an
-# epoch is 500 steps instead of 4,000. Chosen before any test score was seen.
-LARGE = {"batch_size": 512, "learning_rate": 2e-3, "max_epochs": 40, "patience": 6}
-LARGE_SEEDS = (0, 1, 2)
-
-
-# Three million rows. A bigger batch again, and every score on a fixed 100,000-row
-# sample of the test split, so 400 draws per row fit in memory.
-MILLION = {"batch_size": 2048, "learning_rate": 2e-3, "max_epochs": 30, "patience": 4}
-MILLION_TEST_ROWS = 100_000
-
-
-def stage_large(results):
-    _large(results, "flights", flights, LARGE, None, ("carrier", "origin", "dest", "tailnum"))
-
-
-def stage_million(results):
-    _large(results, "flights_3m", flights_3m, MILLION, MILLION_TEST_ROWS, ("origin", "dest"))
-
-
-def _large(results, name, loader, settings, test_rows, categorical):
-    out = results.setdefault(_stage_of(name), {})
-    x, y = loader()
-    rows = out.setdefault(name, {"rows": int(len(y)), "runs": {}, "settings": settings, "test_rows": test_rows})
-    rows["levels"] = {c: int(x[c].nunique()) for c in categorical}
-    for seed in ONLY_SEED or LARGE_SEEDS:
-        key = str(seed)
-        if key in rows["runs"]:
-            continue
-        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=seed)
-        if test_rows is not None:
-            keep = np.random.default_rng(seed).choice(len(y_test), size=test_rows, replace=False)
-            x_test, y_test = x_test.iloc[keep].reset_index(drop=True), y_test[keep]
-        mean, std = float(np.mean(y_train)), float(np.std(y_train))
-        run = {}
-        started = time.perf_counter()
-        point = TabularEstimator(random_state=seed, **settings).fit(x_train, y_train).predict(x_test)
-        run["ashlar_mse"] = {
-            "rmse": float(np.sqrt(np.mean((point - y_test) ** 2))),
-            "mae": float(np.mean(np.abs(point - y_test))),
-            "seconds": time.perf_counter() - started,
-        }
-        print(name, seed, "mse", round(run["ashlar_mse"]["mae"], 3), flush=True)
-        for kind in DIST_HEADS:
-            started = time.perf_counter()
-            model = fit_distribution(kind, x_train, (y_train - mean) / std, seed, **settings)
-            run[f"ashlar_{kind}"] = distribution_scores(kind, model, x_test, y_test, mean, std, seed)
-            run[f"ashlar_{kind}"]["seconds"] = time.perf_counter() - started
-            print(name, seed, kind, json.dumps({k: round(v, 3) for k, v in run[f"ashlar_{kind}"].items()}), flush=True)
-        for kind in ("xgboost", "lightgbm"):
-            started = time.perf_counter()
-            run.update(gbt_distribution(kind, x_train, y_train, x_test, y_test, seed))
-            print(name, seed, kind, round(time.perf_counter() - started, 1), flush=True)
-        rows["runs"][key] = run
-        print(name, seed, json.dumps({k: round(v.get("crps", v.get("pinball", v["rmse"])), 4) for k, v in run.items()}), flush=True)
-        _save(results)
-
-
-def _stage_of(name):
-    return "million" if name == "flights_3m" else "large"
 
 
 # ---------------------------------------------------------------- stage: embeddings
@@ -665,8 +534,6 @@ def _table(runs, metrics, headers):
 SECTIONS = {
     "point": "Point accuracy",
     "dist": "Distributions on smaller tables",
-    "large": "Distributions on large tables",
-    "million": "Distributions on large tables",
     "embed": "Learned embeddings",
     "forecast": "Forecast heads",
 }
@@ -678,8 +545,6 @@ TITLES = {
     "adult": "Adult income, over $50k",
     "taxi_tip": "NYC taxi tips, $, payment type hidden",
     "diamonds_price": "Diamonds, price in $1,000, 12,000-row sample",
-    "flights": "NYC flights 2013, arrival delay in minutes",
-    "flights_3m": "US flights 2001, arrival delay in minutes, scored on 100,000 test rows",
     "taxi_duration": "NYC taxi trips, log minutes, from zones without distance",
     "temperatures": "Melbourne daily minimum temperature, °C, one day ahead",
 }
@@ -688,7 +553,7 @@ TITLES = {
 def stage_report(_results):
     """Markdown tables for docs/benchmarks.md: mean ± standard deviation over the splits."""
     section = None
-    for stage in ("point", "dist", "large", "million", "embed", "forecast"):
+    for stage in ("point", "dist", "embed", "forecast"):
         for name, rows in _merged(stage).items():
             runs = rows["runs"]
             if stage == "forecast":
@@ -714,12 +579,8 @@ def stage_report(_results):
 # ---------------------------------------------------------------- main
 
 
-ONLY_SEED: tuple[int, ...] = ()
-
-
 def _out_path(stage: str) -> Path:
-    suffix = f"-{ONLY_SEED[0]}" if ONLY_SEED and stage in {"large", "million"} else ""
-    return DATA_DIR / f"readme-{stage}{suffix}.json"
+    return DATA_DIR / f"readme-{stage}.json"
 
 
 def _merged(stage: str):
@@ -741,8 +602,6 @@ def _save(results):
 STAGES = {
     "point": stage_point,
     "dist": stage_dist,
-    "large": stage_large,
-    "million": stage_million,
     "embed": stage_embed,
     "forecast": stage_forecast,
 }
@@ -752,10 +611,7 @@ REPORT = "report"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=[*STAGES, "all", REPORT], default="all")
-    parser.add_argument("--seed", type=int, default=None, help="large and million stages: run this split alone")
     args = parser.parse_args()
-    global ONLY_SEED
-    ONLY_SEED = () if args.seed is None else (args.seed,)
     if args.stage == REPORT:
         stage_report(None)
         return
