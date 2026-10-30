@@ -9,7 +9,7 @@ Ashlar fits tables and forecasts series with JAX neural networks. You call `fit`
 
 It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
-It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in 9 to 13 minutes.
+It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in just a few minutes.
 
 ## Install
 
