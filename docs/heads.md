@@ -90,3 +90,17 @@ CRPS, three splits each. The mixture is the best head on every table here, and e
 The intervals are better calibrated too. With an interval that promises 80%, the three LightGBM quantile models cover 70% of held-out California values, 69% of diamond prices, and 72% of abalone rings. Ashlar's mixture covers 76%, 80%, and 78%. On the temperature forecast the mixture beats LightGBM on the same 28-day window on every interval score: pinball 0.554 against 0.573, and coverage 83% against 77%.
 
 Every column, with pinball loss, coverage, width, and log-likelihood, is in [docs/benchmarks.md](benchmarks.md#distributions-on-smaller-tables).
+
+## Where the members disagree
+
+A predictive distribution says how noisy the target is. It does not say how sure the model is of that distribution. An ensemble backbone trains several members together, and where they disagree the data did not settle the answer: rows far from the training data, rare categories, thin corners of the table. `predict_uncertainty` splits the two:
+
+```python
+model = ASRRegressor(task="mixture", backbone="tabm").fit(X, y)
+parts = model.predict_uncertainty(X_new)
+parts["epistemic"]   # spread of the members' points, on the scale of y
+parts["aleatoric"]   # the noise each member predicts, as a standard deviation
+parts["total"]       # both, by the law of total variance
+```
+
+A point regression or the quantile head has no noise model, so it returns `epistemic` and `total` only. A classifier or an ordinal model returns entropies in nats instead: `total` is the entropy of the mean probabilities, `aleatoric` the members' mean entropy, and `epistemic` the mutual information between the label and the member. The default `residual_mlp` has one member, so its `epistemic` is zero: use `backbone="tabm"`, or any backbone with `k` above 1.
