@@ -33,7 +33,7 @@ Every other column is categorical and gets a learned vector, 8 wide by default. 
 
 ## Head
 
-`task` picks the head: `"regression"` for a point, `"classification"`, `"ordinal"`, `"tree"` for nested outcomes, and `"gaussian"`, `"mixture"`, `"flow"`, `"histogram"`, or `"quantile"` for a predictive distribution. [docs/heads.md](heads.md) says which to reach for. `task="custom"` takes your own head module with its `objective`, `point_fn`, and `dist_fn`; [`examples/advanced.py`](../examples/advanced.py) fits a linked head that shares a trunk between a continuous outcome and a masked event.
+`task` picks the head: `"regression"` for a point, `"classification"`, `"ordinal"`, `"tree"` for nested outcomes, and `"gaussian"`, `"mixture"`, `"flow"`, `"histogram"`, `"quantile"`, or `"student_t"` for a predictive distribution, and `"poisson"` or `"negative_binomial"` for a count. [docs/heads.md](heads.md) says which to reach for. `task="custom"` takes your own head module with its `objective`, `point_fn`, and `dist_fn`; [`examples/advanced.py`](../examples/advanced.py) fits a linked head that shares a trunk between a continuous outcome and a masked event.
 
 ## Train
 
