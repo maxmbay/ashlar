@@ -214,18 +214,26 @@ class DistributionHead(_EnsembleHead):
 
     kind: str = field(static=True)
 
-    def __init__(self, d_in, k, *, n_events, n_classes, key, kind="gaussian", **kwargs):
-        from ashlar.distributional import initial_bias, initial_weight_scale, output_width
+    def __init__(self, d_in, k, *, n_events, n_classes, key, kind="gaussian", bins=None, **kwargs):
+        from ashlar.distributional import (
+            HISTOGRAM_BINS,
+            initial_bias,
+            initial_weight_scale,
+            output_width,
+        )
 
         del n_classes
         if kwargs:
             raise ShapeError(f"distribution head received unknown arguments {sorted(kwargs)}.")
         if n_events != 1:
             raise ShapeError("a distributional table head models one target column.")
-        width = output_width(kind, 1)
+        if bins is not None and kind != "histogram":
+            raise ShapeError(f"bins is the histogram head's bin count; the {kind} head does not take it.")
+        count = HISTOGRAM_BINS if bins is None else bins
+        width = output_width(kind, 1, count)
         scale = initial_weight_scale(kind, d_in)
         weight = scale * jax.random.normal(key, (k, d_in, width), dtype=jnp.float32)
-        bias = jnp.broadcast_to(initial_bias(kind, 1), (k, width))
+        bias = jnp.broadcast_to(initial_bias(kind, 1, count), (k, width))
         self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
         self.k = k
         self.kind = kind

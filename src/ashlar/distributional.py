@@ -66,8 +66,13 @@ def flow_parameter_count() -> int:
     return 3 * FLOW_BINS - 1
 
 
-def output_width(head: str, horizon: int) -> int:
-    """Width of the flat last-token projection for this head."""
+def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS) -> int:
+    """Width of the flat last-token projection for this head.
+
+    ``bins`` is the histogram head's bin count and is ignored by every other
+    head. More bins buy resolution: the density a histogram head can draw is
+    piecewise constant on its bins.
+    """
     check_output_head(head)
     if horizon < 1:
         raise AshlarError("horizon must be at least 1.")
@@ -81,7 +86,7 @@ def output_width(head: str, horizon: int) -> int:
         return int(horizon) * MIXTURE_COMPONENTS * 3
     if head == "flow":
         return int(horizon) * flow_parameter_count()
-    return int(horizon) * HISTOGRAM_BINS
+    return int(horizon) * check_histogram_bins(bins)
 
 
 def initial_weight_scale(head: str, d_model: int) -> float:
@@ -100,10 +105,10 @@ def initial_weight_scale(head: str, d_model: int) -> float:
     return float(math.sqrt(1.0 / d_model))
 
 
-def initial_bias(head: str, horizon: int) -> jax.Array:
+def initial_bias(head: str, horizon: int, bins: int = HISTOGRAM_BINS) -> jax.Array:
     """Output bias. Mixture means start on a grid, and quantile levels at the
     standard normal's 0.1, 0.5, and 0.9; every other head starts at 0."""
-    width = output_width(head, horizon)
+    width = output_width(head, horizon, bins)
     if head == "quantile":
         z = 1.2815515655446004
         gap = math.log(math.expm1(z))
@@ -117,24 +122,33 @@ def initial_bias(head: str, horizon: int) -> jax.Array:
     return raw.reshape((width,))
 
 
-def histogram_edges(dtype=jnp.float32) -> jax.Array:
+def check_histogram_bins(bins: int) -> int:
+    """Return ``bins`` when it is a usable bin count. Raise otherwise."""
+    count = int(bins)
+    if count < 2:
+        raise AshlarError(f"a histogram head needs at least 2 bins; received {bins!r}.")
+    return count
+
+
+def histogram_edges(dtype=jnp.float32, bins: int = HISTOGRAM_BINS) -> jax.Array:
     """Fixed standardized bin edges, inclusive of both ends."""
-    return jnp.linspace(-HISTOGRAM_LIMIT, HISTOGRAM_LIMIT, HISTOGRAM_BINS + 1, dtype=dtype)
+    return jnp.linspace(-HISTOGRAM_LIMIT, HISTOGRAM_LIMIT, check_histogram_bins(bins) + 1, dtype=dtype)
 
 
-def histogram_centers(dtype=jnp.float32) -> jax.Array:
-    edges = histogram_edges(dtype)
+def histogram_centers(dtype=jnp.float32, bins: int = HISTOGRAM_BINS) -> jax.Array:
+    edges = histogram_edges(dtype, bins)
     return 0.5 * (edges[:-1] + edges[1:])
 
 
-def histogram_bin(value: jax.Array) -> jax.Array:
+def histogram_bin(value: jax.Array, bins: int = HISTOGRAM_BINS) -> jax.Array:
     """Bin index of a standardized target. Values outside the edges use the end bins."""
-    left = histogram_edges(value.dtype)[:-1]
+    count = check_histogram_bins(bins)
+    left = histogram_edges(value.dtype, count)[:-1]
     index = jnp.sum(value[..., None] >= left, axis=-1) - 1
-    return jnp.clip(index, 0, HISTOGRAM_BINS - 1).astype(jnp.int32)
+    return jnp.clip(index, 0, count - 1).astype(jnp.int32)
 
 
-def decode(head: str, flat: jax.Array, horizon: int):
+def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
     """Turn a flat projection ``(batch, width)`` into constrained parameters.
 
     ``quantile`` returns levels ``(batch, horizon, 3)``. ``gaussian`` returns
@@ -142,14 +156,20 @@ def decode(head: str, flat: jax.Array, horizon: int):
     ``(loc, scale, weight)`` each ``(batch, horizon, component)``. ``flow``
     returns unconstrained spline parameters ``(batch, horizon, parameters)``.
     ``histogram`` returns logits ``(batch, horizon, bin)``.
+
+    A histogram projection carries its own bin count in its width, so ``bins``
+    is only needed to check a width that should have been built differently.
     """
     check_output_head(head)
     if head == "mse":
         raise AshlarError("the squared-error head has no distributional parameters.")
     flat = jnp.asarray(flat)
-    if flat.ndim != 2 or flat.shape[-1] != output_width(head, horizon):
+    if head == "histogram" and bins is None and flat.ndim == 2 and flat.shape[-1] % int(horizon) == 0:
+        bins = flat.shape[-1] // int(horizon)
+    width = output_width(head, horizon, HISTOGRAM_BINS if bins is None else bins)
+    if flat.ndim != 2 or flat.shape[-1] != width:
         raise ShapeError(
-            f"{head} projection must have shape (batch, {output_width(head, horizon)}); received {flat.shape}."
+            f"{head} projection must have shape (batch, {width}); received {flat.shape}."
         )
     batch = flat.shape[0]
     if head == "quantile":
@@ -166,7 +186,7 @@ def decode(head: str, flat: jax.Array, horizon: int):
         return raw[..., 0], positive_scale(raw[..., 1]), jax.nn.softmax(raw[..., 2], axis=-1)
     if head == "flow":
         return flat.reshape(batch, int(horizon), flow_parameter_count())
-    return flat.reshape(batch, int(horizon), HISTOGRAM_BINS)
+    return flat.reshape(batch, int(horizon), width // int(horizon))
 
 
 def point_values(head: str, decoded) -> jax.Array:
@@ -185,7 +205,7 @@ def point_values(head: str, decoded) -> jax.Array:
         return flow_forward(decoded, zeros)
     if head == "histogram":
         probabilities = jax.nn.softmax(decoded, axis=-1)
-        return probabilities @ histogram_centers(decoded.dtype)
+        return probabilities @ histogram_centers(decoded.dtype, decoded.shape[-1])
     raise AshlarError("the squared-error head is already a point forecast.")
 
 
@@ -219,14 +239,15 @@ def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
         _flow_shape(decoded, target)
         return jnp.mean(-flow_log_density(decoded, target))
     if head == "histogram":
-        if decoded.ndim != 3 or decoded.shape[-1] != HISTOGRAM_BINS or decoded.shape[:-1] != target.shape:
+        if decoded.ndim != 3 or decoded.shape[-1] < 2 or decoded.shape[:-1] != target.shape:
             raise ShapeError(
-                f"histogram logits must have shape {target.shape} + ({HISTOGRAM_BINS},); "
+                f"histogram logits must have shape {target.shape} + (bins,) with at least 2 bins; "
                 f"received {getattr(decoded, 'shape', None)}."
             )
+        count = decoded.shape[-1]
         log_probability = jax.nn.log_softmax(decoded, axis=-1)
-        chosen = jnp.take_along_axis(log_probability, histogram_bin(target)[..., None], axis=-1)[..., 0]
-        expected = jax.nn.softmax(decoded, axis=-1) @ histogram_centers(decoded.dtype)
+        chosen = jnp.take_along_axis(log_probability, histogram_bin(target, count)[..., None], axis=-1)[..., 0]
+        expected = jax.nn.softmax(decoded, axis=-1) @ histogram_centers(decoded.dtype, count)
         squared = jnp.square(expected - target)
         return jnp.mean(-chosen + jnp.asarray(HISTOGRAM_LOCATION_WEIGHT, dtype=target.dtype) * squared)
     raise AshlarError("the squared-error head does not use the distributional loss.")
@@ -247,9 +268,10 @@ def row_loss(head: str, decoded, target: jax.Array) -> jax.Array:
         gap = target[..., None] - decoded
         return jnp.mean(jnp.maximum(levels * gap, (levels - 1.0) * gap), axis=-1)
     if head == "histogram":
+        count = decoded.shape[-1]
         log_probability = jax.nn.log_softmax(decoded, axis=-1)
-        chosen = jnp.take_along_axis(log_probability, histogram_bin(target)[..., None], axis=-1)[..., 0]
-        expected = jax.nn.softmax(decoded, axis=-1) @ histogram_centers(decoded.dtype)
+        chosen = jnp.take_along_axis(log_probability, histogram_bin(target, count)[..., None], axis=-1)[..., 0]
+        expected = jax.nn.softmax(decoded, axis=-1) @ histogram_centers(decoded.dtype, count)
         squared = jnp.square(expected - target)
         return -chosen + jnp.asarray(HISTOGRAM_LOCATION_WEIGHT, dtype=target.dtype) * squared
     return -log_density(head, decoded, target)
@@ -275,13 +297,15 @@ def log_density(head: str, decoded, value: jax.Array) -> jax.Array:
         _flow_shape(decoded, value)
         return flow_log_density(decoded, value)
     if head == "histogram":
-        if decoded.shape[:-1] != value.shape or decoded.shape[-1] != HISTOGRAM_BINS:
+        if decoded.shape[:-1] != value.shape or decoded.shape[-1] < 2:
             raise ShapeError(
                 f"histogram log density expected value shape {decoded.shape[:-1]}; received {value.shape}."
             )
+        count = decoded.shape[-1]
         log_probability = jax.nn.log_softmax(decoded, axis=-1)
-        chosen = jnp.take_along_axis(log_probability, histogram_bin(value)[..., None], axis=-1)[..., 0]
-        width = histogram_edges(value.dtype)[1] - histogram_edges(value.dtype)[0]
+        chosen = jnp.take_along_axis(log_probability, histogram_bin(value, count)[..., None], axis=-1)[..., 0]
+        edges = histogram_edges(value.dtype, count)
+        width = edges[1] - edges[0]
         return chosen - jnp.log(width)
     raise AshlarError(f"the {head} head has no log density.")
 
@@ -321,7 +345,7 @@ def sample_values(head: str, decoded, key, n: int) -> jax.Array:
     if head == "histogram":
         bin_key, uniform_key = jax.random.split(key)
         choices = jax.random.categorical(bin_key, decoded, axis=-1, shape=(count,) + decoded.shape[:-1])
-        edges = histogram_edges(decoded.dtype)
+        edges = histogram_edges(decoded.dtype, decoded.shape[-1])
         left = jnp.take(edges[:-1], choices)
         right = jnp.take(edges[1:], choices)
         uniform = jax.random.uniform(uniform_key, choices.shape, dtype=decoded.dtype)

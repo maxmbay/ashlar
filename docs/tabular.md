@@ -76,7 +76,7 @@ model.sample(X_new, n=1000)                 # draws by rows
 model.log_prob(X_new, y_new)                # log density of each observed value
 ```
 
-`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (16 bins over ±4 standard deviations), or `quantile` (pinball loss at 0.1, 0.5, and 0.9). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels.
+`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (fixed bins over ±4 standard deviations, 16 by default and `head_kwargs={"bins": 48}` for more), or `quantile` (pinball loss at 0.1, 0.5, and 0.9). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels.
 
 A distribution task caps the global gradient norm at 1, because a density head on a target with a spike, such as tips that are exactly zero, can shrink a component until one minibatch's gradient blows up. `gradient_clip` sets the cap for any task, and `0` turns it off.
 
@@ -93,6 +93,20 @@ Row 0 of `table` is the unknown category. `names` matches the rows after it.
 ![Categories with the same effect sit together.](images/categorical-embeddings.png)
 
 Each category here is a learned 2-d vector, from `categorical_embedding_dim=2` on a synthetic table. Color is that category's effect on the target. Categories that move the target the same way land next to each other. The unknown row is left off the plot.
+
+The vectors are ordinary arrays, and they carry structure the model was never told about:
+
+```python
+model = ASRRegressor().fit(X, y)
+names = [column.name for column in model.encoder_.embedding_columns]
+zones = model.core_.categorical_embeddings.tables[names.index("pickup_zone")]   # (1 + levels, 8)
+```
+
+![Learned taxi pickup-zone vectors, projected to two dimensions.](images/taxi-zones.png)
+
+That table is a model of NYC taxi trip duration from the pickup and drop-off zones, 191 and 203 levels, plus the hour, the weekday, and the borough. There is no distance column. The model was never told where a zone is, yet the first principal component of the learned vectors tracks how long trips from that zone run (correlation 0.73), and both airports land far from everything else.
+
+On accuracy alone the embeddings are no magic. With 5,000 training rows spread over about 200 zones on each side, a learned vector per zone has little data behind it, and one-hot with a longer schedule does better: log-duration RMSE 0.580 against 0.681, with LightGBM's native categorical splits best at 0.520 ([docs/benchmarks.md](benchmarks.md#learned-embeddings) has the table). What the embeddings add is a representation: 8 numbers per zone instead of a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen.
 
 A set column is a cell that holds a list of labels. Pass `set_features=["tags"]`. The model mean-pools a learned token embedding. Lists longer than `set_max_length` (default 8) are truncated to the longest list in the training rows, capped by that maximum. An empty list becomes a zero vector.
 

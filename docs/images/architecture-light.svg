@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1296 382" width="1296" height="382" role="img" aria-label="Four courses of model choices with one path lit">
+<rect width="1296" height="382" rx="10" fill="#fbfaf7"/>
+<path d="M79.8 90.0V142.0M90.8 176.0V186.0Q90.8 192.0 96.8 192.0H516.2Q522.2 192.0 522.2 198.0V228.0M522.2 262.0V272.0Q522.2 278.0 516.2 278.0H74.9Q68.9 278.0 68.9 284.0V314.0" fill="none" stroke="#d4502a" stroke-width="2" stroke-opacity="0.55"/>
+<text x="34.0" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">ENCODE</text>
+<text x="97.4" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">num_embeddings, categorical_embeddings, cyclical</text>
+<rect x="34.0" y="56.0" width="91.7" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<path d="M37.0 57.0H122.7" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="79.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">piecewise</text>
+<rect x="132.7" y="56.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M135.7 57.0H214.1" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="174.9" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">periodic</text>
+<rect x="224.1" y="56.0" width="106.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M227.1 57.0H327.4" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="277.2" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">linear_relu</text>
+<rect x="337.4" y="56.0" width="142.8" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M340.4 57.0H477.2" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="408.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">category vectors</text>
+<rect x="487.2" y="56.0" width="77.1" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M490.2 57.0H561.3" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="525.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">one-hot</text>
+<rect x="571.3" y="56.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M574.3 57.0H652.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="613.5" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">cyclical</text>
+<rect x="662.7" y="56.0" width="106.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M665.7 57.0H766.0" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="715.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">set columns</text>
+<text x="34.0" y="131.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">BACKBONE</text>
+<text x="113.2" y="131.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">backbone, backbone_kwargs</text>
+<rect x="34.0" y="142.0" width="113.6" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<path d="M37.0 143.0H144.6" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="90.8" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">residual_mlp</text>
+<rect x="154.6" y="142.0" width="55.2" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M157.6 143.0H206.8" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="182.2" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">tabm</text>
+<rect x="216.8" y="142.0" width="106.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M219.8 143.0H320.1" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="269.9" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">transformer</text>
+<rect x="330.1" y="142.0" width="47.9" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M333.1 143.0H375.0" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="354.1" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">set</text>
+<rect x="385.0" y="142.0" width="164.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M388.0 143.0H546.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="467.4" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">your Equinox module</text>
+<text x="34.0" y="217.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">HEAD</text>
+<text x="81.6" y="217.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">task, head</text>
+<rect x="34.0" y="228.0" width="62.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 229.0H93.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="65.2" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">point</text>
+<rect x="103.5" y="228.0" width="77.1" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M106.5 229.0H177.6" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="142.1" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">classes</text>
+<rect x="187.6" y="228.0" width="77.1" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M190.6 229.0H261.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="226.1" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">ordinal</text>
+<rect x="271.7" y="228.0" width="113.6" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M274.7 229.0H382.3" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="328.5" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">outcome tree</text>
+<rect x="392.3" y="228.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
+<path d="M395.3 229.0H473.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="434.5" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">gaussian</text>
+<rect x="483.7" y="228.0" width="77.1" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<path d="M486.7 229.0H557.8" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="522.2" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">mixture</text>
+<rect x="567.8" y="228.0" width="55.2" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
+<path d="M570.8 229.0H620.0" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="595.4" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">flow</text>
+<rect x="630.0" y="228.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
+<path d="M633.0 229.0H718.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="675.9" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">histogram</text>
+<rect x="728.7" y="228.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
+<path d="M731.7 229.0H810.1" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="770.9" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">quantile</text>
+<rect x="820.1" y="228.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M823.1 229.0H908.8" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="866.0" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">your head</text>
+<text x="34.0" y="303.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">TRAIN</text>
+<text x="89.5" y="303.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">learning_rate_schedule, batch_size, patience, search</text>
+<rect x="34.0" y="314.0" width="69.8" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<path d="M37.0 315.0H100.8" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="68.9" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">cosine</text>
+<rect x="110.8" y="314.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M113.8 315.0H192.2" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="153.0" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">constant</text>
+<rect x="202.2" y="314.0" width="69.8" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M205.2 315.0H269.0" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="237.1" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">linear</text>
+<rect x="279.0" y="314.0" width="99.0" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M282.0 315.0H375.0" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="328.5" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">auto batch</text>
+<rect x="385.0" y="314.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M388.0 315.0H466.4" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="427.2" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">patience</text>
+<rect x="476.4" y="314.0" width="128.2" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M479.4 315.0H601.6" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="540.5" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">sample weights</text>
+<rect x="611.6" y="314.0" width="106.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M614.6 315.0H714.9" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="664.7" y="335.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">grid search</text>
+<path d="M929.8 56.0V348.0" stroke="#e9e4dc" stroke-width="1"/>
+<text x="947.8" y="68.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#d4502a">ASRRegressor</text>
+<text x="1039.0" y="68.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(</text>
+<text x="947.8" y="90.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">    num_embeddings</text>
+<text x="1084.6" y="90.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">=</text>
+<text x="1092.2" y="90.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#147a72">"piecewise"</text>
+<text x="1175.8" y="90.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">,</text>
+<text x="947.8" y="112.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">    backbone</text>
+<text x="1039.0" y="112.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">=</text>
+<text x="1046.6" y="112.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#147a72">"residual_mlp"</text>
+<text x="1153.0" y="112.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">,</text>
+<text x="947.8" y="134.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">    task</text>
+<text x="1008.6" y="134.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">=</text>
+<text x="1016.2" y="134.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#147a72">"mixture"</text>
+<text x="1084.6" y="134.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">,</text>
+<text x="947.8" y="156.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">)</text>
+<text x="955.4" y="156.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">.fit</text>
+<text x="985.8" y="156.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(X, y)</text>
+<text x="947.8" y="192.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Every slot is a keyword argument.</text>
+<text x="947.8" y="209.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Change one and the rest stays put:</text>
+<text x="947.8" y="226.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">task="flow" for a skewed target,</text>
+<text x="947.8" y="243.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">backbone="tabm" for the ensemble.</text>
+</svg>
