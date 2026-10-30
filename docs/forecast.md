@@ -61,3 +61,14 @@ The histogram figure is one held-out step of a synthetic cycle. The clay bar is 
 ## A longer prefix
 
 `ASRHistoryForecaster` uses the same six heads. The last `lookback` observations are one token each. Every older observation sits in one non-overlapping patch of that length. `predict(series)` forecasts the horizon after the last observation. Pass `origins` to forecast at earlier cut points. `quantiles`, `log_prob`, `gaussian`, `sample`, and `bin_probabilities` take the same `origins` argument.
+
+## Save and load
+
+```python
+from ashlar import ASRForecaster
+
+model.save("models/demand")                      # metadata.json and model.eqx
+model = ASRForecaster.load("models/demand")
+```
+
+Both forecasters save their settings as JSON and their weights with Equinox, never with pickle. Load with the class that saved: `ASRHistoryForecaster.load` for the full-history model.

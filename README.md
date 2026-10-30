@@ -149,6 +149,17 @@ Every categorical column in that model is a learned vector, and the branch proba
 
 An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
 
+## Save and load
+
+```python
+from ashlar import ASRModel
+
+model.save("models/fare")              # a directory: metadata.json and the weights
+model = ASRModel.load("models/fare")   # comes back as the class it was saved as
+```
+
+A saved model is JSON plus Equinox weight files, not a pickle. Every model saves this way, distributional heads included, and reloads with identical predictions. The forecasters load with their own class: `ASRForecaster.load(path)`. Pass `save_optimizer=False` to a tabular model to leave out the optimizer state when you only need to predict. A custom head or backbone is recorded by its module path and imported on load, so load only models you trust.
+
 ## Results
 
 Eight public tables of half a million to two million rows, against LightGBM, XGBoost, and CatBoost, all trained on a laptop CPU. Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments.

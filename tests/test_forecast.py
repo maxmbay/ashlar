@@ -2,6 +2,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.errors import AshlarError
@@ -161,3 +162,25 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
         pass
     else:
         raise AssertionError("a short series was accepted")
+
+
+def test_forecasters_save_and_load_without_pickle(tmp_path):
+    series = np.sin(np.arange(260) / 5.0) + 0.1 * np.random.default_rng(0).normal(size=260)
+    for cls in (ASRForecaster, ASRHistoryForecaster):
+        for head in ("mse", "mixture"):
+            model = cls(lookback=16, horizon=4, max_epochs=2, patience=1, head=head).fit(series)
+            directory = tmp_path / f"{cls.__name__}-{head}"
+            restored = cls.load(model.save(directory))
+            assert sorted(path.name for path in directory.iterdir()) == ["metadata.json", "model.eqx"]
+            assert restored.best_epoch_ == model.best_epoch_ and restored.n_obs_ == model.n_obs_
+            assert np.allclose(model.predict(series[-40:]), restored.predict(series[-40:]))
+            if head == "mixture":
+                future = series[-4:]
+                assert np.allclose(model.log_prob(series[-44:-4], future), restored.log_prob(series[-44:-4], future))
+    with pytest.raises(AshlarError):
+        ASRHistoryForecaster.load(tmp_path / "ASRForecaster-mse")
+
+
+def test_forecaster_save_requires_fit(tmp_path):
+    with pytest.raises(AshlarError):
+        ASRForecaster().save(tmp_path / "unfitted")

@@ -26,6 +26,9 @@ The residual regression default does not use this module.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -34,6 +37,7 @@ import optax
 from equinox import Module, field, nn
 
 from ashlar._compat import renamed
+from ashlar._version import __version__
 from ashlar.distributional import (
     check_output_head,
     decode,
@@ -47,6 +51,7 @@ from ashlar.distributional import (
     sample_values,
 )
 from ashlar.errors import AshlarError, ShapeError
+from ashlar.io import load_leaves, save_leaves
 
 FORECAST_LOOKBACK = 48
 FORECAST_HORIZON = 12
@@ -498,6 +503,14 @@ class ASRForecaster:
             return probabilities[0], centers
         return probabilities, centers
 
+    def save(self, path: str | Path) -> str:
+        """Write ``metadata.json`` and the network weights to the directory ``path``."""
+        return _save_forecaster(self, path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ASRForecaster":
+        return _load_forecaster(cls, path, _init_forecast)
+
     def _standardized_windows(self, history):
         array = np.asarray(history, dtype=np.float64)
         single = array.ndim == 1
@@ -582,6 +595,63 @@ class ASRForecaster:
     def _reset(self) -> None:
         self._opt_state = None
         self._step = None
+
+
+_FORECAST_PARAMS = (
+    "lookback",
+    "horizon",
+    "random_state",
+    "verbose",
+    "max_epochs",
+    "patience",
+    "batch_size",
+    "val_fraction",
+    "head",
+)
+_FORECAST_FITTED = (
+    "n_train_",
+    "n_val_",
+    "best_epoch_",
+    "mean_",
+    "std_",
+    "selection_loss_",
+    "selection_mse_",
+    "n_obs_",
+    "max_patches_",
+)
+
+
+def _save_forecaster(forecaster, path) -> str:
+    """Save a fitted forecaster as JSON metadata plus Equinox leaves. No pickle."""
+    if not hasattr(forecaster, "model_"):
+        raise AshlarError("fit the forecaster before save.")
+    directory = Path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": __version__,
+        "distribution": "ashlar-tabular",
+        "import": "ashlar",
+        "estimator": type(forecaster).__name__,
+        "params": {name: getattr(forecaster, name) for name in _FORECAST_PARAMS},
+        "fitted": {name: getattr(forecaster, name) for name in _FORECAST_FITTED if hasattr(forecaster, name)},
+    }
+    (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
+    save_leaves(directory / "model.eqx", forecaster.model_)
+    return str(directory)
+
+
+def _load_forecaster(cls, path, init):
+    """Rebuild the network skeleton from the saved shape, then read the weights into it."""
+    directory = Path(path)
+    payload = json.loads((directory / "metadata.json").read_text())
+    if payload.get("estimator") != cls.__name__:
+        raise AshlarError(f"{directory} holds a {payload.get('estimator')}; load it with that class.")
+    forecaster = cls(**payload["params"])
+    for name, value in payload["fitted"].items():
+        setattr(forecaster, name, value)
+    template = init(jax.random.PRNGKey(0), forecaster.lookback, forecaster.horizon, forecaster.head)
+    forecaster.model_ = load_leaves(directory / "model.eqx", template)
+    return forecaster
 
 
 def _train_until(
@@ -1057,6 +1127,14 @@ class ASRHistoryForecaster:
         if single:
             return probabilities[0], centers
         return probabilities, centers
+
+    def save(self, path: str | Path) -> str:
+        """Write ``metadata.json`` and the network weights to the directory ``path``."""
+        return _save_forecaster(self, path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ASRHistoryForecaster":
+        return _load_forecaster(cls, path, _init_history)
 
     def _prepare_origins(self, history, origins):
         series = _series(history)
