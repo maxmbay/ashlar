@@ -9,7 +9,7 @@ Ashlar fits tables and forecasts series with JAX neural networks. You call `fit`
 
 It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
-It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in 9 to 13 minutes.
+It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in just a few minutes.
 
 ## Install
 
@@ -17,13 +17,25 @@ It needs no GPU. Every number on this page was trained on a laptop CPU, where th
 pip install "ashlar-tabular[dataframes]"
 ```
 
-The import name is `ashlar`; the PyPI project named `ashlar` is an unrelated microscopy stitcher. JAX's CPU build is installed by default, and that is all Ashlar needs. For a GPU, install [JAX's CUDA build](https://docs.jax.dev/en/latest/installation.html).
+The import name is `ashlar`. This installs JAX's CPU build, which is all Ashlar needs.
+
+To train on an NVIDIA GPU (Linux), add JAX's CUDA build. It brings its own CUDA libraries, so only the NVIDIA driver has to be on the machine:
+
+```bash
+pip install "ashlar-tabular[dataframes]" "jax[cuda12]"
+python -c "import jax; print(jax.devices())"   # should list a CudaDevice
+```
+
+Ashlar code does not change: JAX puts the arrays on the GPU when it finds one. For other CUDA versions and platforms, see [JAX's install guide](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick start
 
 If you have an XGBoost or LightGBM call, you already have an Ashlar one. Regression:
 
 ```python
+from ashlar import ASRRegressor
+from xgboost import XGBRegressor
+
 model = XGBRegressor().fit(X, y)                  # before
 model = ASRRegressor().fit(X, y)                  # after
 model.predict(X_new)
@@ -32,6 +44,9 @@ model.predict(X_new)
 Classification:
 
 ```python
+from ashlar import ASRClassifier
+from xgboost import XGBClassifier
+
 model = XGBClassifier().fit(X, labels)            # before
 model = ASRClassifier().fit(X, labels)            # after
 model.predict(X_new), model.predict_proba(X_new), model.score(X_new, labels_new)
@@ -42,6 +57,8 @@ model.predict(X_new), model.predict_proba(X_new), model.score(X_new, labels_new)
 One argument turns the same model into a conditional predictive distribution, which a gradient-boosted tree cannot return from a single fit:
 
 ```python
+from ashlar import ASRRegressor
+
 model = ASRRegressor(task="mixture").fit(X, y)
 
 model.predict(X_new)                        # still the mean
@@ -64,6 +81,8 @@ A model is one set of keyword arguments with four independent slots: how the col
 </p>
 
 ```python
+from ashlar import ASRClassifier, ASRRegressor
+
 ASRRegressor()                                      # the defaults above
 ASRRegressor(task="mixture")                        # same net, now a predictive density
 ASRRegressor(task="flow", backbone="tabm")          # skewed target, ensemble trunk
@@ -87,11 +106,12 @@ One fit per head on taxi fares, given the zones, the hour, the weekday, the pass
 A series reaches Ashlar two ways. `ASRForecaster` reads a window of the series itself and emits the next steps:
 
 ```python
+import jax
 from ashlar import ASRForecaster
 
 model = ASRForecaster(lookback=48, horizon=24, head="mixture").fit(series)
-model.predict(history)                     # one point per horizon step
-model.sample(history, key, n=1000)         # draws
+model.predict(history)                            # one point per horizon step
+model.sample(history, jax.random.key(0), n=1000)  # draws
 ```
 
 Or the series is already a table of lags and calendar columns, and every tabular head applies to it. `cyclical=` turns a calendar column into a sine and a cosine, so hour 23 sits beside hour 0 and days near each other in the year share what the model learns about them:

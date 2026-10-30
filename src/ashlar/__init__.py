@@ -1,8 +1,6 @@
 """Composable tabular models on JAX, Equinox, and Optax.
 
 The import name is ``ashlar``. The distribution name is ``ashlar-tabular``.
-PyPI project ``ashlar`` is the unrelated microscopy stitcher. This package does
-not register either name.
 
 The names in ``__all__`` are the public surface. Helpers stay on their modules.
 Every model is ``ASR`` plus what it does, after LightGBM's ``LGBMRegressor``
