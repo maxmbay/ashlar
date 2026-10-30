@@ -1,21 +1,23 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
-    <img alt="ashlar" src="docs/images/logo-light.svg" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-dark.svg">
+    <img alt="ashlar" src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-light.svg" width="720">
   </picture>
 </p>
 
 Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
 
-It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](docs/benchmarks.md) have every number, including where the trees still win.
+It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
+
+It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in 9 to 13 minutes.
 
 ## Install
 
 ```bash
-pip install -e ".[dataframes]"
+pip install "ashlar-tabular[dataframes]"
 ```
 
-From a checkout of [maxmbay/ashlar](https://github.com/maxmbay/ashlar). The import name is `ashlar` and the distribution name is `ashlar-tabular`; the PyPI project named `ashlar` is an unrelated microscopy stitcher. CPU is enough.
+The import name is `ashlar`; the PyPI project named `ashlar` is an unrelated microscopy stitcher. JAX's CPU build is installed by default, and that is all Ashlar needs. For a GPU, install [JAX's CUDA build](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick start
 
@@ -56,8 +58,8 @@ A model is one set of keyword arguments with four independent slots: how the col
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-    <img alt="Four courses of model choices: encode, backbone, head, and train, with one path lit." src="docs/images/architecture-light.svg" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-dark.svg">
+    <img alt="Four courses of model choices: encode, backbone, head, and train, with one path lit." src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-light.svg" width="900">
   </picture>
 </p>
 
@@ -68,17 +70,17 @@ ASRRegressor(task="flow", backbone="tabm")          # skewed target, ensemble tr
 ASRClassifier(backbone="transformer")               # attention over the columns
 ```
 
-None of these are wrapper classes: every line is `ASRModel` with different arguments, so a configuration is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](docs/models.md) is the tour of what goes in each slot.
+None of these are wrapper classes: every line is `ASRModel` with different arguments, so a configuration is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md) is the tour of what goes in each slot.
 
 ## Conditional predictive distributions, one head per target shape
 
 The distribution is conditional on the row, so one fitted model returns a different shape for every row, and the head sets which shapes it can represent.
 
-![Four heads on taxi fare, under three conditions.](docs/images/fare-heads.png)
+![Four heads on taxi fare, under three conditions.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/fare-heads.png)
 
 One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. A different head wins each condition, by held-out log density: the `mixture` on Manhattan hops, the `flow` on the heavier Brooklyn tail, and the `histogram` on the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, because a spike at one value is what a smooth density cannot make. Its resolution is yours: `head_kwargs={"bins": 48}`, 16 by default.
 
-`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](docs/heads.md) says which to reach for and why.
+`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
 
 ## Forecasting
 
@@ -101,17 +103,17 @@ model = tabm_piecewise(task="mixture", cyclical={"hour": 24.0, "weekday": 7.0, "
 model.fit(lags, pickups)
 ```
 
-![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](docs/images/forecast-fan.png)
+![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/forecast-fan.png)
 
 Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours.
 
-`ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
+`ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md) covers both, call by call.
 
 ## Nested outcomes as a tree of labels
 
 Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
 
-![One backbone with a softmax per split, over a tree of ball outcomes.](docs/images/outcome-tree.png)
+![One backbone with a softmax per split, over a tree of ball outcomes.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/outcome-tree.png)
 
 ```python
 from ashlar import ASROutcomeTree
@@ -123,13 +125,13 @@ model.predict_conditional(X_new, "runs")    # P(four or six | runs, x)
 
 Every categorical column in that model is a learned vector, and the branch probabilities are a function of those vectors together with the rest of the row, not of either alone:
 
-![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](docs/images/outcome-embeddings.png)
+![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/outcome-embeddings.png)
 
 An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
 
 ## Results
 
-Eight public tables of half a million to two million rows, against LightGBM, XGBoost, and CatBoost. Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments.
+Eight public tables of half a million to two million rows, against LightGBM, XGBoost, and CatBoost, all trained on a laptop CPU. Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments.
 
 | Table | Rows | Target, metric | Ashlar | Best tree |
 |---|---:|---|---:|---:|
@@ -159,13 +161,17 @@ Ask for a distribution and the gap widens. CRPS scores a whole predictive distri
 
 The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
 
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, and the forecast heads.
+On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, and the forecast heads.
 
 ## Documentation
 
-- [docs/models.md](docs/models.md): the four slots, and the research models beyond the defaults.
-- [docs/heads.md](docs/heads.md): every head and the shape of target it suits.
-- [docs/tabular.md](docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
-- [docs/forecast.md](docs/forecast.md): the two forecasters, call by call.
-- [docs/benchmarks.md](docs/benchmarks.md): every number, per table and per metric, and how it was run.
-- [`examples/`](examples): runnable scripts, including the benchmarks and the figures on this page.
+- [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): the four slots, and the research models beyond the defaults.
+- [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits.
+- [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
+- [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
+- [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
+- [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
+
+## Acknowledgements
+
+The `tabm` backbone and the `tabm()` and `tabm_piecewise()` recipes follow TabM, by Yury Gorishniy, Akim Kotelnikov, and Artem Babenko ([paper](https://arxiv.org/abs/2410.24210), [code](https://github.com/yandex-research/tabm)). The piecewise-linear and periodic numeric embeddings follow [Gorishniy, Rubachev, and Babenko (2022)](https://arxiv.org/abs/2203.05556). TabM is also the strongest neural baseline in our benchmarks.
