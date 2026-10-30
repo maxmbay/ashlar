@@ -29,6 +29,8 @@ from ashlar.layers import LinearEnsemble, _rsqrt_uniform
 from ashlar.weights import weighted_mean
 
 ROOT = None
+# Output weight scale when the bias starts at the branch frequencies.
+PRIOR_WEIGHT_SCALE = 0.01
 
 
 class OutcomeTree:
@@ -225,15 +227,20 @@ class TreeHead(_EnsembleHead):
             raise ShapeError(f"the outcome tree has {parsed.n_nodes} nodes; the head was asked for {n_classes}.")
         weight_key, bias_key = jax.random.split(key)
         width = parsed.n_edges
+        weight = _rsqrt_uniform(weight_key, (k, d_in, width), d_in, jnp.float32)
         if edge_prior is None:
             bias = _rsqrt_uniform(bias_key, (k, width), d_in, jnp.float32)
         else:
+            # Full-size random weights add logit noise that averages rare
+            # branches upward (5.6% for a 4.8% wicket rate); start them small
+            # so the prior is what the untrained model predicts.
+            weight = PRIOR_WEIGHT_SCALE * weight
             prior = jnp.log(jnp.clip(jnp.asarray(edge_prior, dtype=jnp.float32), 1e-6, 1.0))
             if prior.shape != (width,):
                 raise ShapeError(f"edge_prior needs {width} entries; received {prior.shape}.")
             bias = jnp.broadcast_to(prior, (k, width))
         self.output = LinearEnsemble(
-            weight=_rsqrt_uniform(weight_key, (k, d_in, width), d_in, jnp.float32),
+            weight=weight,
             bias=jnp.asarray(bias),
         )
         self.k = k
