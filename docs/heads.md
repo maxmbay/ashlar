@@ -9,6 +9,9 @@
 | Skewed, heavy-tailed, censored, or with a spike | `flow` | A monotone spline bends a normal into almost any one-dimensional shape and still gives an exact density. |
 | Any shape, including a spike at one value | `histogram` | A softmax over fixed bins across ±4 standard deviations. No shape assumption, and the resolution is yours: `head_kwargs={"bins": 48}`, 16 by default. The two end bins are open-ended. |
 | Only the interval matters | `quantile` | Pinball loss at 0.1, 0.5, and 0.9. No density and no draws. |
+| Heavy tails, outliers you should not chase | `student_t` | A location, a scale, and degrees of freedom (above 2, so the variance is finite) per row. The point is the location, not the mean. |
+| Counts: visits, claims, goals | `poisson` | One rate per row. The target stays raw and must hold non-negative whole numbers. |
+| Counts with more spread than their mean | `negative_binomial` | A mean and a dispersion per row, the variance being mean + dispersion × mean². |
 
 ```python
 from ashlar import ASRRegressor
@@ -20,7 +23,26 @@ model.sample(X_new, n=1000)                # draws, on the scale of y
 model.log_prob(X_new, y_new)               # log density of what happened
 ```
 
-The forecasters take the same heads by name, as the `head` argument. See [docs/forecast.md](forecast.md).
+On hourly bike rentals and NYC taxi pickups, both overdispersed, the negative binomial's 80% interval holds 76% to 82% of held-out counts where a Poisson's, Ashlar's or LightGBM's, holds 24% to 62%, and its log mass is far better (4.50 against LightGBM's 6.52 on bike rentals). The `mixture` stays as good on CRPS for large counts; the count heads win where the counts are small and zeros matter, and lose on an underdispersed count such as abalone rings, where `gaussian` or `mixture` is the better choice. [docs/benchmarks.md](benchmarks.md#count-heads) has the tables.
+
+Either count head takes `head_kwargs={"zero_inflated": True}`: one more output per row is the probability of a structural zero, for counts with more zeros than any count distribution gives, like a customer who never buys. A count head's `log_prob` is a log mass, its draws and quantiles are whole numbers, and its `predict` is the mean.
+
+The forecasters take the same heads by name, as the `head` argument, except the two count heads, which need the raw count. See [docs/forecast.md](forecast.md).
+
+## Calibrated intervals
+
+A head's intervals are only as honest as its fit. `calibrate` corrects them on rows the model was not fitted on, so an interval that promises 80% holds at least 80% of new rows exchangeable with those:
+
+```python
+model = ASRRegressor(task="mixture").fit(X_train, y_train)
+model.calibrate(X_holdout, y_holdout)
+model.predict_interval(X_new, coverage=0.8)   # split-conformal, shape (rows, 2)
+model.predict_quantiles(X_new, [0.1, 0.9])     # each level recalibrated
+```
+
+A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
+
+On five public tables, three splits each, calibration brought the default mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6% before. It widened the intervals that were too narrow (California, 75.9% → 80.7%; bike rentals, 76.8% → 79.7%), narrowed the one that was too wide (taxi tips, 88.6% → 79.9%), and left the ones that were right alone. The same conformal step on LightGBM's quantile models gives about the same coverage with a wider interval on three of the four tables where it applies. [docs/benchmarks.md](benchmarks.md#calibrated-intervals) has every number.
 
 For labels rather than numbers, `ASRClassifier` fits a softmax, `ASROrdinalClassifier` a cumulative logit that keeps neighboring classes close, and `ASROutcomeTree` one branch softmax per internal node of a tree of outcomes. [docs/tabular.md](tabular.md#tasks) covers all three.
 
@@ -70,3 +92,19 @@ CRPS, three splits each. The mixture is the best head on every table here, and e
 The intervals are better calibrated too. With an interval that promises 80%, the three LightGBM quantile models cover 70% of held-out California values, 69% of diamond prices, and 72% of abalone rings. Ashlar's mixture covers 76%, 80%, and 78%. On the temperature forecast the mixture beats LightGBM on the same 28-day window on every interval score: pinball 0.554 against 0.573, and coverage 83% against 77%.
 
 Every column, with pinball loss, coverage, width, and log-likelihood, is in [docs/benchmarks.md](benchmarks.md#distributions-on-smaller-tables).
+
+## Where the members disagree
+
+A predictive distribution says how noisy the target is. It does not say how sure the model is of that distribution. An ensemble backbone trains several members together, and where they disagree the data did not settle the answer: rows far from the training data, rare categories, thin corners of the table. `predict_uncertainty` splits the two:
+
+```python
+model = ASRRegressor(task="mixture", backbone="tabm").fit(X, y)
+parts = model.predict_uncertainty(X_new)
+parts["epistemic"]   # spread of the members' points, on the scale of y
+parts["aleatoric"]   # the noise each member predicts, as a standard deviation
+parts["total"]       # both, by the law of total variance
+```
+
+A point regression or the quantile head has no noise model, so it returns `epistemic` and `total` only. A classifier or an ordinal model returns entropies in nats instead: `total` is the entropy of the mean probabilities, `aleatoric` the members' mean entropy, and `epistemic` the mutual information between the label and the member. The default `residual_mlp` has one member, so its `epistemic` is zero: use `backbone="tabm"`, or any backbone with `k` above 1.
+
+On three public tables with `tabm_piecewise(task="gaussian")` (32 members), every part ranks rows by error well: keeping the half the model is surest of halves the RMSE on California housing and cuts it by more than 80% on diamond prices. In range, the noise ranks errors a little better than the member spread, because most of the error there is noise. Trained below the 80th percentile of one column and tested above it, the epistemic part rose 2.5 times on California, 4 times on diamonds, and 1.6 times on bike rentals, more than the aleatoric part did on each. That makes it a flag for rows unlike the training data, not an error bar: on diamonds above the training carats the RMSE grew 21 times. These are two splits on California and one on the others, so read them as indicative. [docs/benchmarks.md](benchmarks.md#member-uncertainty) has every number.

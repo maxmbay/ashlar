@@ -8,6 +8,8 @@ JAX_PLATFORMS=cpu python examples/benchmark_large.py --tables higgs covertype --
 python examples/benchmark_large.py --report --seeds 0
 JAX_PLATFORMS=cpu python examples/benchmark_readme.py --stage all
 python examples/benchmark_readme.py --stage report
+JAX_PLATFORMS=cpu python examples/benchmark_uncertainty.py --stage all
+python examples/benchmark_uncertainty.py --stage report
 ```
 
 - [How it was run](#how-it-was-run)
@@ -18,6 +20,9 @@ python examples/benchmark_readme.py --stage report
 - [Distributions on smaller tables](#distributions-on-smaller-tables)
 - [Learned embeddings](#learned-embeddings)
 - [Forecast heads](#forecast-heads)
+- [Calibrated intervals](#calibrated-intervals)
+- [Count heads](#count-heads)
+- [Member uncertainty](#member-uncertainty)
 
 ## How it was run
 
@@ -355,3 +360,91 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 | Ashlar, squared error | — | — | — | — | — | 1.746 ± 0.003 | 19 |
 | Ashlar, `quantile` | — | 0.564 ± 0.005 | 84% | 6.309 ± 0.058 | — | 1.779 ± 0.020 | 15 |
 | LightGBM on the same lags | — | 0.573 ± 0.005 | 77% | 5.492 ± 0.058 | — | 1.771 ± 0.014 | — |
+
+## Calibrated intervals
+
+From [`examples/benchmark_uncertainty.py`](../examples/benchmark_uncertainty.py), stage `calibration`. This script and its three sections ran on a 4-core Linux VM with 15 GB, CPU only, LightGBM 4.7.0 on one thread, not on the laptop above. Each table is split 60% train, 20% calibration, 20% test, three times (seeds 0, 1, 2). Ashlar is `ASRRegressor(task="mixture")` or `ASRRegressor(task="quantile")` with no other arguments, then `calibrate(X_cal, y_cal)`. LightGBM is two early-stopped quantile models at 0.1 and 0.9 on the same training rows, then the same conformal step on the same calibration rows (conformalized quantile regression). Each cell is the test coverage of a nominal 80% interval, mean over three splits, before → after.
+
+| Table | Rows | Ashlar `mixture` | Ashlar `quantile` | LightGBM quantiles |
+|---|---:|---:|---:|---:|
+| California housing | 20,640 | 75.9% → 80.7% | 77.3% → 80.4% | 68.9% → 79.4% |
+| Diamonds, price in $1,000 | 53,940 | 79.4% → 79.4% | 80.4% → 79.5% | 73.8% → 79.1% |
+| Bike rentals per hour | 17,379 | 76.8% → 79.7% | 77.5% → 79.0% | 65.3% → 79.3% |
+| Abalone, rings | 4,177 | 80.2% → 80.3% | 78.5% → 78.8% | 76.0% → 79.8% |
+| NYC taxi tips, $ | 6,383 | 88.6% → 79.9% | 80.8% → 80.1% | 84.4% → 84.4% |
+
+Calibration moves every Ashlar interval to within a point of 80% and leaves an interval that was already right alone (diamonds, abalone). It also narrows one that was too wide: the taxi mixture covered 89% and calibration took it to 80%, from $3.98 to $3.72 wide on average. The 90% mixture interval behaves the same way, 86.9% → 89.9% on bike rentals and 87.3% → 90.6% on California.
+
+Conformal calibration is not Ashlar's alone: the same step brings LightGBM's quantile models to 79–80% on four tables. The difference is width. After calibration the Ashlar mixture's 80% interval is narrower than LightGBM's on California (0.95 against 1.00, in $100k), diamonds (0.82 against 0.83), and bike rentals (74 against 87 rentals), and slightly wider on abalone (4.71 against 4.59 rings). On taxi tips CQR cannot move LightGBM: a third of tips are exactly $0, both quantile models put their 0.1 level there, so the conformal margin lands on a tie at zero and the trees keep their 84%.
+
+A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated coverage of single splits ranges from 77.8% to 82.9%.
+
+## Count heads
+
+From the same script, stage `counts`. Four count targets, each split 80/20 three times. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments; `gaussian` and `mixture` see the count as a number. LightGBM is early-stopped with the Poisson objective, and scored as a Poisson with that mean. CRPS and coverage are from 400 draws per row; NLL is the negative log mass of the count that happened, so it is only defined for the models that give a mass.
+
+| Target | Rows | Mean | Variance | Zeros |
+|---|---:|---:|---:|---:|
+| Bike rentals per hour, all riders ([Capital Bikeshare via UCI](https://github.com/udacity/deep-learning-v2-pytorch/tree/master/project-bikesharing/Bike-Sharing-Dataset)) | 17,379 | 189 | 32,900 | 0% |
+| Bike rentals per hour, casual riders only | 17,379 | 36 | 2,431 | 9% |
+| NYC taxi pickups per half hour, from the previous day and the same slot a week earlier ([NAB](https://github.com/numenta/NAB)) | 9,984 | 15,198 | 4.8 × 10⁷ | 0% |
+| Abalone rings | 4,177 | 9.9 | 10.4 | 0% |
+
+| Target | Model | CRPS | NLL | 80% coverage | 80% width |
+|---|---|---:|---:|---:|---:|
+| Bike rentals, all | Ashlar `negative_binomial` | 16.55 ± 0.51 | **4.50** | 80% | 71 |
+| | Ashlar zero-inflated `negative_binomial` | 16.71 ± 0.30 | **4.50** | 81% | 72 |
+| | Ashlar `poisson` | 18.44 ± 0.52 | 6.60 | 53% | 31 |
+| | Ashlar `mixture` | **16.34 ± 0.44** | — | 76% | 64 |
+| | Ashlar `gaussian` | 17.56 ± 0.40 | — | 79% | 76 |
+| | LightGBM, Poisson objective | 18.43 ± 0.23 | 6.52 | 54% | 31 |
+| Bike rentals, casual | Ashlar zero-inflated `negative_binomial` | **5.98 ± 0.09** | **3.28** | 82% | 25 |
+| | Ashlar `negative_binomial` | 6.05 ± 0.14 | **3.28** | 82% | 26 |
+| | Ashlar `poisson` | 6.38 ± 0.03 | 4.10 | 61% | 12 |
+| | Ashlar `mixture` | 6.08 ± 0.09 | — | 78% | 25 |
+| | Ashlar `gaussian` | 6.25 ± 0.10 | — | 82% | 28 |
+| | LightGBM, Poisson objective | 6.26 ± 0.07 | 4.07 | 62% | 12 |
+| Taxi pickups | Ashlar `negative_binomial` | 314.7 ± 5.5 | **7.83** | 76% | 1,231 |
+| | Ashlar zero-inflated `negative_binomial` | 322.2 ± 13.3 | **7.79** | 79% | 1,372 |
+| | Ashlar `poisson` | 378.1 ± 9.3 | 19.43 | 25% | 304 |
+| | Ashlar `mixture` | **310.8 ± 2.1** | — | 75% | 1,176 |
+| | Ashlar `gaussian` | 321.4 ± 7.0 | — | 79% | 1,341 |
+| | LightGBM, Poisson objective | 397.8 ± 5.9 | 21.12 | 24% | 304 |
+| Abalone rings | Ashlar `negative_binomial` | 1.189 ± 0.027 | **2.247** | 97% | 7.9 |
+| | Ashlar `poisson` | 1.194 ± 0.026 | 2.249 | 96% | 7.9 |
+| | Ashlar `mixture` | **1.075 ± 0.036** | — | 78% | 4.6 |
+| | Ashlar `gaussian` | 1.098 ± 0.030 | — | 84% | 5.1 |
+| | LightGBM, Poisson objective | 1.208 ± 0.022 | 2.258 | 95% | 7.9 |
+
+Bold is the best in its column per target; NLL ties within 0.01.
+
+- **Against a Poisson, the negative binomial wins every overdispersed target by a wide margin.** It has the best log mass on all four, 4.50 against LightGBM's 6.52 on bike rentals and 7.8 against 21.1 on taxi pickups. A Poisson's variance equals its mean, so its 80% interval holds only 24% to 62% of these counts; the negative binomial's holds 76% to 82%. The same holds against Ashlar's own `poisson` head, so the gain is the family, not the network.
+- **Against the continuous heads it is close.** The `mixture` has the best CRPS on bike totals (16.34 against 16.55) and taxi pickups (310.8 against 314.7), within about one standard deviation across splits; the zero-inflated negative binomial has the best on casual riders (5.98 against 6.08). What the count heads add is a real probability for each count: whole-number draws and quantiles, a log mass you can compare across models, and the 9% of zero hours in the casual counts, which the negative binomial reproduces (9.2% of its draws are 0) and the mixture does not (0.0%).
+- **On abalone the count heads lose.** Rings vary less than their mean once the shell measurements are known, and neither a Poisson nor a negative binomial can be narrower than a Poisson. Their 80% intervals hold 96% of rings and are 70% wider than the mixture's. Use `gaussian` or `mixture` for an underdispersed count.
+- **Zero inflation helps only where there are zeros.** It ties the plain negative binomial on log mass everywhere and helps CRPS only on the casual counts.
+
+## Member uncertainty
+
+From the same script, stage `uncertainty`. The model is `tabm_piecewise(task="gaussian")`, a TabM backbone with 32 members, and `predict_uncertainty(X_test, n_samples=200)`. Two tests per table:
+
+- **Ranking.** An 80/20 split. Each score ranks the test rows; the table gives its Spearman correlation with the absolute error of the point prediction, and the RMSE of the half of the rows the score is surest of. A random ranking keeps about the full RMSE.
+- **Shift.** Train on rows at or below the 80th percentile of one column, then compare held-out rows inside that range with every row above it. A score that knows what the model has not seen should rise above the range.
+
+These fits are slow on 4 CPU cores (about an hour per split), so this section has fewer splits than the others: two for California (seeds 0 and 1) and one for diamonds and bike rentals (seed 0). Treat the single-split numbers as one draw, not a mean. `python examples/benchmark_uncertainty.py --stage uncertainty` runs all three seeds and skips any already saved.
+
+| Table | Rows | Test RMSE | Spearman with abs error: epistemic / aleatoric / total | RMSE of surest half: epistemic / aleatoric / random |
+|---|---:|---:|---:|---:|
+| California housing, $100k, 2 splits | 20,640 | 0.445 | 0.48 / 0.52 / 0.53 | 0.242 / 0.228 / 0.452 |
+| Diamonds, price in $1,000, 20,000-row sample, 1 split | 20,000 | 0.572 | 0.70 / 0.72 / 0.72 | 0.111 / 0.103 / 0.574 |
+| Bike rentals per hour, 1 split | 17,379 | 39.2 | 0.62 / 0.65 / 0.65 | 16.0 / 15.6 / 40.2 |
+
+| Table | Shift column | RMSE inside → above | Mean epistemic inside → above | Mean aleatoric inside → above |
+|---|---|---:|---:|---:|
+| California housing | median income | 0.440 → 0.884 | 0.084 → 0.211 | 0.379 → 0.587 |
+| Diamonds | carat | 0.290 → 6.01 | 0.055 → 0.223 | 0.220 → 0.462 |
+| Bike rentals | temperature | 40.7 → 60.1 | 9.8 → 15.5 | 30.8 → 45.4 |
+
+- **Every score ranks errors well.** Keeping the half of the rows the model is surest of cuts the RMSE by half on California, by 60% on bike rentals, and by more than 80% on diamonds, where error grows with price.
+- **In range, the noise ranks errors slightly better than the member spread.** Aleatoric beats epistemic on all three tables, by 0.02 to 0.04 in Spearman. On rows like the training rows most of the error is noise, and the noise head already sizes it.
+- **Out of range, the member spread rises most.** Above the training range the mean epistemic grows 2.5 times on California, 4 times on diamonds and 1.6 times on bike rentals, against 1.5, 2.1 and 1.5 times for the aleatoric part. That is the signal `epistemic` exists for: the members agree on what they saw and drift apart on what they did not.
+- **It flags a shift; it does not size the error.** On diamonds above 80th-percentile carat the RMSE grows 21 times and the epistemic part only 4 times. Use the spread to find rows to distrust, not as an interval. Calibrated intervals (above) are for exchangeable rows, and these rows are not.

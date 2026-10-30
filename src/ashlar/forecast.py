@@ -264,7 +264,7 @@ def _observed_horizon(value, single: bool, horizon: int, batch: int) -> np.ndarr
     return np.ascontiguousarray(array)
 
 
-_DENSITY_HEADS = ("gaussian", "mixture", "flow", "histogram")
+_DENSITY_HEADS = ("gaussian", "mixture", "flow", "histogram", "student_t")
 
 
 def _snapshot(model):
