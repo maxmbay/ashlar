@@ -52,7 +52,7 @@ from ashlar.objectives import (
     ordinal_objective,
     regression_objective,
 )
-from ashlar.distributional import QUANTILE_LEVELS, decode, log_density, point_values, sample_values
+from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, log_density, point_values, sample_values
 from ashlar.predict import distribution_from_normal_raw, mean_logits, mean_probabilities, split_normal_parameters
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
@@ -89,8 +89,8 @@ _LABELED_TASKS = {"classification", "ordinal"}
 # Tasks whose ``predict`` returns a label and whose ``predict_proba`` exists.
 _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
-DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile")
-_SCALED_TASKS = {"regression", *DISTRIBUTION_TASKS}
+DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
+_SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS)}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
@@ -387,7 +387,8 @@ class ASRModel(BaseEstimator):
             )
         if self.standardize_target and self.task not in _SCALED_TASKS:
             raise AshlarError(
-                "standardize_target is a regression label z-score. It applies to regression and the distribution tasks."
+                "standardize_target is a regression label z-score. It applies to regression and the distribution tasks, "
+                "not to the count heads, which read the raw count."
             )
         if self.task in {"flow", "histogram"} and not self.standardize_target:
             raise AshlarError(f"the {self.task} head works on a standardized axis, so standardize_target must stay on.")
@@ -563,6 +564,8 @@ class ASRModel(BaseEstimator):
         if self.task not in {"custom", *_LABELED_TASKS}:
             if not np.isfinite(np.asarray(y_train_model, dtype=np.float64)).all():
                 raise AshlarError("regression and normal targets must be finite. Mask missing outcomes in a custom objective.")
+        if self.task in COUNT_HEADS:
+            _check_counts(y_train_model, self.task)
         y_train_model = self._fit_target_scale(y_train_model)
         categorical = list(self._categorical_names(names, columns))
         encoder = FeatureEncoder.fit(
@@ -894,6 +897,9 @@ class ASRModel(BaseEstimator):
         kwargs = dict(self.head_kwargs or {})
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
+        if self.task in COUNT_HEADS:
+            mean = float(np.mean(np.asarray(y_encoded, dtype=np.float64)))
+            kwargs["log_mean"] = float(np.log(max(mean, 1e-3)))
         if self.task == "tree":
             kwargs["tree"] = self.tree_.to_json()
             if kwargs.get("edge_prior") == "empirical":
@@ -1381,7 +1387,8 @@ class ASRModel(BaseEstimator):
             values = np.asarray(decoded, dtype=np.float64).reshape(batch, members, 3).mean(axis=1)
             return values * std + mean
         draws = self.sample(X, n=n_samples, seed=seed)
-        return np.quantile(draws, levels, axis=0).T
+        method = "inverted_cdf" if self.task in COUNT_HEADS else "linear"
+        return np.quantile(draws, levels, axis=0, method=method).T
 
     def predict_dist(self, X, policy: str | None = None):
         raw = self._raw_from_frame(X)
@@ -1600,7 +1607,8 @@ class ASRRegressor(_TaskModel):
 
     ``task`` stays a regression task: ``regression`` (default, point
     prediction), ``normal``, a distribution head (``gaussian``, ``mixture``,
-    ``flow``, ``histogram``, ``quantile``), or ``custom``.
+    ``flow``, ``histogram``, ``quantile``, ``student_t``), a count head
+    (``poisson``, ``negative_binomial``), or ``custom``.
     """
 
     _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS)
@@ -1767,6 +1775,12 @@ def _sklearn_stratified(indices, labels, validation_size, random_state, train_te
 
 def _take_rows(names, columns, indices):
     return {name: np.asarray(values)[indices] for name, values in zip(names, columns, strict=True)}
+
+
+def _check_counts(y, task):
+    array = np.asarray(y, dtype=np.float64)
+    if np.any(array < 0) or np.any(array != np.round(array)):
+        raise AshlarError(f"the {task} head models counts: y must hold non-negative whole numbers.")
 
 
 def _regression_target(y, n_events):

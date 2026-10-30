@@ -207,14 +207,31 @@ class NormalHead(_EnsembleHead):
 class DistributionHead(_EnsembleHead):
     """Flat parameters of one ``ashlar.distributional`` head per member. Output ``(batch, member, width)``.
 
-    ``kind`` is ``gaussian``, ``mixture``, ``flow``, ``histogram``, or
-    ``quantile``. One event only. The initialization matches the forecasters:
-    a small projection for the mixture and the flow, mixture means on a grid.
+    ``kind`` is ``gaussian``, ``mixture``, ``flow``, ``histogram``,
+    ``quantile``, ``student_t``, ``poisson``, or ``negative_binomial``. One
+    event only. The initialization matches the forecasters: a small projection
+    for the mixture, the flow, and the count heads, mixture means on a grid.
+    ``zero_inflated`` adds a structural zero to a count head, and
+    ``log_mean`` starts a count head's mean at ``exp(log_mean)``; the
+    estimator sets it from the training target.
     """
 
     kind: str = field(static=True)
 
-    def __init__(self, d_in, k, *, n_events, n_classes, key, kind="gaussian", bins=None, **kwargs):
+    def __init__(
+        self,
+        d_in,
+        k,
+        *,
+        n_events,
+        n_classes,
+        key,
+        kind="gaussian",
+        bins=None,
+        zero_inflated=False,
+        log_mean=0.0,
+        **kwargs,
+    ):
         from ashlar.distributional import (
             HISTOGRAM_BINS,
             initial_bias,
@@ -230,10 +247,11 @@ class DistributionHead(_EnsembleHead):
         if bins is not None and kind != "histogram":
             raise ShapeError(f"bins is the histogram head's bin count; the {kind} head does not take it.")
         count = HISTOGRAM_BINS if bins is None else bins
-        width = output_width(kind, 1, count)
+        width = output_width(kind, 1, count, bool(zero_inflated))
         scale = initial_weight_scale(kind, d_in)
         weight = scale * jax.random.normal(key, (k, d_in, width), dtype=jnp.float32)
-        bias = jnp.broadcast_to(initial_bias(kind, 1, count), (k, width))
+        start = initial_bias(kind, 1, count, zero_inflated=bool(zero_inflated), log_mean=float(log_mean))
+        bias = jnp.broadcast_to(start, (k, width))
         self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
         self.k = k
         self.kind = kind
