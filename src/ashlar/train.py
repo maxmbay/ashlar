@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from equinox import (
+    combine as eqx_combine,
+    partition as eqx_partition,
     apply_updates,
     filter_grad,
     filter_jit,
@@ -37,23 +40,84 @@ SURFACE_RATE_MAX = 1e-1
 _STEEPNESS_FLOOR = 1e-8
 
 
+# ``batch_size="auto"`` and ``max_epochs="auto"``. The batch doubles from 256
+# for every doubling of the training rows past 50,000, up to 2,048. The epoch
+# budget is about 20 million row passes, between 20 and 100 epochs.
+AUTO_BATCH_BASE = 256
+AUTO_BATCH_ROWS = 50_000
+AUTO_BATCH_MAX = 2048
+AUTO_ROW_PASSES = 20_000_000
+AUTO_EPOCHS_MIN = 20
+AUTO_EPOCHS_MAX = 100
+
+
+def auto_batch_size(n_train: int) -> int:
+    """Minibatch rows for a training partition of ``n_train`` rows."""
+    import math
+
+    if n_train <= AUTO_BATCH_ROWS:
+        return AUTO_BATCH_BASE
+    doublings = int(round(math.log2(n_train / AUTO_BATCH_ROWS)))
+    return int(min(AUTO_BATCH_MAX, AUTO_BATCH_BASE * 2**doublings))
+
+
+def auto_max_epochs(n_train: int) -> int:
+    """Epoch budget for a training partition of ``n_train`` rows."""
+    if n_train < 1:
+        return AUTO_EPOCHS_MAX
+    return int(min(AUTO_EPOCHS_MAX, max(AUTO_EPOCHS_MIN, round(AUTO_ROW_PASSES / n_train))))
+
+
+# Share of the step budget spent warming up under the ``cosine`` schedule.
+COSINE_WARMUP_SHARE = 0.05
+
+
 def _learning_rate_arg(learning_rate, schedule, n_rows, batch_size, max_epochs):
     """AdamW learning rate. ``linear`` decays from ``learning_rate`` to 0.
 
-    The decay covers ``max_epochs`` times the number of minibatches in one
-    pass. Early stopping does not stretch the schedule. ``constant`` leaves
-    the rate unchanged.
+    ``cosine`` warms up linearly from 0 over the first 5% of steps, then
+    follows a half cosine down to 0. Either decay covers ``max_epochs`` times
+    the number of minibatches in one pass. Early stopping does not stretch the
+    schedule. ``constant`` leaves the rate unchanged.
     """
     if schedule in (None, "constant"):
         return learning_rate
-    if schedule != "linear":
-        raise AshlarError("learning_rate_schedule must be 'constant' or 'linear'.")
     steps_per_epoch = max(1, (int(n_rows) + int(batch_size) - 1) // int(batch_size))
-    return optax.linear_schedule(
-        init_value=float(learning_rate),
-        end_value=0.0,
-        transition_steps=steps_per_epoch * int(max_epochs),
-    )
+    total = steps_per_epoch * int(max_epochs)
+    if schedule == "linear":
+        return optax.linear_schedule(init_value=float(learning_rate), end_value=0.0, transition_steps=total)
+    if schedule == "cosine":
+        warmup = max(1, int(round(COSINE_WARMUP_SHARE * total)))
+        return optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=float(learning_rate),
+            warmup_steps=warmup,
+            decay_steps=max(total, warmup + 1),
+            end_value=0.0,
+        )
+    raise AshlarError("learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'.")
+
+
+def decay_mask(params):
+    """``True`` for every leaf AdamW may decay. Frozen fitted leaves, such as bin edges, are ``False``."""
+    from ashlar.layers import FROZEN_FIELDS
+
+    def keep(path, leaf):
+        del leaf
+        return not any(getattr(entry, "name", None) in FROZEN_FIELDS for entry in path)
+
+    return jax.tree_util.tree_map_with_path(keep, params)
+
+
+def make_optimizer(learning_rate, weight_decay: float, gradient_clip: float | None = None):
+    """AdamW with frozen fitted leaves left out of the decay. Gradients there are already zero.
+
+    ``gradient_clip`` rescales the whole gradient to that global norm first.
+    """
+    adamw = optax.adamw(learning_rate, weight_decay=weight_decay, mask=decay_mask)
+    if gradient_clip is None:
+        return adamw
+    return optax.chain(optax.clip_by_global_norm(float(gradient_clip)), adamw)
 
 
 def surface_learning_rate(n_train: int, curvature: float, grad_rms: float) -> float:
@@ -138,6 +202,7 @@ def fit_loop(
     score_fn=None,
     learning_rate_schedule: str = "constant",
     share_training_batches: bool = True,
+    gradient_clip: float | None = None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
 
@@ -150,11 +215,12 @@ def fit_loop(
     batch_size = max(1, min(int(batch_size), n_rows))
     surface = learning_rate_schedule == "surface"
     if surface:
-        optimizer = optax.adamw(SURFACE_PROBE_RATE, weight_decay=weight_decay)
+        optimizer = make_optimizer(SURFACE_PROBE_RATE, weight_decay, gradient_clip)
     else:
-        optimizer = optax.adamw(
+        optimizer = make_optimizer(
             _learning_rate_arg(learning_rate, learning_rate_schedule, n_rows, batch_size, max_epochs),
-            weight_decay=weight_decay,
+            weight_decay,
+            gradient_clip,
         )
     params = eqx_filter(core, is_array)
     if opt_state is None:
@@ -187,12 +253,19 @@ def fit_loop(
 
         direction = jax.tree_util.tree_map(_unit, grads)
         _value, product = filter_jvp(grad_fn, (model,), (direction,))
-        dir_leaves = [leaf for leaf in jax.tree_util.tree_leaves(direction) if is_array(leaf)]
-        prod_leaves = [leaf for leaf in jax.tree_util.tree_leaves(product) if is_array(leaf)]
-        curvature = sum(
-            jnp.vdot(direction_leaf, product_leaf)
-            for direction_leaf, product_leaf in zip(dir_leaves, prod_leaves, strict=True)
+        # A leaf with a stopped gradient, such as frozen bin edges, can come back
+        # from the JVP as None; pair leaves by position and count it as zero.
+        pairs = jax.tree_util.tree_map(
+            lambda direction_leaf, product_leaf: (
+                jnp.vdot(direction_leaf, product_leaf)
+                if is_array(direction_leaf) and is_array(product_leaf)
+                else jnp.asarray(0.0, dtype=jnp.float32)
+            ),
+            direction,
+            product,
+            is_leaf=lambda leaf: leaf is None,
         )
+        curvature = sum(jax.tree_util.tree_leaves(pairs))
         return curvature, grad_rms
 
     @filter_jit
@@ -205,6 +278,21 @@ def fit_loop(
     if set_tokens is None:
         set_tokens = jnp.zeros((n_rows, 0, 1), dtype=jnp.int32)
         set_mask = jnp.zeros((n_rows, 0, 1), dtype=jnp.float32)
+    member_count = int(core.backbone.k)
+    if not surface and (share_training_batches or member_count == 1):
+        return _fit_scanned(
+            core,
+            (numeric_z, categorical, category_index, set_tokens, set_mask, y, sample_weight),
+            optimizer=optimizer,
+            opt_state=opt_state,
+            objective=objective,
+            batch_size=batch_size,
+            max_epochs=max_epochs,
+            patience=patience,
+            key=key,
+            validation=validation,
+            score_fn=score_fn,
+        )
     history = {"train_loss": [], "val_loss": []}
     best_core = core
     best_state = opt_state
@@ -279,7 +367,7 @@ def fit_loop(
                 if curvature_value != curvature_value or grad_rms_value != grad_rms_value:
                     raise WeightError("the loss-surface scale is not finite. Check targets, weights, and the probe rate.")
                 chosen = surface_learning_rate(n_rows, curvature_value, grad_rms_value)
-                optimizer = optax.adamw(chosen, weight_decay=weight_decay)
+                optimizer = make_optimizer(chosen, weight_decay, gradient_clip)
                 step = _adamw_step(optimizer, objective)
                 opt_state = optimizer.init(eqx_filter(core, is_array))
                 surface_ready = True
@@ -325,3 +413,146 @@ def fit_loop(
 
 def np_mean(values: list[float]) -> float:
     return sum(values) / len(values)
+
+
+# Rows per forward pass when a whole partition is scored. A partition at or
+# below this size is one pass, so small-table losses are unchanged.
+EVAL_CHUNK_ROWS = 8192
+
+
+def chunked_weighted(fn, arrays, weights, chunk_rows: int = EVAL_CHUNK_ROWS):
+    """``fn`` over row chunks, recombined with the ``batch_weight_sum`` reduction.
+
+    ``fn(*chunk)`` returns a weighted mean over its rows. The chunks are
+    recombined by their weight mass, which equals ``fn`` on the whole partition
+    for any objective of the form ``sum(w * loss) / sum(w)``.
+    """
+    n_rows = int(weights.shape[0])
+    if n_rows <= chunk_rows:
+        return float(fn(*arrays))
+    total = 0.0
+    mass = 0.0
+    for start in range(0, n_rows, chunk_rows):
+        piece = tuple(array[start : start + chunk_rows] for array in arrays)
+        chunk_mass = float(jnp.sum(weights[start : start + chunk_rows]))
+        if chunk_mass <= 0.0:
+            continue
+        total += float(fn(*piece)) * chunk_mass
+        mass += chunk_mass
+    return total / mass if mass > 0.0 else float("nan")
+
+
+def _fit_scanned(
+    core,
+    data,
+    *,
+    optimizer,
+    opt_state,
+    objective,
+    batch_size: int,
+    max_epochs: int,
+    patience: int,
+    key,
+    validation,
+    score_fn,
+):
+    """Shared-minibatch training with one compiled scan per epoch.
+
+    Same permutation, minibatches, dropout keys, early stopping, and
+    checkpoint as the step-by-step loop. A minibatch with zero weight mass
+    leaves the model and optimizer state unchanged. The last minibatch is
+    padded with zero-weight rows, as before.
+    """
+    n_rows = int(data[0].shape[0])
+    steps_per_epoch = max(1, (n_rows + batch_size - 1) // batch_size)
+    padded = steps_per_epoch * batch_size
+    params, static = eqx_partition(core, is_array)
+
+    @filter_jit
+    def run_epoch(params, state, order, batch_key):
+        valid = jnp.arange(padded) < n_rows
+        index = jnp.where(valid, jnp.pad(order, (0, padded - n_rows)), 0)
+        index = index.reshape(steps_per_epoch, batch_size)
+        mask = valid.reshape(steps_per_epoch, batch_size)
+
+        def body(carry, inputs):
+            params, state = carry
+            take, keep, step_index = inputs
+            batch = tuple(array[take] for array in data)
+            *features, y_batch, w_batch = batch
+            w_batch = jnp.where(keep, w_batch, jnp.zeros_like(w_batch))
+            step_key = jax.random.fold_in(batch_key, step_index)
+
+            def loss_fn(candidate_params):
+                candidate = eqx_combine(candidate_params, static)
+                raw = candidate(*features, key=step_key)
+                return objective(raw, y_batch, w_batch)
+
+            has_mass = jnp.sum(w_batch) > 0
+
+            def update(_):
+                loss, grads = jax.value_and_grad(loss_fn)(params)
+                updates, new_state = optimizer.update(grads, state, params)
+                return optax.apply_updates(params, updates), new_state, loss
+
+            def skip(_):
+                return params, state, jnp.asarray(0.0, dtype=jnp.float32)
+
+            new_params, new_state, loss = jax.lax.cond(has_mass, update, skip, None)
+            return (new_params, new_state), (loss, has_mass)
+
+        steps = jnp.arange(steps_per_epoch)
+        (params, state), (losses, seen) = jax.lax.scan(body, (params, state), (index, mask, steps))
+        return params, state, losses, seen
+
+    @filter_jit
+    def evaluate(model, *batch):
+        *features, y_batch, w_batch = batch
+        raw = model(*features, key=None)
+        return objective(raw, y_batch, w_batch)
+
+    history = {"train_loss": [], "val_loss": []}
+    best_core = core
+    best_state = opt_state
+    best_val = None
+    best_score = None
+    stale = 0
+    for epoch in range(max_epochs):
+        epoch_key = jax.random.fold_in(key, epoch)
+        perm_key, batch_key = jax.random.split(epoch_key)
+        order = jax.random.permutation(perm_key, n_rows)
+        params, opt_state, losses, seen = run_epoch(params, opt_state, order, batch_key)
+        seen = np.asarray(losses)[np.asarray(seen)]
+        if seen.size == 0:
+            raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
+        if not np.isfinite(seen).all():
+            raise WeightError("training loss is not finite. Check targets, weights, and the learning rate.")
+        history["train_loss"].append(float(seen.mean()))
+        core = eqx_combine(params, static)
+        if validation is None:
+            best_core, best_state = core, opt_state
+            continue
+        val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1])
+        if val_loss != val_loss:
+            raise WeightError("validation loss is not finite.")
+        history["val_loss"].append(val_loss)
+        if score_fn is None:
+            improved = best_val is None or val_loss < best_val
+            if improved:
+                best_val = val_loss
+        else:
+            metric = chunked_weighted(lambda *chunk: score_fn(core, *chunk), validation, validation[-1])
+            if metric != metric:
+                raise WeightError("validation score is not finite.")
+            history.setdefault("val_score", []).append(metric)
+            improved = best_score is None or metric > best_score
+            if improved:
+                best_score = metric
+        if improved:
+            best_core, best_state = core, opt_state
+            stale = 0
+        else:
+            stale += 1
+            if patience > 0 and stale >= patience:
+                break
+    return best_core, best_state, history

@@ -19,7 +19,7 @@ class PredictiveCore(Module):
     pytree. Any of those widths may be zero. The head output keeps the member axis.
     """
 
-    embeddings: LinearReLUEmbeddings | None
+    embeddings: Module | None
     categorical_embeddings: CategoricalEmbeddings | None
     set_embeddings: SetEmbeddings | None
     backbone: Module

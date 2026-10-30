@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-Ashlar fits tables and forecasts series with small JAX models. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
+Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
 
-It slots in wherever a gradient-boosted model does. It follows the scikit-learn estimator interface, takes a pandas or Polars frame as it is, string columns included, and works with `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`. Swap `LGBMRegressor()` or `XGBRegressor()` for `TabularEstimator()`, and `LGBMClassifier()` for `classifier()`. That is a drop-in for the workflow, not a promise of the same accuracy: [the comparison below](#ashlar-beside-gradient-boosted-trees) shows where the trees still win.
+It slots in wherever a gradient-boosted model does. It follows the scikit-learn estimator interface, takes a pandas or Polars frame as it is, string columns included, and works with `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`. Swap `LGBMRegressor()` or `XGBRegressor()` for `TabularEstimator()`, and `LGBMClassifier()` for `classifier()`. On eight public tables of half a million to two million rows, the defaults win or tie on five and are close behind on two. For a predictive distribution they beat the trees on most tables: [the comparison below](#ashlar-beside-gradient-boosted-trees) has every number, including where the trees still win.
 
 - [Install](#install)
 - [Quick start](#quick-start)
@@ -31,16 +31,27 @@ The import name is `ashlar`. The distribution name is `ashlar-tabular`. The PyPI
 A table. `X` is a NumPy array, a dict of columns, or a pandas or Polars frame. Numeric columns are imputed and scaled. String columns get a learned embedding.
 
 ```python
-from ashlar import TabularEstimator, classifier, ordinal
+from ashlar import TabularEstimator, classifier, ordinal, outcome_tree
 
 model = TabularEstimator().fit(X, y)        # where you had LGBMRegressor()
 model.predict(X_new)
 
 clf = classifier().fit(X, labels)           # where you had LGBMClassifier(); predict, predict_proba
 rank = ordinal().fit(X, ratings)            # predict, predict_score (expected label)
+tree = outcome_tree({"wicket": None, "runs": {"dot": None, "scoring": ["four", "six", "ran"]}}).fit(X, outcomes)
+                                            # one branch softmax per node; predict_conditional(X, "scoring")
 ```
 
-Two differences from a scikit-learn regressor or classifier: there is no `score` method, so pass `scoring=` to `cross_val_score` or `GridSearchCV`, and scikit-learn does not tag `classifier()` as a classifier, so it will not stratify folds on its own and the `roc_auc` scorer does not read its probabilities.
+`score` is accuracy for a classifier and R² for a regressor, and scikit-learn tags `classifier()` as a classifier, so `cross_val_score` stratifies its folds and the `roc_auc` scorer reads `predict_proba`.
+
+A regression can return its whole predictive distribution:
+
+```python
+model = TabularEstimator(task="mixture").fit(X, y)   # or gaussian, flow, histogram, quantile
+model.predict_quantiles(X_new, [0.1, 0.5, 0.9])
+model.sample(X_new, n=1000)
+model.log_prob(X_new, y_new)
+```
 
 A series, with a distributional head.
 
@@ -57,80 +68,111 @@ The heads are `mse` (the default), `quantile`, `gaussian`, `mixture`, `flow`, an
 
 ## Ashlar beside gradient-boosted trees
 
-If all you need is one number per row, gradient-boosted trees are hard to beat. The table is the test-set score on five public tables, the mean of three random 80/20 splits. Ashlar is `TabularEstimator()` or `classifier()` with no arguments. XGBoost and LightGBM are early-stopped on a 20% validation slice of the training rows, the same share Ashlar holds out. Their plain defaults are in [docs/benchmarks.md](docs/benchmarks.md) and score a little lower.
+Eight public tables from OpenML, from 515 thousand to 2 million rows, against LightGBM, XGBoost, and CatBoost. Ashlar is `TabularEstimator()` or `classifier()` with no arguments. Every model holds out the same share of the training rows for early stopping, and the trees are early-stopped at learning rate 0.05 with up to 4,000 trees. One 80/20 split per table for now; more seeds are running.
+
+| Table | Rows | Target, metric | Ashlar | LightGBM | XGBoost | CatBoost |
+|---|---:|---|---:|---:|---:|---:|
+| Higgs | 2,000,000 | signal, accuracy ↑ | **0.762** | 0.749 | 0.752 | 0.750 |
+| Covertype | 581,012 | 7 forest types, accuracy ↑ | **0.967** | 0.963 | 0.948 | 0.910 |
+| Year (MSD) | 515,345 | release year, RMSE ↓ | **8.698** | 8.754 | 8.710 | 8.776 |
+| Zurich transport | 2,000,000 | delay, RMSE ↓ | 3.052 | **3.047** | **3.047** | **3.047** |
+| Airline delay | 2,000,000 | departure delay in minutes, RMSE ↓ | **29.04** | 29.06 | 29.11 | 29.05 |
+| Click prediction | 1,997,410 | click, accuracy ↑ | 0.842 | **0.844** | **0.844** | **0.844** |
+| Airlines | 539,383 | delayed, accuracy ↑ | 0.660 | 0.666 | 0.664 | **0.668** |
+| NYC green taxi | 581,835 | tip in $, RMSE ↓ | 1.977 | 1.752 | 1.869 | **1.758** |
+
+Ashlar is clearly ahead on Higgs and covertype, slightly ahead on year and airline delay, level on Zurich, and a few tenths of a point behind on click and airlines. The trees win the taxi tips clearly. On ROC AUC the gap on click is wider (0.738 against 0.756). Ashlar used every core of a 12-core laptop and took 3 to 13 minutes per table; each tree ran on one thread and took from 12 seconds (LightGBM on airline delay) to 26 minutes (CatBoost on the taxi tips). The two airline tables carry only the schedule, with no weather. Zurich's columns include the weather that occurred, so that table models delay given the weather, not a forecast. Per-table detail, AUC, log loss, and timings are in [docs/benchmarks.md](docs/benchmarks.md#large-tables).
+
+On five smaller tables, three random splits each, the defaults are level with or ahead of the trees on two and close behind on the others:
 
 | Table | Rows | Target, metric | Ashlar | XGBoost | LightGBM |
 |---|---:|---|---:|---:|---:|
-| California housing | 20,640 | value in $100k, RMSE ↓ | 0.563 | 0.464 | **0.457** |
-| Diamonds | 53,940 | log price, RMSE ↓ | 0.108 | **0.085** | **0.085** |
-| Adult income | 48,842 | income over $50k, accuracy ↑ | 0.859 | 0.876 | **0.877** |
-| Ames housing | 2,930 | log sale price, RMSE ↓ | **0.119** | 0.122 | 0.120 |
-| Abalone | 4,177 | rings, RMSE ↓ | **2.145** | 2.225 | 2.231 |
+| California housing | 20,640 | value in $100k, RMSE ↓ | 0.472 | 0.464 | **0.457** |
+| Diamonds | 53,940 | log price, RMSE ↓ | 0.089 | **0.085** | **0.085** |
+| Adult income | 48,842 | income over $50k, accuracy ↑ | 0.864 | 0.876 | **0.877** |
+| Ames housing | 2,930 | log sale price, RMSE ↓ | **0.117** | 0.122 | 0.120 |
+| Abalone | 4,177 | rings, RMSE ↓ | **2.166** | 2.225 | 2.231 |
 
-The trees win clearly on the three larger tables. Ashlar is level on Ames and slightly ahead on abalone, inside about one standard deviation across splits. The trees also fit in seconds, where Ashlar's default took between 13 seconds and 3.5 minutes on CPU.
+Before this release the defaults scored 0.563 on California and 0.108 on diamonds. Three changes did most of that: a wider residual MLP (three blocks of 256), a piecewise-linear embedding of every numeric column, and a cosine learning-rate schedule with a batch and epoch budget that grow with the table. [docs/benchmarks.md](docs/benchmarks.md#what-each-change-buys) has the ablation. When accuracy matters more than time, `tabm_piecewise()` puts a 32-member TabM ensemble on the same embeddings.
 
-So use a tree when a point estimate on a big table is the whole job. Use Ashlar when you need what a tree regressor does not give you: a full predictive distribution from one fit, vectors for your categories, or a JAX model you can differentiate and compose.
+### Beside other neural packages
+
+PyTabKit's tuned defaults for RealMLP, TabM, FT-Transformer, and MLP-PLR, on one split (seed 0) of each table and the same CPU. Seconds are for one fit.
+
+| Model | California RMSE ↓ | Diamonds RMSE ↓ | Adult accuracy ↑ | NYC green taxi tips RMSE ↓ |
+|---|---:|---:|---:|---:|
+| Ashlar, default | 0.475 (28 s) | 0.0876 (2 min) | 0.864 (27 s) | 1.977 (3 min) |
+| Ashlar, `tabm_piecewise()` | **0.440** (4 min) | 0.0842 (8 min) | **0.869** (4 min) | 1.979 (15 min) |
+| TabM (PyTabKit) | 0.453 (11 min) | **0.0797** (49 min) | 0.863 (8 min) | **1.798** (4.2 h) |
+| RealMLP (PyTabKit) | 0.472 (13 min) | 0.0882 (11 min) | 0.868 (4 min) | 1.934 (67 min) |
+| FT-Transformer (PyTabKit) | 0.466 (11 min) | 0.0853 (38 min) | 0.864 (14 min) | — |
+| MLP-PLR (PyTabKit) | 0.489 (2 min) | 0.0896 (5 min) | 0.862 (2 min) | — |
+| LightGBM, early-stopped | 0.446 (2 s) | 0.0841 (6 s) | 0.875 (1 s) | 1.752 (1 min) |
+
+`tabm_piecewise()` is the best neural model on California and adult, and PyTabKit's TabM on diamonds and the taxi tips, where it took more than four hours on this CPU. The default is level with RealMLP and FT-Transformer at a fraction of their time. On these small tables LightGBM is still ahead of every neural model except on California, where `tabm_piecewise()` edges it. Across three splits, `tabm_piecewise()` scores 0.447 on California, 0.0845 on diamonds, and 0.865 on adult.
+
+So use Ashlar where you would use a gradient-boosted model, and expect it to match the trees on most large tables. Expect a predictive distribution, vectors for your categories, and a JAX model you can differentiate and compose. Use a tree when a point estimate on a table like the taxi tips is the whole job, or when you need a fit in seconds.
 
 ## Pick a head for the shape of the target
 
 A tree regressor predicts a mean. For an interval you fit one more model per quantile, or put a fixed-width normal around the mean. Neither gives a density you can evaluate or sample from. An Ashlar head gives the whole predictive distribution from one fit, and the head is a choice you make for the shape of the target.
 
-| The target looks like | Head | Why |
+| The target looks like | `task` | Why |
 |---|---|---|
-| A bell whose width changes from row to row | `gaussian` | Two numbers per row, a mean and a scale. Cheap and easy to read. On a table this is the built-in `task="normal"`. |
+| A bell whose width changes from row to row | `gaussian` | Two numbers per row, a mean and a scale. Cheap and easy to read. |
 | A few distinct regimes, or a sharp peak with a long tail | `mixture` | Five normals with learned weights. Each mode gets its own location and spread. |
 | Skewed, heavy-tailed, censored, or with a spike | `flow` | A monotone spline bends a normal into almost any one-dimensional shape and still gives an exact density. |
-| Any shape, when coarse resolution is enough | `histogram` | A softmax over 16 fixed bins across ±4 standard deviations. No shape assumption. Each bin is half a standard deviation wide, and the two end bins are open-ended: the last one reads as "this far out or more". |
+| Any shape, when coarse resolution is enough | `histogram` | A softmax over 16 fixed bins across ±4 standard deviations. No shape assumption. Each bin is half a standard deviation wide, and the two end bins are open-ended. |
 | Only the interval matters | `quantile` | Pinball loss at 0.1, 0.5, and 0.9. No density and no draws. |
 
-### Flight delays, 327 thousand and 3 million rows
+```python
+model = TabularEstimator(task="mixture").fit(X, y)
+model.predict(X_new)                       # the mean
+model.predict_quantiles(X_new, [0.1, 0.9])
+model.sample(X_new, n=1000)                # draws, on the scale of y
+model.log_prob(X_new, y_new)               # log density of what happened
+```
 
-![Average predictive density of three heads on held-out NYC flight delays, and the mixture head for three single flights.](docs/images/flight-delays.png)
+The forecasters take the same heads by name.
 
-Arrival delay is a hard target. Most flights land a little early, a long tail lands hours late, and which of the two you get depends on the airline, the route, the hour, and the season. The model sees only what is on the schedule: no departure delay and no weather. The Gaussian head has to spend its single bell on both the peak and the tail, so it is too wide at the peak and too thin in the tail. The mixture and the histogram follow the shape, and the mixture's shape changes from flight to flight: a 7 a.m. Delta flight from LaGuardia to Orlando in March is one tight peak, while an 8 p.m. Southwest flight from Newark to Chicago in June is a low, wide spread with a 55% chance of landing an hour or more late.
+### Large tables
 
-Two scores, both lower-is-better. CRPS scores the whole predictive distribution, in minutes. NLL is the negative log density at the delay that happened: a gap of 0.4 means about 1.5 times as much density on the actual outcome.
+CRPS scores the whole predictive distribution in the target's units, lower is better. NLL is the negative log density at the value that happened. The trees have two ways to give a distribution: the early-stopped mean with a normal whose width is the validation residual, and CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance per row.
 
-| Data | Score | `gaussian` | `mixture` | `flow` | `histogram` | Tree mean + normal |
-|---|---|---:|---:|---:|---:|---:|
-| NYC flights 2013, 327,346 rows, 3 splits | CRPS | 20.66 | **18.66** | 18.82 | 18.74 | 19.01 |
-| | NLL | 5.15 | **4.67** | 4.83 | 4.71 | 5.10 |
-| US flights 2001, 3,000,000 rows, 1 split | CRPS | 13.45 | 11.65 | 12.06 | 11.39 | **11.02** |
-| | NLL | 4.71 | **4.18** | 4.37 | 4.21 | 4.60 |
+| Table | Score | Ashlar `mixture` | CatBoost mean + variance | Best tree mean + normal |
+|---|---|---:|---:|---:|
+| Airline delay, minutes | CRPS | **9.17** | 11.46 | 12.17 |
+| | NLL | **2.66** | 4.72 | 4.81 |
+| | 80% coverage | 80% | 94% | 94% |
+| Year | CRPS | **4.05** | 4.41 | 4.61 |
+| | NLL | **3.08** | 3.42 | 3.58 |
+| | 80% coverage | 77% | 83% | 85% |
+| Zurich transport | CRPS | **1.62** | 1.74 | 1.75 |
+| | NLL | **2.00** | 2.53 | 2.53 |
+| | 80% coverage | 79% | 80% | 79% |
+| NYC green taxi tips, $ | CRPS | 0.59 | **0.46** | 0.66 |
+| | NLL | **−1.97** | 0.70 | 1.98 |
+| | 80% coverage | 82% | 83% | 95% |
 
-The tree column is the early-stopped mean of the better of XGBoost and LightGBM with a normal around it whose width is the validation residual. That is the distribution a tree regressor offers without another library.
-
-Matching the head to the shape cuts CRPS by about 10% on the NYC flights and 15% on the 3 million, against the Gaussian head. On likelihood the mixture beats the trees' normal by about 0.43 on both tables, about 1.5 times the density on what actually happened. On CRPS it is closer, because CRPS also rewards a good mean, and the trees have the better mean: on the 3 million rows XGBoost's mean misses by 13.4 minutes on average and Ashlar's squared-error model by 16.6, so XGBoost's mean plus a normal edges out the best head. Three separate LightGBM quantile models also keep the lowest pinball loss on both tables. Ashlar ran its default network, two blocks 64 wide, at every size here, and a wider backbone on the large tables is the obvious next run.
+The mixture has the best likelihood on every table and the best CRPS on three of four. Its intervals are honest: an interval that promises 80% holds about 80% of held-out values, where the trees' normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide as the trees' (33 minutes against 75) and still covers 80%. The taxi tips are the exception on CRPS: the trees' mean is so much closer there (RMSE 1.75 against 1.98) that CatBoost's mean and variance win on CRPS, while the mixture still puts far more density on the tips that happened, many of them exactly zero.
 
 ### Smaller tables
 
 ![Average predictive density of four heads on held-out taxi tips.](docs/images/tip-heads.png)
 
-NYC taxi tips with the payment type hidden. A third of tips are exactly zero, the cash fares, and the rest are a skewed bump around $2. The Gaussian head has to cover both with one bell, so it puts 8% of its mass within 25¢ of zero and spills below it. The flow and the mixture grow a spike there and put 46% and 41% within 25¢ of zero. The histogram sees the spike but cannot make it narrower than one bin.
+NYC taxi tips with the payment type hidden. A third of tips are exactly zero, the cash fares, and the rest are a skewed bump around $2. The Gaussian head has to cover both with one bell, so it puts only 8% of its mass within 25¢ of zero and spills below it. The flow and the mixture grow a spike there and put 42% and 37% within 25¢ of zero. The histogram sees the spike but cannot make it narrower than one bin.
 
 | Target | Shape | `gaussian` | `mixture` | `flow` | `histogram` | Tree mean + normal |
 |---|---|---:|---:|---:|---:|---:|
-| Taxi tips, $ | spike at zero, skewed | 0.950 | 0.952 | 0.927 | **0.910** | 1.001 |
-| California value, $100k | capped at 5.0 | 0.287 | 0.267 | 0.267 | 0.271 | **0.236** |
-| Diamond price, $1,000 | skewed, spread grows with size | 0.240 | **0.228** | 0.260 | 0.354 | 0.274 |
-| Abalone rings | near normal, counts | 1.109 | **1.055** | 1.071 | 1.064 | 1.157 |
+| Taxi tips, $ | spike at zero, skewed | 0.950 | **0.872** | 0.958 | 0.917 | 1.001 |
+| California value, $100k | capped at 5.0 | 0.225 | **0.205** | 0.208 | 0.229 | 0.236 |
+| Diamond price, $1,000 | skewed, spread grows with size | 0.216 | **0.202** | 0.232 | 0.343 | 0.274 |
+| Abalone rings | near normal, counts | 1.105 | **1.076** | 1.088 | 1.089 | 1.157 |
 | Melbourne min. temperature, °C, one day ahead | seasonal, near normal | 1.264 | **1.243** | 1.248 | 1.262 | — |
 
-CRPS, three splits each. Three things stand out. The right head depends on the shape: the flow and the histogram win on the spike in tips, while the histogram is the worst head on diamond prices, where most of the mass sits in two or three of its fixed bins. A row-by-row spread matters: on diamonds and abalone every Ashlar density head beats a tree mean with a constant-width normal. And a better mean can still win: on California the trees' mean is so much closer (RMSE 0.457 against 0.563) that a plain normal around it has the lowest CRPS.
+CRPS, three splits each. The mixture is the best head on every table here, and every Ashlar density head beats a tree mean with a constant-width normal on California, diamonds, and abalone. The right head still depends on the shape: the histogram is the worst head on diamond prices, where most of the mass sits in two or three of its fixed bins.
 
-The intervals are better calibrated too. With an interval that promises 80%, the three LightGBM quantile models cover 70% of held-out California values, 69% of diamond prices, and 72% of abalone rings. Ashlar's mixture covers 82%, 80%, and 77%. On the temperature forecast the mixture beats LightGBM on the same 28-day window on every interval score: pinball 0.554 against 0.573, and coverage 83% against 77%. Every column, with pinball loss, coverage, width, and log-likelihood, is in [docs/benchmarks.md](docs/benchmarks.md).
-
-### Using the heads
-
-The forecasters take the head by name. `TabularEstimator` has the point head and the normal head built in. The other four reach a table through the custom-head API, in [`examples/table_heads.py`](examples/table_heads.py):
-
-```python
-from table_heads import table_head            # examples/table_heads.py
-
-mean, std = y.mean(), y.std()
-model = table_head("mixture").fit(X, (y - mean) / std)
-raw = model.predict_raw(X_new)                 # mixture parameters, decode with ashlar.distributional
-```
+The intervals are better calibrated too. With an interval that promises 80%, the three LightGBM quantile models cover 70% of held-out California values, 69% of diamond prices, and 72% of abalone rings. Ashlar's mixture covers 76%, 80%, and 78%. On the temperature forecast the mixture beats LightGBM on the same 28-day window on every interval score: pinball 0.554 against 0.573, and coverage 83% against 77%. Every column, with pinball loss, coverage, width, and log-likelihood, is in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Learned embeddings
 
@@ -146,22 +188,23 @@ zones = model.core_.categorical_embeddings.tables[names.index("pickup_zone")]   
 
 That table is a model of NYC taxi trip duration from the pickup and drop-off zones, 191 and 203 levels, plus the hour, the weekday, and the borough. There is no distance column. The model was never told where a zone is, yet its first principal component tracks how long trips from that zone run (correlation 0.73), and both airports land far from everything else.
 
-On accuracy alone the embeddings are no magic. Log-duration RMSE, three splits:
+On accuracy alone the embeddings are no magic, and on this small, wide table they lose. Log-duration RMSE, three splits:
 
 | Model | RMSE ↓ |
 |---|---:|
-| Ashlar, defaults, 8-d embeddings or one-hot | 0.687 |
-| Ashlar, longer schedule, 8-d embeddings | 0.588 |
-| Ashlar, longer schedule, one-hot | 0.563 |
-| Ashlar, longer schedule, 16-d embeddings | 0.555 |
+| Ashlar, defaults, 8-d embeddings | 0.681 |
+| Ashlar, defaults, one-hot | 0.651 |
+| Ashlar, longer schedule, 8-d embeddings | 0.682 |
+| Ashlar, longer schedule, 16-d embeddings | 0.694 |
+| Ashlar, longer schedule, one-hot | 0.580 |
 | XGBoost, early-stopped | 0.580 |
 | LightGBM, early-stopped, native categorical splits | **0.520** |
 
-The defaults stop after a few epochs on this small, wide table, so the longer schedule (learning rate `3e-3`, up to 100 epochs, patience 20) was chosen by hand on the first split. With it, 16-d embeddings are within noise of one-hot and ahead of XGBoost, 8-d embeddings are behind both, and LightGBM is best. What the embeddings add is a representation: 16 numbers per zone instead of a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen. The same holds at scale: the NYC flights model above embeds 4,037 tail numbers and 104 destinations in 8 numbers each, where one-hot would add more than 4,000 input columns.
+With 5,000 training rows spread over about 200 zones on each side, a learned vector per zone has little data behind it, and one-hot with a longer schedule (learning rate `3e-3`, up to 100 epochs, patience 20, chosen by hand on the first split) does better, level with XGBoost. LightGBM is best. What the embeddings add is a representation: 8 numbers per zone instead of a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen.
 
 ## Documentation
 
-- [docs/tabular.md](docs/tabular.md): fitting a table. Defaults, tasks, embeddings, set columns, and search.
+- [docs/tabular.md](docs/tabular.md): fitting a table. Defaults, recipes, tasks, distributions, embeddings, set columns, and search.
 - [docs/forecast.md](docs/forecast.md): the forecasters and each head, call by call.
 - [docs/benchmarks.md](docs/benchmarks.md): every number on this page, per table and per metric, and how it was run.
-- [`examples/`](examples): runnable scripts. [`examples/table_heads.py`](examples/table_heads.py) puts the forecast heads on a table. [`examples/benchmark_readme.py`](examples/benchmark_readme.py) produces the numbers here.
+- [`examples/`](examples): runnable scripts. [`examples/benchmark_large.py`](examples/benchmark_large.py) and [`examples/benchmark_readme.py`](examples/benchmark_readme.py) produce the numbers here, and [`examples/ablation_gbm_parity.py`](examples/ablation_gbm_parity.py) the ablations.

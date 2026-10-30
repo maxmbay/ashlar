@@ -21,7 +21,7 @@ from sklearn.base import BaseEstimator
 from ashlar._version import __version__
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
-from ashlar.heads import LogitsHead, NormalHead, OrdinalHead, PointHead, SoftmaxHead
+from ashlar.heads import DistributionHead, LogitsHead, NormalHead, OrdinalHead, PointHead, SoftmaxHead
 from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_state, load_opt_state
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
@@ -31,24 +31,30 @@ from ashlar.layers import (
     SOFT_STAGE_SHRINKAGE,
     SoftStageHistogram,
     LinearReLUEmbeddings,
+    PeriodicEmbeddings,
+    PiecewiseLinearEmbeddings,
     ResidualMLP,
     SetEmbeddings,
     SetEncoder,
     TabMBackbone,
+    quantile_edges,
 )
 from ashlar.objectives import (
     classification_accuracy,
     classification_objective,
     normal_objective,
+    make_distribution_objective,
     make_ordinal_expectation_objective,
     make_ordinal_histogram_objective,
     ordinal_objective,
     regression_objective,
 )
+from ashlar.distributional import QUANTILE_LEVELS, decode, log_density, point_values, sample_values
 from ashlar.predict import distribution_from_normal_raw, mean_logits, mean_probabilities, split_normal_parameters
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
-from ashlar.train import fit_loop
+from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
+from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer
 from ashlar.weights import REDUCTION, class_weight_multiplier, validate_sample_weight
 
 _BACKBONES = {
@@ -64,16 +70,28 @@ _HEADS = {
     "normal": NormalHead,
     "ordinal": OrdinalHead,
     "softmax": SoftmaxHead,
+    "distribution": DistributionHead,
+    "tree": TreeHead,
 }
 _ORDINAL_HEADS = {"ordinal", "softmax"}
-_TASK_HEAD = {"regression": "point", "classification": "logits", "normal": "normal", "ordinal": "ordinal"}
+_TASK_HEAD = {"regression": "point", "classification": "logits", "normal": "normal", "ordinal": "ordinal", "tree": "tree"}
 _OBJECTIVES = {
     "regression": regression_objective,
     "classification": classification_objective,
     "normal": normal_objective,
     "ordinal": ordinal_objective,
+    "tree": tree_objective,
 }
 _LABELED_TASKS = {"classification", "ordinal"}
+# Tasks whose ``predict`` returns a label and whose ``predict_proba`` exists.
+_CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
+# Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
+DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile")
+_SCALED_TASKS = {"regression", *DISTRIBUTION_TASKS}
+_TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
+_NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
+# Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
+DISTRIBUTION_GRADIENT_CLIP = 1.0
 
 
 def _squeeze_univariate(point):
@@ -101,12 +119,33 @@ def _point_from_raw(task, policy, raw, point_fn):
         probabilities = jnp.exp(raw)
         probabilities = probabilities / jnp.clip(jnp.sum(probabilities, axis=-1, keepdims=True), 1e-30)
         return jnp.mean(probabilities, axis=1)
+    if task == "tree":
+        if policy != "mean_probabilities":
+            raise AshlarError("tree prediction_policy must be 'mean_probabilities'.")
+        if raw.ndim != 3:
+            raise ShapeError(f"tree log-probabilities must have shape (batch, member, node); received {raw.shape}.")
+        # Every node's marginal probability; the root column is 1.
+        return jnp.mean(jnp.exp(raw), axis=1)
     if task == "normal":
         loc, _scale = split_normal_parameters(raw)
         return _squeeze_univariate(jnp.mean(loc, axis=1))
+    if task in DISTRIBUTION_TASKS:
+        return jnp.mean(_member_points(task, raw), axis=1)
     if point_fn is None:
         raise AshlarError("a custom task requires point_fn(raw) -> predictions.")
     return point_fn(raw)
+
+
+def _decode_members(task, raw):
+    """Decode ``(batch, member, width)`` with every member as its own row."""
+    batch, members, width = raw.shape
+    return decode(task, raw.reshape(batch * members, width), 1), batch, members
+
+
+def _member_points(task, raw):
+    """Standardized point of each member, ``(batch, member)``. The mean for a mean-type head."""
+    decoded, batch, members = _decode_members(task, raw)
+    return point_values(task, decoded).reshape(batch, members)
 
 
 def _dist_from_raw(task, policy, raw, dist_fn):
@@ -123,8 +162,12 @@ class TabularEstimator(BaseEstimator):
     Parameters
     ----------
     task:
-        ``regression``, ``classification``, ``ordinal``, ``normal``, or ``custom``.
+        ``regression``, ``classification``, ``ordinal``, ``normal``, ``tree``,
+        or ``custom``.
         ``ordinal`` is a cumulative logit over numeric labels sorted by value.
+        ``tree`` is a nested outcome model over the ``tree`` argument: one
+        softmax per internal node on the shared hidden state. See
+        ``ashlar.tree`` and ``outcome_tree``.
         ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
         Jeffreys prior from the training counts. The default cuts stay learnable.
     backbone:
@@ -206,6 +249,10 @@ class TabularEstimator(BaseEstimator):
         names and one-hots the other categoricals. ``[]`` one-hots every
         categorical. The constructor value is what ``get_params`` returns;
         the fitted names are ``embedded_columns_``.
+    cyclical:
+        ``{column: period}``. Each named numeric column becomes two columns,
+        ``sin`` and ``cos`` of ``2π value / period``, so the end of a cycle sits
+        next to its start: ``{"hour": 24, "day_of_year": 365.25}``.
     set_features:
         Column names whose cells are a list of categories. Each list is a
         variable-length set: a masked mean of learned token embeddings.
@@ -221,16 +268,17 @@ class TabularEstimator(BaseEstimator):
         objective=None,
         point_fn=None,
         dist_fn=None,
-        num_embeddings: str | None = None,
-        num_embedding_dim: int = 32,
+        num_embeddings: str | None = "piecewise",
+        num_embedding_dim: int = 16,
+        num_embedding_bins: int = 48,
         n_events: int | None = None,
         validation_size: float = 0.2,
         split: str = "iid",
-        batch_size: int = 64,
-        max_epochs: int = 50,
-        patience: int = 10,
-        learning_rate: float = 1e-3,
-        learning_rate_schedule: str = "constant",
+        batch_size: int | str = "auto",
+        max_epochs: int | str = "auto",
+        patience: int = 16,
+        learning_rate: float = 2e-3,
+        learning_rate_schedule: str = "cosine",
         standardize_target: bool | None = None,
         share_training_batches: bool = True,
         bottleneck: int | bool | None = None,
@@ -238,6 +286,7 @@ class TabularEstimator(BaseEstimator):
         expectation_weight: float | None = None,
         soft_stages: int | None = None,
         weight_decay: float = 1e-4,
+        gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
         numeric_scaling: str = "robust",
         prediction_policy: str | None = None,
@@ -246,8 +295,11 @@ class TabularEstimator(BaseEstimator):
         categorical_embeddings: list[str] | None = None,
         set_features: list[str] | None = None,
         categorical_embedding_dim: int = 8,
+        categorical_embedding_hidden: bool = False,
         set_max_length: int = 8,
+        cyclical: dict | None = None,
         random_state: int = 0,
+        tree: dict | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -259,6 +311,7 @@ class TabularEstimator(BaseEstimator):
         self.dist_fn = dist_fn
         self.num_embeddings = num_embeddings
         self.num_embedding_dim = num_embedding_dim
+        self.num_embedding_bins = num_embedding_bins
         self.n_events = n_events
         self.validation_size = validation_size
         self.split = split
@@ -268,7 +321,7 @@ class TabularEstimator(BaseEstimator):
         self.learning_rate = learning_rate
         self.learning_rate_schedule = learning_rate_schedule
         if standardize_target is None:
-            standardize_target = task == "regression"
+            standardize_target = task in _SCALED_TASKS
         self.standardize_target = bool(standardize_target)
         self.share_training_batches = share_training_batches
         self.bottleneck = bottleneck
@@ -276,6 +329,7 @@ class TabularEstimator(BaseEstimator):
         self.expectation_weight = expectation_weight
         self.soft_stages = soft_stages
         self.weight_decay = weight_decay
+        self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
         self.numeric_scaling = numeric_scaling
         self.prediction_policy = prediction_policy
@@ -284,25 +338,39 @@ class TabularEstimator(BaseEstimator):
         self.categorical_embeddings = categorical_embeddings
         self.set_features = set_features
         self.categorical_embedding_dim = categorical_embedding_dim
+        self.categorical_embedding_hidden = categorical_embedding_hidden
         self.set_max_length = set_max_length
+        self.cyclical = cyclical
         self.random_state = random_state
+        self.tree = tree
 
     def _check_config(self):
-        if self.task not in {"regression", "classification", "ordinal", "normal", "custom"}:
-            raise AshlarError("task must be 'regression', 'classification', 'ordinal', 'normal', or 'custom'.")
+        if self.task not in {"regression", "classification", "ordinal", "normal", "tree", "custom", *DISTRIBUTION_TASKS}:
+            raise AshlarError(
+                "task must be 'regression', 'classification', 'ordinal', 'normal', 'tree', 'custom', "
+                "or a distribution: 'gaussian', 'mixture', 'flow', 'histogram', 'quantile'."
+            )
+        if (self.task == "tree") != (self.tree is not None):
+            raise AshlarError("task='tree' needs a tree= outcome spec, and tree= only applies to task='tree'.")
+        if self.task == "tree":
+            tree_json(self.tree)
         if self.split not in {"iid", "temporal", "group"}:
             raise AshlarError("split must be 'iid', 'temporal', or 'group'.")
         if self.random_state is None or int(self.random_state) < 0:
             raise AshlarError("random_state must be a non-negative integer.")
         if not 0.0 <= self.validation_size < 1.0:
             raise AshlarError("validation_size must be in [0, 1).")
-        if self.max_epochs < 1 or self.batch_size < 1 or self.patience < 0:
-            raise AshlarError("max_epochs and batch_size must be positive, and patience must be non-negative.")
+        for name in ("max_epochs", "batch_size"):
+            value = getattr(self, name)
+            if value != "auto" and (isinstance(value, (str, bool)) or int(value) < 1):
+                raise AshlarError(f"{name} must be a positive integer or 'auto'.")
+        if self.patience < 0:
+            raise AshlarError("patience must be non-negative.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
-        if self.learning_rate_schedule not in {"constant", "linear", "surface"}:
+        if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
             raise AshlarError(
-                "learning_rate_schedule must be 'constant', 'linear', or 'surface'. AdamW is the only optimizer."
+                "learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'. AdamW is the only optimizer."
             )
         if not 0.0 <= float(self.feature_dropout) < 1.0:
             raise AshlarError("feature_dropout must be in [0, 1).")
@@ -310,14 +378,18 @@ class TabularEstimator(BaseEstimator):
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
-        if self.standardize_target and self.task != "regression":
-            raise AshlarError("standardize_target is a regression label z-score. It does not apply to other tasks.")
+        if self.standardize_target and self.task not in _SCALED_TASKS:
+            raise AshlarError(
+                "standardize_target is a regression label z-score. It applies to regression and the distribution tasks."
+            )
+        if self.task in {"flow", "histogram"} and not self.standardize_target:
+            raise AshlarError(f"the {self.task} head works on a standardized axis, so standardize_target must stay on.")
         if self.share_training_batches not in {True, False}:
             raise AshlarError("share_training_batches must be true or false.")
         if not self.share_training_batches and self.task != "regression":
             raise AshlarError("share_training_batches=False is implemented for regression.")
-        if self.num_embeddings not in {None, "linear_relu"}:
-            raise AshlarError("num_embeddings must be None or 'linear_relu'. Piecewise and periodic embeddings are not in this release.")
+        if self.num_embeddings not in _NUM_EMBEDDINGS:
+            raise AshlarError("num_embeddings must be None, 'linear_relu', 'periodic', 'piecewise', or 'piecewise_relu'.")
         head = self.head
         if isinstance(head, str) and self.task == "ordinal":
             if head not in _ORDINAL_HEADS:
@@ -335,12 +407,14 @@ class TabularEstimator(BaseEstimator):
         policy = self._policy()
         if self.task == "classification" and policy not in {"mean_probabilities", "mean_logits"}:
             raise AshlarError("classification prediction_policy must be 'mean_probabilities' or 'mean_logits'.")
-        if self.task == "ordinal" and policy != "mean_probabilities":
-            raise AshlarError("ordinal prediction_policy must be 'mean_probabilities'.")
+        if self.task in {"ordinal", "tree"} and policy != "mean_probabilities":
+            raise AshlarError(f"{self.task} prediction_policy must be 'mean_probabilities'.")
         if self.task == "normal" and policy not in {"mixture", "mean_parameters"}:
             raise AshlarError("normal prediction_policy must be 'mixture' or 'mean_parameters'.")
         if self.task == "regression" and policy != "mean_members":
             raise AshlarError("regression prediction_policy must be 'mean_members'.")
+        if self.task in DISTRIBUTION_TASKS and policy != "mixture":
+            raise AshlarError("a distribution task predicts the equal-weight mixture of its members: prediction_policy='mixture'.")
         if isinstance(self.backbone, str) and self.backbone not in _BACKBONES:
             raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', or a class.")
         if int(self.categorical_embedding_dim) < 1 or int(self.set_max_length) < 1:
@@ -368,9 +442,9 @@ class TabularEstimator(BaseEstimator):
     def _policy(self) -> str:
         if self.prediction_policy is not None:
             return self.prediction_policy
-        if self.task in _LABELED_TASKS:
+        if self.task in _CLASSIFIER_TASKS:
             return "mean_probabilities"
-        if self.task == "normal":
+        if self.task == "normal" or self.task in DISTRIBUTION_TASKS:
             return "mixture"
         return "mean_members"
 
@@ -405,10 +479,17 @@ class TabularEstimator(BaseEstimator):
         A dict widens that grid. See ``ashlar.search.DEFAULT_SEARCH``.
         """
         self._check_config()
+        self.tree_ = parse_tree(tree_json(self.tree)) if self.task == "tree" else None
         if resume and search not in (None, False):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
         self._trial = None
+        if not resume:
+            # A fresh fit resolves its own settings; a previous fit's must not leak in.
+            self.resolved_ = None
         y_array = target_array(y)
+        X = self._with_cyclical(X)
+        if validation is not None:
+            validation = (self._with_cyclical(validation[0]), *validation[1:])
         names, columns = frame_columns(X)
         n_rows = len(columns[0])
         if len(y_array) != n_rows:
@@ -467,6 +548,7 @@ class TabularEstimator(BaseEstimator):
         return train_idx, val_idx, None
 
     def _assign_after_success(self, names, columns, y_array, weights, train_idx, val_idx, val_pack, resume):
+        self._n_train = len(train_idx)
         train_frame = _take_rows(names, columns, train_idx)
         y_train = y_array[train_idx]
         w_train = weights[train_idx]
@@ -487,6 +569,8 @@ class TabularEstimator(BaseEstimator):
         if self.num_embeddings is not None and encoder.n_numeric == 0:
             raise AshlarError("num_embeddings was requested, but the training partition has no numeric columns.")
         n_events, n_classes = self._output_sizes(y_train_model, classes)
+        encoded = encoder.transform(train_frame)
+        numeric_z = encoder.numeric_transform(encoded.numeric_raw)
         if resume:
             self._check_resume(encoder, n_events, n_classes)
             core = self.core_
@@ -500,10 +584,9 @@ class TabularEstimator(BaseEstimator):
                 n_classes,
                 init_key,
                 head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
+                numeric_z=numeric_z,
             )
             opt_state = None
-        encoded = encoder.transform(train_frame)
-        numeric_z = encoder.numeric_transform(encoded.numeric_raw)
         y_device, w_device = _device_targets(self.task, y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
@@ -519,9 +602,10 @@ class TabularEstimator(BaseEstimator):
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
+            gradient_clip=self._gradient_clip(),
             weight_decay=float(resolved["weight_decay"]),
             batch_size=int(resolved["batch_size"]),
-            max_epochs=int(self.max_epochs),
+            max_epochs=self._max_epochs(),
             patience=int(self.patience),
             key=train_key,
             validation=validation,
@@ -556,7 +640,7 @@ class TabularEstimator(BaseEstimator):
                 "learning_rate": float(trial.get("learning_rate", self.learning_rate)),
                 "weight_decay": float(trial.get("weight_decay", self.weight_decay)),
                 "feature_dropout": float(trial.get("feature_dropout", self.feature_dropout)),
-                "batch_size": int(trial.get("batch_size", self.batch_size)),
+                "batch_size": self._batch_size(trial.get("batch_size", self.batch_size)),
                 "backbone_kwargs": kwargs or None,
             }
         saved = getattr(self, "resolved_", None)
@@ -566,9 +650,31 @@ class TabularEstimator(BaseEstimator):
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
             "feature_dropout": float(self.feature_dropout),
-            "batch_size": int(self.batch_size),
+            "batch_size": self._batch_size(self.batch_size),
             "backbone_kwargs": self.backbone_kwargs,
         }
+
+    def _gradient_clip(self) -> float | None:
+        """Global gradient norm cap. ``None`` caps distribution tasks at 1 and leaves the rest alone.
+
+        A density head on a target with a spike can drive a component scale
+        toward its floor, where one minibatch's gradient is large enough to
+        blow up the run. ``0`` turns the cap off for every task.
+        """
+        if self.gradient_clip is None:
+            return DISTRIBUTION_GRADIENT_CLIP if self.task in DISTRIBUTION_TASKS else None
+        value = float(self.gradient_clip)
+        return None if value == 0.0 else value
+
+    def _batch_size(self, value) -> int:
+        if value == "auto":
+            return auto_batch_size(getattr(self, "_n_train", 0))
+        return int(value)
+
+    def _max_epochs(self) -> int:
+        if self.max_epochs == "auto":
+            return auto_max_epochs(getattr(self, "_n_train", 0))
+        return int(self.max_epochs)
 
     def _run_search(self, spec, names, columns, y_array, weights, train_idx, val_idx, val_pack):
         if val_pack is None and (val_idx is None or len(val_idx) == 0):
@@ -604,6 +710,7 @@ class TabularEstimator(BaseEstimator):
         return best, records
 
     def _trial_loss(self, spec, names, columns, y_array, weights, train_idx, val_idx, val_pack, index):
+        self._n_train = len(train_idx)
         train_frame = _take_rows(names, columns, train_idx)
         y_train = y_array[train_idx]
         w_train = weights[train_idx]
@@ -618,6 +725,8 @@ class TabularEstimator(BaseEstimator):
             numeric_scaling=self.numeric_scaling,
         )
         n_events, n_classes = self._output_sizes(y_train_model, classes)
+        encoded = encoder.transform(train_frame)
+        numeric_z = encoder.numeric_transform(encoded.numeric_raw)
         init_key, train_key = jax.random.split(jax.random.PRNGKey(int(self.random_state)))
         core = self._build_core(
             encoder,
@@ -625,8 +734,8 @@ class TabularEstimator(BaseEstimator):
             n_classes,
             init_key,
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
+            numeric_z=numeric_z,
         )
-        encoded = encoder.transform(train_frame)
         y_device, w_device = _device_targets(self.task, y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
@@ -642,7 +751,7 @@ class TabularEstimator(BaseEstimator):
 
         _trained, _state, history = fit_loop(
             core,
-            encoder.numeric_transform(encoded.numeric_raw),
+            numeric_z,
             encoded.categorical_onehot,
             y_device,
             w_device,
@@ -650,6 +759,7 @@ class TabularEstimator(BaseEstimator):
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
+            gradient_clip=self._gradient_clip(),
             weight_decay=float(resolved["weight_decay"]),
             batch_size=int(resolved["batch_size"]),
             max_epochs=int(spec["max_epochs"]),
@@ -702,11 +812,22 @@ class TabularEstimator(BaseEstimator):
             encoded = encoded.astype(np.int32)
             weights = _apply_class_weight(labels, encoded, len(classes), self.class_weight, w_train)
             return classes, encoded, weights
+        if self.task == "tree":
+            tree = self.tree_
+            nodes = tree.encode(_label_list(y_train))
+            # A root label carries no outcome, so it carries no weight.
+            weights = np.where(nodes == 0, 0.0, np.asarray(w_train, dtype=np.float64))
+            self._tree_weights = weights
+            if not np.any(weights > 0):
+                raise AshlarError("every training label is empty; a tree model needs at least one labelled row.")
+            return np.asarray(tree.leaf_names, dtype=object), nodes, weights
         if self.task == "custom":
             return None, np.asarray(y_train, dtype=np.float32), w_train
         return None, _regression_target(y_train, self.n_events), w_train
 
     def _output_sizes(self, y_train_model, classes):
+        if self.task == "tree":
+            return 1, self.tree_.n_nodes
         if self.task in _LABELED_TASKS:
             return 1, int(len(classes))
         if self.task == "custom":
@@ -752,6 +873,8 @@ class TabularEstimator(BaseEstimator):
             return self.objective
         if self.task == "ordinal" and self.histogram_variance is not None:
             return make_ordinal_histogram_objective(float(self.histogram_variance))
+        if self.task in DISTRIBUTION_TASKS:
+            return make_distribution_objective(self.task)
         base = _OBJECTIVES[self.task]
         weight = self._expectation_weight()
         if weight is None:
@@ -762,6 +885,15 @@ class TabularEstimator(BaseEstimator):
 
     def _head_kwargs_for_fit(self, y_encoded, n_classes: int) -> dict:
         kwargs = dict(self.head_kwargs or {})
+        if self.task in DISTRIBUTION_TASKS:
+            kwargs["kind"] = self.task
+        if self.task == "tree":
+            kwargs["tree"] = self.tree_.to_json()
+            if kwargs.get("edge_prior") == "empirical":
+                prior = empirical_edge_prior(self.tree_, y_encoded, getattr(self, "_tree_weights", np.ones(len(y_encoded))))
+                kwargs["edge_prior"] = prior
+                self.edge_prior_ = np.asarray(prior, dtype=np.float64)
+            return kwargs
         if kwargs.get("class_prior") != "empirical":
             return kwargs
         if self.task != "ordinal":
@@ -776,6 +908,16 @@ class TabularEstimator(BaseEstimator):
         resolved["class_prior"] = [float(value) for value in prior.tolist()]
         self.class_prior_ = np.asarray(resolved["class_prior"], dtype=np.float64)
         return resolved
+
+    def _head_kwargs_for_load(self) -> dict:
+        kwargs = dict(self.head_kwargs or {})
+        if self.task in DISTRIBUTION_TASKS:
+            kwargs["kind"] = self.task
+        if self.task == "tree":
+            kwargs["tree"] = self.tree_.to_json()
+            if kwargs.get("edge_prior") == "empirical":
+                kwargs["edge_prior"] = None
+        return kwargs
 
     def _bottleneck_width(self) -> int | None:
         value = self.bottleneck
@@ -800,10 +942,16 @@ class TabularEstimator(BaseEstimator):
             raise AshlarError("soft_stages is an ordinal leaf histogram. It does not apply to other tasks.")
         return int(value)
 
-    def _build_core(self, encoder: FeatureEncoder, n_events: int, n_classes: int, key, head_kwargs=None):
+    def _build_core(
+        self, encoder: FeatureEncoder, n_events: int, n_classes: int, key, head_kwargs=None, numeric_z=None
+    ):
+        """Initial core. ``numeric_z`` is the scaled training partition; piecewise bins come from it.
+
+        Without it, as on ``load``, the bins are placeholders of the right shape.
+        """
         emb_key, cat_key, set_key, backbone_key, head_key = jax.random.split(key, 5)
         embedding_dim = None
-        if self.num_embeddings == "linear_relu":
+        if self.num_embeddings is not None:
             embedding_dim = int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
         chunks = encoder.feature_chunks(embedding_dim, cat_dim)
@@ -816,9 +964,21 @@ class TabularEstimator(BaseEstimator):
         if backbone_cls in _FIELD_BACKBONES:
             kwargs["feature_chunks"] = chunks
         embeddings = None
-        if embedding_dim is not None:
+        if self.num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
-        categorical_embeddings = _category_tables(encoder.embedding_columns, cat_dim, cat_key)
+        elif self.num_embeddings == "periodic":
+            embeddings = PeriodicEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
+        elif self.num_embeddings in {"piecewise", "piecewise_relu"}:
+            if numeric_z is None:
+                edges = jnp.tile(jnp.linspace(-1.0, 1.0, int(self.num_embedding_bins) + 1), (encoder.n_numeric, 1))
+            else:
+                edges = quantile_edges(numeric_z, int(self.num_embedding_bins), seed=int(self.random_state))
+            embeddings = PiecewiseLinearEmbeddings(
+                edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
+            )
+        categorical_embeddings = _category_tables(
+            encoder.embedding_columns, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden)
+        )
         set_embeddings = _category_tables(encoder.set_columns, cat_dim, set_key, set_encoder=True)
         backbone = backbone_cls(d_in, key=backbone_key, **kwargs)
         if not hasattr(backbone, "k") or not hasattr(backbone, "d_out"):
@@ -841,7 +1001,7 @@ class TabularEstimator(BaseEstimator):
             n_events=n_events,
             n_classes=n_classes,
             key=head_key,
-            **(dict(self.head_kwargs or {}) if head_kwargs is None else dict(head_kwargs)),
+            **(self._head_kwargs_for_load() if head_kwargs is None else dict(head_kwargs)),
         )
         stage_count = self._soft_stage_count()
         if stage_count is None:
@@ -874,7 +1034,7 @@ class TabularEstimator(BaseEstimator):
         )
 
     def _fit_target_scale(self, y):
-        if not self.standardize_target or self.task != "regression":
+        if not self.standardize_target or self.task not in _SCALED_TASKS:
             self.target_mean_ = None
             self.target_std_ = None
             return y
@@ -920,6 +1080,10 @@ class TabularEstimator(BaseEstimator):
             y_encoded = _encode_known_labels(labels, classes)
             w_val = _apply_class_weight(labels, y_encoded, len(classes), self.class_weight, np.asarray(w_val, dtype=np.float64))
             y_device, w_device = _device_targets(self.task, y_encoded, w_val)
+        elif self.task == "tree":
+            nodes = self.tree_.encode(_label_list(y_val))
+            w_val = np.where(nodes == 0, 0.0, np.asarray(w_val, dtype=np.float64))
+            y_device, w_device = _device_targets(self.task, nodes, w_val)
         elif self.task == "custom":
             y_device, w_device = _device_targets(self.task, np.asarray(y_val, dtype=np.float32), w_val)
         else:
@@ -940,6 +1104,31 @@ class TabularEstimator(BaseEstimator):
             w_device,
         )
 
+    def _with_cyclical(self, X):
+        """Replace each ``cyclical`` column by its ``_sin`` and ``_cos`` on a circle of that period.
+
+        Hour 23 and hour 0 land next to each other, as do the last and first
+        week of the year. A missing value stays missing in both coordinates.
+        """
+        if not self.cyclical:
+            return X
+        names, columns = frame_columns(X)
+        unknown = set(self.cyclical).difference(names)
+        if unknown:
+            raise AshlarError(f"cyclical columns {sorted(unknown)} are not in X.")
+        out = {}
+        for name, values in zip(names, columns, strict=True):
+            if name not in self.cyclical:
+                out[name] = values
+                continue
+            period = float(self.cyclical[name])
+            if not np.isfinite(period) or period <= 0:
+                raise AshlarError(f"the period of cyclical column {name!r} must be positive.")
+            angle = 2 * np.pi * np.asarray(values, dtype=np.float64) / period
+            out[f"{name}_sin"] = np.sin(angle)
+            out[f"{name}_cos"] = np.cos(angle)
+        return out
+
     def prepare(self, X):
         """Return scaled numeric features and host-encoded one-hot categories.
 
@@ -948,7 +1137,7 @@ class TabularEstimator(BaseEstimator):
         schema has those columns and you are not calling ``predict``.
         """
         self._require_fitted()
-        encoded = self.encoder_.transform(X)
+        encoded = self.encoder_.transform(self._with_cyclical(X))
         return self.numeric_transform_(encoded.numeric_raw), encoded.categorical_onehot
 
     def forward_raw(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
@@ -991,28 +1180,81 @@ class TabularEstimator(BaseEstimator):
 
     def _raw_from_frame(self, X):
         self._require_fitted()
-        encoded = self.encoder_.transform(X)
+        encoded = self.encoder_.transform(self._with_cyclical(X))
         numeric_z = self.numeric_transform_(encoded.numeric_raw)
-        return self.core_(
+        inputs = (
             numeric_z,
             encoded.categorical_onehot,
             encoded.category_index,
             encoded.set_tokens,
             encoded.set_mask,
-            key=None,
         )
+        n_rows = int(numeric_z.shape[0])
+        if n_rows <= EVAL_CHUNK_ROWS:
+            return self.core_(*inputs, key=None)
+        forward = _jit_forward()
+        pieces = [
+            forward(self.core_, *(array[start : start + EVAL_CHUNK_ROWS] for array in inputs))
+            for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+        ]
+        return jnp.concatenate(pieces, axis=0)
 
     def predict(self, X):
         raw = self._raw_from_frame(X)
         point = np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn))
-        if self.task == "regression" and self.standardize_target:
+        if self.task in _SCALED_TASKS and self.standardize_target:
             point = point * np.asarray(self.target_std_, dtype=np.float64) + np.asarray(self.target_mean_, dtype=np.float64)
         if self.task in _LABELED_TASKS:
             indices = np.argmax(point, axis=1)
             return self.classes_[indices]
+        if self.task == "tree":
+            indices = np.argmax(point[:, list(self.tree_.leaves)], axis=1)
+            return self.classes_[indices]
         if point.ndim == 2 and point.shape[1] == 1:
             return point[:, 0]
         return point
+
+    def score(self, X, y, sample_weight=None):
+        """Accuracy for classification and ordinal tasks, R² otherwise.
+
+        The same score a scikit-learn classifier or regressor returns, so
+        ``cross_val_score`` and ``GridSearchCV`` work without ``scoring=``.
+        """
+        from sklearn.metrics import accuracy_score, r2_score
+
+        prediction = self.predict(X)
+        if self.task in _LABELED_TASKS:
+            return float(accuracy_score(target_array(y), prediction, sample_weight=sample_weight))
+        if self.task == "tree":
+            # Accuracy on the rows labelled down to a leaf.
+            labels = np.asarray(_label_list(target_array(y)), dtype=object)
+            keep = np.isin(labels, self.classes_)
+            weight = None if sample_weight is None else np.asarray(sample_weight)[keep]
+            return float(accuracy_score(labels[keep], prediction[keep], sample_weight=weight))
+        return float(r2_score(target_array(y), prediction, sample_weight=sample_weight))
+
+    @property
+    def _estimator_type(self):
+        return "classifier" if self.task in _CLASSIFIER_TASKS else "regressor"
+
+    def __sklearn_tags__(self):
+        """Tag a classification or ordinal model as a classifier, anything else as a regressor.
+
+        The tag follows ``task``, so ``classifier()`` stratifies folds and the
+        probability scorers read ``predict_proba``.
+        """
+        from sklearn.utils import ClassifierTags, RegressorTags
+
+        tags = super().__sklearn_tags__()
+        if self.task in _CLASSIFIER_TASKS:
+            tags.estimator_type = "classifier"
+            tags.classifier_tags = ClassifierTags()
+            tags.target_tags.required = True
+        else:
+            tags.estimator_type = "regressor"
+            tags.regressor_tags = RegressorTags()
+            tags.target_tags.required = True
+        return tags
 
     def predict_score(self, X):
         """Expected class value, ``probabilities @ classes_``.
@@ -1027,10 +1269,112 @@ class TabularEstimator(BaseEstimator):
         return probabilities @ values
 
     def predict_proba(self, X):
-        if self.task not in _LABELED_TASKS:
-            raise AshlarError("predict_proba is available for classification and ordinal classification.")
+        """Class probabilities in ``classes_`` order. For a tree, the leaf probabilities."""
+        if self.task not in _CLASSIFIER_TASKS:
+            raise AshlarError("predict_proba is available for classification, ordinal, and tree tasks.")
         raw = self._raw_from_frame(X)
-        return np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn))
+        point = np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn))
+        if self.task == "tree":
+            return point[:, list(self.tree_.leaves)]
+        return point
+
+    def predict_node_proba(self, X):
+        """Marginal probability of every tree node, ``(rows, node)`` in ``node_names_`` order.
+
+        Column 0 is the root and is 1. An internal node's column is the sum of
+        its leaves, so ``P(swing)`` is read directly.
+        """
+        self._require_tree()
+        raw = self._raw_from_frame(X)
+        return np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn), dtype=np.float64)
+
+    def predict_conditional(self, X, node=None):
+        """``P(child | node, x)`` for the children of ``node``, in ``tree_.children`` order.
+
+        ``node=None`` is the root split. Member probabilities are averaged
+        before dividing, so the conditionals multiply back to ``predict_proba``.
+        """
+        self._require_tree()
+        return self.tree_.conditional(self.predict_node_proba(X), node)
+
+    def conditional_names(self, node=None) -> list:
+        """Column names of ``predict_conditional(X, node)``."""
+        self._require_tree()
+        return [self.tree_.names[c] for c in self.tree_.children[self.tree_.node(node)]]
+
+    @property
+    def node_names_(self) -> list:
+        self._require_tree()
+        return list(self.tree_.names)
+
+    def _require_tree(self):
+        if self.task != "tree":
+            raise AshlarError("node and conditional probabilities need task='tree'.")
+        self._require_fitted()
+
+    def _require_distribution(self, name: str, *, density: bool = False):
+        if self.task not in DISTRIBUTION_TASKS:
+            raise AshlarError(f"{name} needs a distribution task: {', '.join(DISTRIBUTION_TASKS)}.")
+        if density and self.task == "quantile":
+            raise AshlarError(f"the quantile head has three levels, not a density, so it has no {name}.")
+
+    def _target_affine(self):
+        if self.target_mean_ is None:
+            return 0.0, 1.0
+        return float(self.target_mean_), float(self.target_std_)
+
+    def sample(self, X, n: int = 100, seed: int = 0):
+        """``n`` draws per row from the predictive distribution, shape ``(n, rows)``, on the scale of ``y``.
+
+        Each draw picks one member uniformly, then draws from that member's
+        distribution, so the draws follow the equal-weight member mixture.
+        """
+        self._require_distribution("sample", density=True)
+        raw = np.asarray(self.predict_raw(X))
+        mean, std = self._target_affine()
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for start in range(0, raw.shape[0], 4096):
+            key, member_key, draw_key = jax.random.split(key, 3)
+            block = jnp.asarray(raw[start : start + 4096])
+            rows, members, width = block.shape
+            choice = jax.random.randint(member_key, (int(n), rows), 0, members)
+            picked = jnp.take_along_axis(block[None], choice[..., None, None], axis=2)[:, :, 0, :]
+            decoded = decode(self.task, picked.reshape(int(n) * rows, width), 1)
+            draws = sample_values(self.task, decoded, draw_key, 1).reshape(int(n), rows)
+            pieces.append(np.asarray(draws, dtype=np.float64))
+        return np.concatenate(pieces, axis=1) * std + mean
+
+    def log_prob(self, X, y):
+        """Log density of ``y`` under the equal-weight member mixture, per row, on the scale of ``y``."""
+        self._require_distribution("log_prob", density=True)
+        raw = jnp.asarray(self.predict_raw(X))
+        mean, std = self._target_affine()
+        z = (np.asarray(target_array(y), dtype=np.float64).reshape(-1) - mean) / std
+        decoded, batch, members = _decode_members(self.task, raw)
+        values = jnp.repeat(jnp.asarray(z, dtype=raw.dtype), members)[:, None]
+        per_member = log_density(self.task, decoded, values).reshape(batch, members)
+        mixed = jax.nn.logsumexp(per_member, axis=1) - jnp.log(float(members))
+        return np.asarray(mixed, dtype=np.float64) - np.log(std)
+
+    def predict_quantiles(self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0):
+        """Quantiles per row, shape ``(rows, len(levels))``, on the scale of ``y``.
+
+        A density head reads them from ``n_samples`` draws of the member
+        mixture. The quantile head has its three trained levels, 0.1, 0.5, and
+        0.9, averaged across members, and no others.
+        """
+        self._require_distribution("predict_quantiles")
+        levels = tuple(float(level) for level in np.atleast_1d(levels))
+        mean, std = self._target_affine()
+        if self.task == "quantile":
+            if levels != tuple(QUANTILE_LEVELS):
+                raise AshlarError(f"the quantile head was trained at {QUANTILE_LEVELS} only.")
+            decoded, batch, members = _decode_members(self.task, jnp.asarray(self.predict_raw(X)))
+            values = np.asarray(decoded, dtype=np.float64).reshape(batch, members, 3).mean(axis=1)
+            return values * std + mean
+        draws = self.sample(X, n=n_samples, seed=seed)
+        return np.quantile(draws, levels, axis=0).T
 
     def predict_dist(self, X, policy: str | None = None):
         raw = self._raw_from_frame(X)
@@ -1059,6 +1403,7 @@ class TabularEstimator(BaseEstimator):
             "dist_fn": dump_ref(self.dist_fn),
             "num_embeddings": self.num_embeddings,
             "num_embedding_dim": self.num_embedding_dim,
+            "num_embedding_bins": self.num_embedding_bins,
             "n_events": self.n_events_,
             "n_classes": self.n_classes_,
             "prediction_policy": self._policy(),
@@ -1087,6 +1432,10 @@ class TabularEstimator(BaseEstimator):
             "categorical_embeddings": self.categorical_embeddings,
             "set_features": self.set_features,
             "categorical_embedding_dim": int(self.categorical_embedding_dim),
+            "categorical_embedding_hidden": bool(self.categorical_embedding_hidden),
+            "gradient_clip": self.gradient_clip,
+            "cyclical": self.cyclical,
+            "tree": None if self.tree is None else self.tree_.spec,
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
@@ -1116,7 +1465,8 @@ class TabularEstimator(BaseEstimator):
             dist_fn=load_ref(payload["dist_fn"]),
             num_embeddings=payload["num_embeddings"],
             num_embedding_dim=payload["num_embedding_dim"],
-            n_events=None if payload["task"] in _LABELED_TASKS else payload["n_events"],
+            num_embedding_bins=payload.get("num_embedding_bins", 48),
+            n_events=None if payload["task"] in _CLASSIFIER_TASKS else payload["n_events"],
             validation_size=payload["validation_size"],
             split=payload["split"],
             batch_size=payload["batch_size"],
@@ -1131,6 +1481,8 @@ class TabularEstimator(BaseEstimator):
             expectation_weight=payload.get("expectation_weight"),
             soft_stages=payload.get("soft_stages"),
             weight_decay=payload["weight_decay"],
+            gradient_clip=payload.get("gradient_clip"),
+            cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             prediction_policy=payload["prediction_policy"],
@@ -1139,9 +1491,12 @@ class TabularEstimator(BaseEstimator):
             categorical_embeddings=payload.get("categorical_embeddings"),
             set_features=payload.get("set_features"),
             categorical_embedding_dim=payload.get("categorical_embedding_dim", 8),
+            categorical_embedding_hidden=payload.get("categorical_embedding_hidden", False),
             set_max_length=payload.get("set_max_length", 8),
             random_state=payload["random_state"],
+            tree=payload.get("tree"),
         )
+        estimator.tree_ = parse_tree(tree_json(estimator.tree)) if estimator.task == "tree" else None
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
@@ -1161,12 +1516,14 @@ class TabularEstimator(BaseEstimator):
         estimator.is_fitted_ = True
         opt_path = directory / "optimizer.eqx"
         if opt_path.exists():
-            import optax
             import equinox as eqx
 
-            template_state = optax.adamw(
-                float(estimator.learning_rate), weight_decay=float(estimator.weight_decay)
-            ).init(eqx.filter(estimator.core_, eqx.is_array))
+            rate = float(estimator.learning_rate)
+            if estimator.learning_rate_schedule in {"linear", "cosine"}:
+                rate = lambda count, rate=rate: rate  # same state layout as the fitted schedule
+            template_state = make_optimizer(rate, float(estimator.weight_decay), estimator._gradient_clip()).init(
+                eqx.filter(estimator.core_, eqx.is_array)
+            )
             estimator.opt_state_ = load_opt_state(directory, template_state)
         else:
             estimator.opt_state_ = None
@@ -1184,6 +1541,23 @@ class TabularEstimator(BaseEstimator):
     def _require_fitted(self):
         if not getattr(self, "is_fitted_", False):
             raise AshlarError("this estimator is not fitted.")
+
+
+_FORWARD = None
+
+
+def _jit_forward():
+    """One compiled inference pass, shared by every fitted core."""
+    global _FORWARD
+    if _FORWARD is None:
+        import equinox as eqx
+
+        @eqx.filter_jit
+        def forward(core, *inputs):
+            return core(*inputs, key=None)
+
+        _FORWARD = forward
+    return _FORWARD
 
 
 def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, task):
@@ -1208,6 +1582,8 @@ def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, ta
         return train_idx, val_idx
     if task in _LABELED_TASKS:
         return _stratified_indices(np.asarray(y).reshape(-1), validation_size, random_state)
+    if task == "tree":
+        return _stratified_indices(np.asarray(["" if v is None else str(v) for v in _label_list(y)]), validation_size, random_state)
     order = rng.permutation(n_rows)
     n_val = min(max(int(round(validation_size * n_rows)), 1), n_rows - 1)
     return order[n_val:], order[:n_val]
@@ -1277,9 +1653,19 @@ def _regression_target(y, n_events):
 
 def _device_targets(task, y, weights):
     w = jnp.asarray(weights, dtype=jnp.float32)
-    if task in _LABELED_TASKS:
+    if task in _CLASSIFIER_TASKS:
         return jnp.asarray(y, dtype=jnp.int32), w
     return jnp.asarray(y, dtype=jnp.float32), w
+
+
+def _label_list(y) -> list:
+    """Tree labels as a flat list of node names; ``None`` and ``NaN`` stay as they are."""
+    array = np.asarray(y, dtype=object)
+    if array.ndim == 2 and array.shape[1] == 1:
+        array = array[:, 0]
+    if array.ndim != 1:
+        raise AshlarError(f"tree labels must be one node name per row; received shape {array.shape}.")
+    return array.tolist()
 
 
 def _ordinal_label_vector(y):
@@ -1327,22 +1713,31 @@ def _json_class_weight(class_weight):
 
 def _saved_head_kwargs(estimator):
     payload = dict(estimator.head_kwargs or {})
+    edge_prior = getattr(estimator, "edge_prior_", None)
+    if edge_prior is not None and estimator.task == "tree":
+        payload["edge_prior"] = [float(value) for value in np.asarray(edge_prior, dtype=np.float64).tolist()]
     prior = getattr(estimator, "class_prior_", None)
     if prior is not None:
         payload["class_prior"] = [float(value) for value in np.asarray(prior, dtype=np.float64).tolist()]
     return payload or None
 
 
-def _category_tables(columns, dim: int, key, *, set_encoder: bool = False):
+def _category_tables(columns, dim: int, key, *, set_encoder: bool = False, hidden: bool = False):
     if not columns:
         return None
     keys = jax.random.split(key, len(columns))
     tables = []
+    layers = []
     for column, piece in zip(columns, keys, strict=True):
         vocab = 1 + len(column.categories)
-        tables.append(jax.random.normal(piece, (vocab, dim), dtype=jnp.float32) * jnp.asarray(0.02, dtype=jnp.float32))
-    module = SetEmbeddings if set_encoder else CategoricalEmbeddings
-    return module(tables=tuple(tables))
+        table_key, weight_key = jax.random.split(piece)
+        tables.append(jax.random.normal(table_key, (vocab, dim), dtype=jnp.float32) * jnp.asarray(0.02, dtype=jnp.float32))
+        if hidden:
+            weight = jax.random.normal(weight_key, (dim, dim), dtype=jnp.float32) * jnp.asarray(dim**-0.5, dtype=jnp.float32)
+            layers.append((weight, jnp.zeros((dim,), dtype=jnp.float32)))
+    if set_encoder:
+        return SetEmbeddings(tables=tuple(tables))
+    return CategoricalEmbeddings(tables=tuple(tables), hidden=tuple(layers) if hidden else None)
 
 
 def _json_ready(value):

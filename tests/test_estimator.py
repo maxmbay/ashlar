@@ -167,7 +167,7 @@ def test_default_recipe_is_the_no_argument_estimator():
         assert params[key] == value
     assert params["weight_decay"] == 1e-4
     assert params["feature_dropout"] == 0.0
-    assert params["patience"] == 10
+    assert params["patience"] == 16
     assert params["validation_size"] == 0.2
     assert DEFAULT_SEARCH["n_trials"] == 2
     assert DEFAULT_SEARCH["space"]["weight_decay"] == [1e-4, 1e-3]
@@ -544,8 +544,8 @@ def test_surface_learning_rate_shrinks_when_data_is_small_or_steep():
     assert surface_learning_rate(5_000, curvature=-1.0, grad_rms=2.0) == 0.1
     assert surface_learning_rate(10_000, curvature=1e-12, grad_rms=0.0) == 0.1
     assert surface_learning_rate(10, curvature=1e6, grad_rms=1.0) == 1e-5
-    assert DEFAULT_RECIPE["learning_rate_schedule"] == "constant"
-    assert DEFAULT_RECIPE["learning_rate"] == 1e-3
+    assert DEFAULT_RECIPE["learning_rate_schedule"] == "cosine"
+    assert DEFAULT_RECIPE["learning_rate"] == 2e-3
 
 
 def test_surface_schedule_sets_an_adamw_rate_from_the_batch(tmp_path):
@@ -571,7 +571,7 @@ def test_surface_schedule_sets_an_adamw_rate_from_the_batch(tmp_path):
     assert np.isfinite(pred).all()
     restored = type(model).load(model.save(tmp_path / "surface"))
     assert np.allclose(pred, np.asarray(restored.predict(x[:2])))
-    assert DEFAULT_RECIPE["learning_rate_schedule"] == "constant"
+    assert DEFAULT_RECIPE["learning_rate_schedule"] == "cosine"
 
 
 def test_residual_activation_default_is_silu_and_relu_differs():
@@ -659,7 +659,7 @@ def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
     assert restored.core_.head.freeze_class_prior is True
     assert np.allclose(score, np.asarray(restored.predict_score({"measure": measure, "group": group}), dtype=np.float64))
     assert ordinal().head_kwargs is None
-    assert DEFAULT_RECIPE["learning_rate_schedule"] == "constant"
+    assert DEFAULT_RECIPE["learning_rate_schedule"] == "cosine"
     assert DEFAULT_RECIPE["task"] == "regression"
     try:
         TabularEstimator(
@@ -1010,7 +1010,7 @@ def test_robust_scale_and_default_categorical_embeddings(tmp_path):
 
     assert DEFAULT_RECIPE["numeric_scaling"] == "robust"
     assert DEFAULT_RECIPE["categorical_embeddings"] is None
-    assert DEFAULT_RECIPE["num_embeddings"] is None
+    assert DEFAULT_RECIPE["num_embeddings"] == "piecewise"
     assert tabm().numeric_scaling == "robust"
     assert tabm(numeric_scaling="quantile_tabr").numeric_scaling == "quantile_tabr"
 

@@ -1,7 +1,5 @@
 """Draw the README figures that use public data.
 
-``flight-delays.png``: Gaussian, histogram, and mixture heads on NYC flight arrival delays,
-averaged over held-out flights and for three single flights.
 ``tip-heads.png``: the average predictive density of four heads on held-out
 NYC taxi tips, over the tips themselves. ``taxi-zones.png``: the learned
 pickup-zone embedding, projected to two dimensions and colored by the
@@ -19,7 +17,6 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -27,10 +24,8 @@ from sklearn.model_selection import train_test_split
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import benchmark_readme as bench
-from table_heads import flatten_members
 import figures as style
 from ashlar import TabularEstimator
-from ashlar.distributional import decode, log_density
 
 HEADS = (
     ("gaussian", "Gaussian"),
@@ -41,15 +36,11 @@ HEADS = (
 
 
 def _average_density(kind, model, x_test, grid, mean, std):
-    raw = jnp.asarray(model.predict_raw(x_test))
-    flat, batch, members = flatten_members(raw)
-    decoded = decode(kind, flat, 1)
-    out = []
-    for value in grid:
-        z = jnp.full((batch * members, 1), (value - mean) / std, dtype=flat.dtype)
-        logp = np.asarray(log_density(kind, decoded, z)).reshape(batch, members)
-        out.append(np.mean(np.exp(logp)) / std)
-    return np.asarray(out)
+    """Mean predictive density over the held-out rows at each grid value, on the scale of the target."""
+    rows = len(x_test)
+    return np.asarray(
+        [np.mean(np.exp(model.log_prob(x_test, np.full(rows, (value - mean) / std)))) / std for value in grid]
+    )
 
 
 def tip_heads() -> None:
@@ -79,8 +70,8 @@ def tip_heads() -> None:
         style._style_plot(ax)
         model = bench.fit_distribution(kind, x_train, (y_train - mean) / std, 0)
         density = _average_density(kind, model, x_test, grid, mean, std)
-        near = np.abs(grid) <= 0.25
-        below = float(np.trapezoid(density[near], grid[near]))
+        draws = model.sample(x_test, n=200, seed=0) * std + mean
+        below = float(np.mean(np.abs(draws) <= 0.25))
         ax.hist(y_test, bins=bins, density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6, zorder=1)
         color = style.CLAY if kind == "gaussian" else style.TEAL
         ax.plot(grid, density, color=color, linewidth=2.2, zorder=3)
@@ -160,93 +151,13 @@ def taxi_zones() -> None:
     style._save(fig, "taxi-zones.png")
 
 
-def flight_delays() -> None:
-    """Average density of three heads against the held-out delays, and the mixture for three single flights."""
-    x, y = bench.flights()
-    x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=0)
-    mean, std = float(np.mean(y_train)), float(np.std(y_train))
-    grid = np.linspace(-70.0, 200.0, 541)
-    sample = np.random.default_rng(0).choice(len(y_test), size=4000, replace=False)
-    x_small = x_test.iloc[sample].reset_index(drop=True)
-    models = {kind: bench.fit_distribution(kind, x_train, (y_train - mean) / std, 0, **bench.LARGE) for kind in ("gaussian", "mixture", "histogram")}
-
-    width, height = 13.8, 6.9
-    fig = plt.figure(figsize=(width, height), facecolor=style.WHITE)
-    fig.text(0.07, 0.965, "One bell cannot hold a flight delay.", fontproperties=style.TITLE, color=style.INK, ha="left", va="top")
-    fig.text(
-        0.07,
-        0.875,
-        "NYC 2013 arrival delays, 327k flights, from the schedule alone.",
-        fontproperties=style.CLAIM,
-        color=style.MUTED,
-        ha="left",
-        va="top",
-    )
-    fig.add_artist(plt.Line2D([0.07, 0.93], [0.828, 0.828], transform=fig.transFigure, color=style.HAIR, linewidth=1.05))
-
-    left = fig.add_axes([0.085, 0.14, 0.38, 0.56])
-    style._style_plot(left)
-    left.hist(y_test, bins=np.arange(-70, 201, 5), density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6)
-    for kind, color in (("gaussian", style.CLAY), ("histogram", "#8a8178"), ("mixture", style.TEAL)):
-        left.plot(grid, _average_density(kind, models[kind], x_small, grid, mean, std), color=color, linewidth=2.2, label=kind)
-    legend = left.legend(frameon=False, loc="upper right", prop=style.TICK, handlelength=1.4)
-    for text in legend.get_texts():
-        text.set_color(style.MUTED)
-    left.set_xlim(-70, 200)
-    left.set_xticks([-60, 0, 60, 120, 180])
-    style._ticks(left)
-    left.text(0.0, 1.05, "All held-out flights, average density", transform=left.transAxes, fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
-    left.set_xlabel("arrival delay, minutes", fontproperties=style.AXIS, color=style.INK, labelpad=10)
-
-    right = fig.add_axes([0.56, 0.14, 0.38, 0.56])
-    style._style_plot(right)
-    raw = jnp.asarray(models["mixture"].predict_raw(x_small))
-    flat, batch, members = flatten_members(raw)
-    decoded = decode("mixture", flat, 1)
-    spread = []
-    for value in grid:
-        z = jnp.full((batch * members, 1), (value - mean) / std, dtype=flat.dtype)
-        spread.append(np.exp(np.asarray(log_density("mixture", decoded, z)).reshape(batch, members).mean(axis=1)) / std)
-    density = np.stack(spread, axis=1)
-    cdf = np.cumsum(density, axis=1) * (grid[1] - grid[0])
-    late = 1.0 - cdf[:, np.searchsorted(grid, 60.0)]
-    picks = [int(np.argmin(late)), int(np.argsort(late)[len(late) // 2]), int(np.argmax(late))]
-    shades = [style.TEAL, "#8a8178", style.CLAY]
-    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    for rank, (pick, color) in enumerate(zip(picks, shades)):
-        row = x_small.iloc[pick]
-        share = "under 1%" if late[pick] < 0.005 else f"{late[pick]:.0%}"
-        hour = int(row["departure"])
-        clock = f"{hour % 12 or 12} {'am' if hour < 12 else 'pm'}"
-        label = f"{row['carrier']} {row['origin']}–{row['dest']}, {clock}, {months[int(row['month']) - 1]}\n{share} chance of an hour late"
-        right.plot(grid, density[pick], color=color, linewidth=2.2)
-        top = int(np.argmax(density[pick]))
-        if rank == 2:
-            at = np.searchsorted(grid, 120.0)
-            xy, offset, ha = (grid[at], density[pick][at]), (0, 46), "center"
-        else:
-            xy = (grid[top], density[pick][top])
-            offset, ha = (14, 6), "left"
-        style._callout(right, xy, offset[0], offset[1], label, color=color, ha=ha)
-        print("pick", label.replace("\n", ": "), flush=True)
-    right.set_xlim(-70, 200)
-    right.set_ylim(0, density[picks].max() * 1.15)
-    right.set_xticks([-60, 0, 60, 120, 180])
-    style._ticks(right)
-    right.text(0.0, 1.05, "Three single flights, mixture head", transform=right.transAxes, fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
-    right.set_xlabel("arrival delay, minutes", fontproperties=style.AXIS, color=style.INK, labelpad=10)
-    style._save(fig, "flight-delays.png")
-
-
 def main() -> None:
     style._load_fonts()
-    which = sys.argv[1:] or ["tips", "zones", "flights"]
+    which = sys.argv[1:] or ["tips", "zones"]
     if "tips" in which:
         tip_heads()
     if "zones" in which:
         taxi_zones()
-    if "flights" in which:
-        flight_delays()
 
 
 if __name__ == "__main__":

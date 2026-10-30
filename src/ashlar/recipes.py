@@ -31,7 +31,8 @@ DEFAULT_RECIPE = {
     "task": "regression",
     "backbone": "residual_mlp",
     "backbone_kwargs": None,
-    "num_embeddings": None,
+    "num_embeddings": "piecewise",
+    "num_embedding_dim": 16,
     "categorical": None,
     "categorical_embeddings": None,
     "set_features": None,
@@ -39,11 +40,11 @@ DEFAULT_RECIPE = {
     "set_max_length": 8,
     "validation_size": 0.2,
     "split": "iid",
-    "batch_size": 64,
-    "max_epochs": 50,
-    "patience": 10,
-    "learning_rate": 1e-3,
-    "learning_rate_schedule": "constant",
+    "batch_size": "auto",
+    "max_epochs": "auto",
+    "patience": 16,
+    "learning_rate": 2e-3,
+    "learning_rate_schedule": "cosine",
     "standardize_target": True,
     "share_training_batches": True,
     "bottleneck": None,
@@ -74,6 +75,31 @@ TABM_PAPER = {
     "patience": 16,
     "max_epochs": 200,
     "prediction_policy": "mean_members",
+}
+
+# The most accurate recipe in the ablations (examples/ablation_gbm_parity.py,
+# config ``tabm_ple_quantile``): a 32-member TabM on piecewise-linear numeric
+# embeddings of quantile-normalized features. About 5 to 10 times the cost of
+# the default on CPU.
+TABM_PIECEWISE = {
+    "task": "regression",
+    "backbone": "tabm",
+    "backbone_kwargs": {
+        "n_blocks": 2,
+        "d_block": 256,
+        "dropout": 0.1,
+        "k": 32,
+        "start_scaling_init": "normal",
+    },
+    "num_embeddings": "piecewise",
+    "num_embedding_dim": 16,
+    "numeric_scaling": "quantile",
+    "learning_rate": 2e-3,
+    "learning_rate_schedule": "constant",
+    "weight_decay": 0.0,
+    "batch_size": "auto",
+    "max_epochs": "auto",
+    "patience": 16,
 }
 
 TABM_PROBE = {
@@ -158,6 +184,22 @@ ORDINAL_RECIPE = {
 }
 
 
+def tabm_piecewise(**overrides) -> TabularEstimator:
+    """TabM on piecewise-linear numeric embeddings: the accuracy recipe.
+
+    Works for every task. Classification and ordinal turn the label z-score
+    off and average member probabilities; a distribution task predicts the
+    member mixture.
+    """
+    params = deepcopy(TABM_PIECEWISE)
+    task = overrides.get("task", "regression")
+    if task in {"classification", "ordinal"}:
+        params.setdefault("prediction_policy", "mean_probabilities")
+        if "standardize_target" not in overrides:
+            params["standardize_target"] = False
+    return TabularEstimator(**_merge(params, overrides))
+
+
 def ordinal(**overrides) -> TabularEstimator:
     """Ordered numeric labels, with caller overrides applied on top.
 
@@ -187,6 +229,30 @@ def classifier(**overrides) -> TabularEstimator:
     class, in ``classes_`` order. Binary targets are two classes, not one logit.
     """
     return TabularEstimator(**_merge(deepcopy(CLASSIFIER_RECIPE), overrides))
+
+
+TREE_RECIPE = {
+    **DEFAULT_RECIPE,
+    "task": "tree",
+    "prediction_policy": "mean_probabilities",
+    "standardize_target": False,
+    "head_kwargs": {"edge_prior": "empirical"},
+}
+
+
+def outcome_tree(tree, **overrides) -> TabularEstimator:
+    """Nested outcome model: a shared backbone and one branch softmax per internal node.
+
+    ``tree`` is a nested dict, for example
+    ``{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}``.
+    Labels are node names. A label may stop at an internal node (``"runs"``),
+    and the loss is then that node's log-probability. ``predict_proba``
+    returns leaf probabilities in ``classes_`` order; ``predict_node_proba``
+    returns every node; ``predict_conditional(X, node)`` returns
+    ``P(child | node, x)``. The branch biases start at the training
+    frequencies of each split.
+    """
+    return TabularEstimator(**_merge(deepcopy(TREE_RECIPE), {"tree": tree, **overrides}))
 
 
 def tabular(**overrides) -> TabularEstimator:

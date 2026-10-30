@@ -265,3 +265,24 @@ def normal_objective(raw, y, sample_weight):
     nll = 0.5 * (jnp.log(2 * jnp.pi) + 2 * jnp.log(scale) + jnp.square(z))
     per_example = jnp.sum(jnp.mean(nll, axis=1), axis=-1)
     return weighted_mean(per_example, sample_weight)
+
+
+def make_distribution_objective(kind: str):
+    """Mean member loss of a distributional head on a standardized target, weighted over rows.
+
+    Gaussian, mixture, and flow use the negative log-density; histogram adds
+    its small location term; quantile is the pinball loss at 0.1, 0.5, 0.9.
+    Members are averaged, not mixed, during training, as in TabM.
+    """
+    from ashlar.distributional import decode, row_loss
+
+    def objective(raw, y, sample_weight):
+        if raw.ndim != 3:
+            raise ShapeError(f"distribution head output must be (batch, member, width); received {raw.shape}.")
+        batch, members, width = raw.shape
+        decoded = decode(kind, raw.reshape(batch * members, width), 1)
+        target = jnp.repeat(jnp.asarray(y, dtype=raw.dtype).reshape(-1), members)[:, None]
+        losses = row_loss(kind, decoded, target).reshape(batch, members)
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
