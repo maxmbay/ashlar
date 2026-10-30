@@ -159,9 +159,10 @@ FARE_HEADS = (
 )
 FARE_BINS = 48
 FLAT_FARE = 52.0  # the JFK flat fare, a spike no smooth head can grow on its own
-# Two conditions with different shapes: metered Manhattan hops, and the airport corridor.
+# Three conditions with different shapes, and a different head wins each one.
 FARE_CONDITIONS = (
     ("Manhattan", "Manhattan", "Manhattan to Manhattan"),
+    ("Brooklyn", "Brooklyn", "Brooklyn to Brooklyn"),
     ("Queens", "Manhattan", "Queens to Manhattan"),
 )
 
@@ -193,7 +194,7 @@ def fare_rows():
 
 
 def fare_heads() -> None:
-    """One fit per head, then the predictive density under two different conditions."""
+    """One fit per head, then the predictive density under three different conditions."""
     x, y = fare_rows()
     x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.25, random_state=0)
     mean, std = float(np.mean(y_train)), float(np.std(y_train))
@@ -208,65 +209,78 @@ def fare_heads() -> None:
     for pickup, dropoff, label in FARE_CONDITIONS:
         mask = ((x_test["pickup_borough"] == pickup) & (x_test["dropoff_borough"] == dropoff)).to_numpy()
         groups.append((label, x_test[mask], y_test[mask]))
-        print(f"{label} rows {int(mask.sum())} median {np.median(y_test[mask]):.2f}", flush=True)
 
-    width, height = 16.4, 9.2
+    # Mean held-out log density per condition, on the scale of the fare. The best head per row is lit.
+    likelihoods = []
+    for label, x_group, y_group in groups:
+        row = {
+            kind: float(np.mean(np.asarray(models[kind].log_prob(x_group, (y_group - mean) / std)) - np.log(std)))
+            for kind, _label in FARE_HEADS
+        }
+        likelihoods.append(row)
+        print(f"{label} rows {len(y_group)} " + " ".join(f"{k} {v:+.3f}" for k, v in row.items()), flush=True)
+
+    width, height = 16.4, 12.2
     fig = plt.figure(figsize=(width, height), facecolor=style.WHITE)
     fig.text(
         0.055,
-        0.975,
-        "32% of Queens trips run at the $52 flat fare.",
+        0.982,
+        "One model, three conditions, three shapes.",
         fontproperties=style.TITLE,
         color=style.INK,
         ha="left",
         va="top",
     )
     for offset, line in (
-        (0.922, "Taxi fare given pickup zone, dropoff zone, hour, weekday, passengers, and cab color. Distance, tolls, and the total are not features."),
-        (0.882, "Each panel is the average predictive density over the held-out trips of that condition. The bars are their fares."),
+        (0.947, "Taxi fare given pickup zone, dropoff zone, hour, weekday, passengers, and cab color. Distance, tolls, and the total are not features."),
+        (0.918, "Each panel is the average predictive density over the held-out trips of that condition, with their fares behind it. A different head wins each row."),
     ):
         fig.text(0.055, offset, line, fontproperties=style.CLAIM, color=style.MUTED, ha="left", va="top")
     fig.add_artist(
-        plt.Line2D([0.055, 0.945], [0.845, 0.845], transform=fig.transFigure, color=style.HAIR, linewidth=1.05)
+        plt.Line2D([0.055, 0.945], [0.893, 0.893], transform=fig.transFigure, color=style.HAIR, linewidth=1.05)
     )
 
     bins = np.arange(0.0, 70.5, 2.0)
-    flat_shares = {}
+    rows = len(groups)
     for row, (label, x_group, y_group) in enumerate(groups):
+        best = max(likelihoods[row], key=likelihoods[row].get)
         for column, (kind, head_label) in enumerate(FARE_HEADS):
-            ax = fig.add_axes([0.055 + column * 0.228, 0.10 + (1 - row) * 0.355, 0.195, 0.26])
+            ax = fig.add_axes([0.055 + column * 0.228, 0.075 + (rows - 1 - row) * 0.268, 0.195, 0.195])
             style._style_plot(ax)
             density = _average_density(kind, models[kind], x_group, grid, mean, std)
             ax.hist(y_group, bins=bins, density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6, zorder=1)
-            ax.plot(grid, density, color=style.TEAL if kind != "gaussian" else style.CLAY, linewidth=2.1, zorder=3)
+            lit = kind == best
+            ax.plot(grid, density, color=style.TEAL if lit else style.MUTED, linewidth=2.3 if lit else 1.5,
+                    alpha=1.0 if lit else 0.75, zorder=3)
             ax.set_xlim(0, 70)
             ax.set_ylim(0, 0.2)
             ax.set_xticks([0, 20, 40, 60])
             ax.set_yticks([])
             style._ticks(ax)
             if row == 0:
-                ax.text(0.0, 1.07, head_label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
+                ax.text(0.0, 1.1, head_label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                        ha="left", va="bottom")
             if column == 0:
-                ax.text(-0.09, 0.5, label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                ax.text(-0.085, 0.5, label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
                         ha="center", va="center", rotation=90)
-            if row == 1:
+            if row == rows - 1:
                 ax.set_xlabel("fare, dollars", fontproperties=style.AXIS, color=style.INK, labelpad=9)
-                draws = models[kind].sample(x_group, n=200, seed=0) * std + mean
-                flat = float(np.mean(np.abs(draws - FLAT_FARE) <= 2.0))
-                flat_shares[kind] = flat
-                ax.text(
-                    0.98,
-                    0.92,
-                    f"{flat:.0%} of the mass at the ${FLAT_FARE:.0f} fare",
-                    transform=ax.transAxes,
-                    fontproperties=style.TICK,
-                    color=style.MUTED,
-                    ha="right",
-                    va="top",
-                )
-            print(f"{label} {kind} peak {grid[int(np.argmax(density))]:.1f}", flush=True)
-    actual = float(np.mean(np.abs(groups[1][2] - FLAT_FARE) <= 2.0))
-    print(f"actual_flat_share {actual:.4f} heads {flat_shares}", flush=True)
+            ax.text(
+                0.98,
+                0.93,
+                f"log density {likelihoods[row][kind]:+.2f}" + ("  ·  best" if lit else ""),
+                transform=ax.transAxes,
+                fontproperties=style.TICK,
+                color=style.TEAL if lit else style.MUTED,
+                ha="right",
+                va="top",
+            )
+    flat = {
+        kind: float(np.mean(np.abs(models[kind].sample(groups[-1][1], n=200, seed=0) * std + mean - FLAT_FARE) <= 2.0))
+        for kind, _label in FARE_HEADS
+    }
+    actual = float(np.mean(np.abs(groups[-1][2] - FLAT_FARE) <= 2.0))
+    print(f"actual_flat_share {actual:.4f} heads " + " ".join(f"{k} {v:.3f}" for k, v in flat.items()), flush=True)
     style._save(fig, "fare-heads.png")
 
 

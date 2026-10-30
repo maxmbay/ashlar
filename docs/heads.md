@@ -47,9 +47,9 @@ The mixture has the best likelihood on every table and the best CRPS on three of
 
 ## A conditional distribution
 
-![Four heads on taxi fare, under two conditions.](images/fare-heads.png)
+![Four heads on taxi fare, under three conditions.](images/fare-heads.png)
 
-One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The same model answers with a different shape for each condition: a skewed bump for Manhattan hops, and a bimodal density for the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram head, at 48 bins, grows a real spike there (23% of its mass, against 5% for the mixture and 1% for the gaussian), because a spike at one value is exactly what a smooth density cannot make. [`examples/readme_figures.py`](../examples/readme_figures.py) draws it.
+One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The same model answers with a different shape for each condition, and a different head wins each one on held-out log density: the mixture on Manhattan hops (−2.79), the flow on the heavier Brooklyn tail (−3.19), and the histogram at 48 bins on the Queens airport corridor (−3.30), where 32% of trips run at the $52 flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, the gaussian's 1%, and the flow's 0%: a spike at one value is what a smooth density cannot make, and the flow pays for it with its worst row. [`examples/readme_figures.py`](../examples/readme_figures.py) draws it.
 
 ## Smaller tables
 
