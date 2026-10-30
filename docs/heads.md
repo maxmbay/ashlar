@@ -23,6 +23,8 @@ model.sample(X_new, n=1000)                # draws, on the scale of y
 model.log_prob(X_new, y_new)               # log density of what happened
 ```
 
+On hourly bike rentals and NYC taxi pickups, both overdispersed, the negative binomial's 80% interval holds 76% to 82% of held-out counts where a Poisson's, Ashlar's or LightGBM's, holds 24% to 62%, and its log mass is far better (4.50 against LightGBM's 6.52 on bike rentals). The `mixture` stays as good on CRPS for large counts; the count heads win where the counts are small and zeros matter, and lose on an underdispersed count such as abalone rings, where `gaussian` or `mixture` is the better choice. [docs/benchmarks.md](benchmarks.md#count-heads) has the tables.
+
 Either count head takes `head_kwargs={"zero_inflated": True}`: one more output per row is the probability of a structural zero, for counts with more zeros than any count distribution gives, like a customer who never buys. A count head's `log_prob` is a log mass, its draws and quantiles are whole numbers, and its `predict` is the mean.
 
 The forecasters take the same heads by name, as the `head` argument, except the two count heads, which need the raw count. See [docs/forecast.md](forecast.md).
@@ -40,7 +42,7 @@ model.predict_quantiles(X_new, [0.1, 0.9])     # each level recalibrated
 
 A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
 
-On a synthetic table whose noise grows with one column, the default mixture's raw 80% interval held 77.1% of 5,000 new rows; calibrated on 1,000 held-out rows it held 80.9%, 0.21 wider.
+On five public tables, three splits each, calibration brought the default mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6% before. It widened the intervals that were too narrow (California, 75.9% → 80.7%; bike rentals, 76.8% → 79.7%), narrowed the one that was too wide (taxi tips, 88.6% → 79.9%), and left the ones that were right alone. The same conformal step on LightGBM's quantile models gives about the same coverage with a wider interval on three of the four tables where it applies. [docs/benchmarks.md](benchmarks.md#calibrated-intervals) has every number.
 
 For labels rather than numbers, `ASRClassifier` fits a softmax, `ASROrdinalClassifier` a cumulative logit that keeps neighboring classes close, and `ASROutcomeTree` one branch softmax per internal node of a tree of outcomes. [docs/tabular.md](tabular.md#tasks) covers all three.
 
@@ -104,3 +106,5 @@ parts["total"]       # both, by the law of total variance
 ```
 
 A point regression or the quantile head has no noise model, so it returns `epistemic` and `total` only. A classifier or an ordinal model returns entropies in nats instead: `total` is the entropy of the mean probabilities, `aleatoric` the members' mean entropy, and `epistemic` the mutual information between the label and the member. The default `residual_mlp` has one member, so its `epistemic` is zero: use `backbone="tabm"`, or any backbone with `k` above 1.
+
+On three public tables with `tabm_piecewise(task="gaussian")` (32 members), every part ranks rows by error well: keeping the half the model is surest of halves the RMSE on California housing and cuts it by more than 80% on diamond prices. In range, the noise ranks errors a little better than the member spread, because most of the error there is noise. Trained below the 80th percentile of one column and tested above it, the epistemic part rose 2.5 times on California, 4 times on diamonds, and 1.6 times on bike rentals, more than the aleatoric part did on each. That makes it a flag for rows unlike the training data, not an error bar: on diamonds above the training carats the RMSE grew 21 times. These are two splits on California and one on the others, so read them as indicative. [docs/benchmarks.md](benchmarks.md#member-uncertainty) has every number.
