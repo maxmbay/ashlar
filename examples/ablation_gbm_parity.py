@@ -41,12 +41,15 @@ CONFIGS = {
            "learning_rate_schedule": "constant"},
     "default": {},
     "bs256": {"batch_size": 256, "learning_rate": 2e-3},
-    "wide": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 1e-3, **LONG},
-    "wide_cosine": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 2e-3,
+    "wide": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 1e-3, "num_embeddings": None,
+             "learning_rate_schedule": "constant", **LONG},
+    "wide_cosine": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 2e-3, "num_embeddings": None,
                     "learning_rate_schedule": "cosine", **LONG},
     "wide_ple": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 1e-3,
+                 "learning_rate_schedule": "constant",
                  "num_embeddings": "piecewise", "num_embedding_dim": 16, **LONG},
     "wide_periodic": {"backbone_kwargs": WIDE, "batch_size": 256, "learning_rate": 1e-3,
+                      "learning_rate_schedule": "constant",
                       "num_embeddings": "periodic", "num_embedding_dim": 16, **LONG},
     "tabm": {"backbone": "tabm", "backbone_kwargs": TABM, "batch_size": 256, "learning_rate": 2e-3,
              "weight_decay": 0.0, **LONG},
@@ -108,7 +111,10 @@ def run(data: str, config: str, seed: int, out: Path, extra: dict | None = None)
     task, loader = DATA[data]
     frame, y = loader()
     x_train, x_test, y_train, y_test = train_test_split(frame, y, test_size=0.2, random_state=seed)
-    params = dict(CONFIGS[config], **(extra or {}))
+    # Every config except "default" is written against the settings it was
+    # designed on: no numeric embeddings and a constant rate unless it says so.
+    base = {} if config == "default" else {"num_embeddings": None, "learning_rate_schedule": "constant"}
+    params = dict(base, **CONFIGS[config], **(extra or {}))
     if task == "classification":
         params.update(task="classification", standardize_target=False, prediction_policy="mean_probabilities")
     start = time.time()

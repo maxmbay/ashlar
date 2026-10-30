@@ -498,6 +498,22 @@ LABELS = {
 }
 
 
+TITLES = {
+    "zurich": "Zurich public transport, delay, 2,000,000 of 5,465,575 rows",
+    "airlines_delay": "Airline delay, departure delay in minutes, 2,000,000 of 10,000,000 rows",
+    "taxi_tip": "NYC green taxi, tip in $, 581,835 rows",
+    "year": "Year prediction (MSD), release year, 515,345 rows",
+    "higgs": "Higgs, signal against background, 2,000,000 of 5,100,000 rows",
+    "covertype": "Covertype, 7 forest types, 581,012 rows",
+    "airlines": "Airlines, delayed or not, 539,383 rows",
+    "click": "Click prediction, clicked or not, 1,997,410 rows",
+}
+METRIC_NAMES = {
+    "rmse": "RMSE", "mae": "MAE", "crps": "CRPS", "nll": "NLL", "coverage80": "80% coverage",
+    "width80": "80% width", "accuracy": "Accuracy", "auc": "AUC", "log_loss": "Log loss",
+}
+
+
 def report(out, variant_for=None, seeds=None):
     """Markdown tables: mean ± std over the seeds that ran, per table and model."""
     variant_for = variant_for or {}
@@ -514,8 +530,8 @@ def report(out, variant_for=None, seeds=None):
             continue
         metrics = (["accuracy", "auc", "log_loss"] if task == "classification"
                    else ["rmse", "mae", "crps", "nll", "coverage80", "width80"])
-        print(f"\n### {table}\n")
-        print("| Model | Seeds | " + " | ".join(metrics) + " | Seconds |")
+        print(f"\n### {TITLES.get(table, table)}\n")
+        print("| Model | Splits | " + " | ".join(METRIC_NAMES[m] for m in metrics) + " | Seconds |")
         print("|---|---:|" + "---:|" * (len(metrics) + 1))
         for model in LABELS:
             group = part[part["model"] == model]
@@ -526,6 +542,8 @@ def report(out, variant_for=None, seeds=None):
                 values = group[metric].dropna() if metric in group else pd.Series(dtype=float)
                 if values.empty:
                     cells.append("—")
+                elif metric == "coverage80":
+                    cells.append(f"{values.mean():.0%}")
                 elif len(values) == 1:
                     cells.append(f"{values.iloc[0]:.4g}")
                 else:

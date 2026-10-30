@@ -26,7 +26,8 @@ from ashlar import TabularEstimator, TimeSeriesForecaster, ordinal
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "images"
-FONT_DIR = Path("/usr/share/fonts/truetype/macos")
+# Inter TTFs. Set ASHLAR_FONT_DIR to a folder holding Inter-Regular.ttf and friends.
+FONT_DIR = Path(os.environ.get("ASHLAR_FONT_DIR", "/usr/share/fonts/truetype/macos"))
 
 WHITE = "#ffffff"
 INK = "#1a1916"

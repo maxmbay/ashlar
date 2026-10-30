@@ -70,8 +70,8 @@ def tip_heads() -> None:
         style._style_plot(ax)
         model = bench.fit_distribution(kind, x_train, (y_train - mean) / std, 0)
         density = _average_density(kind, model, x_test, grid, mean, std)
-        near = np.abs(grid) <= 0.25
-        below = float(np.trapezoid(density[near], grid[near]))
+        draws = model.sample(x_test, n=200, seed=0) * std + mean
+        below = float(np.mean(np.abs(draws) <= 0.25))
         ax.hist(y_test, bins=bins, density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6, zorder=1)
         color = style.CLAY if kind == "gaussian" else style.TEAL
         ax.plot(grid, density, color=color, linewidth=2.2, zorder=3)

@@ -61,6 +61,8 @@ An ordinal label has to be a real number. The sorted values are the class order.
 
 `predict_score` is the expected label: class probabilities times the integer class values. The mean for each label sits on that integer.
 
+`outcome_tree(spec)` fits a nested outcome: one shared backbone and one branch softmax per internal node of a tree of labels, such as `{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}`. A leaf's probability is the product of the branch probabilities on its path. A label may stop at an internal node, and then only the splits above it train. `predict_proba` returns the leaves, `predict_node_proba` every node, and `predict_conditional(X, node)` the split at one node. [`examples/benchmark_outcome_tree.py`](../examples/benchmark_outcome_tree.py) runs it on IPL ball-by-ball data.
+
 `task="normal"` fits a diagonal normal. `predict_dist` returns the distribution. The default regression `predict` is the mean of the member outputs.
 
 ## Distributions
