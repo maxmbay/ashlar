@@ -3,10 +3,14 @@
 ``tip-heads.png``: the average predictive density of four heads on held-out
 NYC taxi tips, over the tips themselves. ``taxi-zones.png``: the learned
 pickup-zone embedding, projected to two dimensions and colored by the
-median trip length from that zone.
+median trip length from that zone. ``fare-heads.png``: four heads on taxi
+fare under three conditions. ``forecast-fan.png``: hourly NYC taxi demand
+over a day held out of the fit. ``outcome-embeddings.png``: pickup-zone
+vectors beside the tip probability they produce.
 All reuse the tables and the fit settings of ``benchmark_readme.py``.
 
     JAX_PLATFORMS=cpu python examples/readme_figures.py
+    JAX_PLATFORMS=cpu python examples/readme_figures.py fan
 """
 
 from __future__ import annotations
@@ -225,7 +229,7 @@ def fare_heads() -> None:
     fig.text(
         0.055,
         0.982,
-        "One model, three conditions, three shapes.",
+        "Predictive distributions for taxi fare, three conditions and four heads.",
         fontproperties=style.TITLE,
         color=style.INK,
         ha="left",
@@ -284,62 +288,274 @@ def fare_heads() -> None:
     style._save(fig, "fare-heads.png")
 
 
-FAN_LOOKBACK = 60
-FAN_HORIZON = 21
+FAN_CYCLICAL = {"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25}
+FAN_TEST_SHARE = 6
+
+
+def taxi_demand_rows():
+    """Hourly NYC taxi pickups as a supervised table: a full day forecast from midnight.
+
+    Every row is one hour of one day. The features are the twenty-four hours of the
+    previous day, the same hour a week earlier, and the calendar, so one fit covers
+    all twenty-four steps and nothing after midnight of the forecast day is read.
+    """
+    import pandas as pd
+
+    frame = pd.read_csv(bench._path("nyc_taxi.csv"), parse_dates=["timestamp"])
+    series = frame.set_index("timestamp")["value"].resample("1h").sum()
+    values = series.to_numpy(np.float64)
+    stamps = series.index
+
+    rows, targets, days, hours = [], [], [], []
+    for i in range(168, len(values)):
+        start = i - stamps[i].hour
+        if start - 168 < 0:
+            continue
+        rows.append(np.concatenate([values[start - 24 : start], [values[i - 168]]]))
+        targets.append(values[i])
+        days.append(stamps[i].normalize())
+        hours.append(float(stamps[i].hour))
+
+    table = np.asarray(rows)
+    days = pd.DatetimeIndex(days)
+    columns = {f"lag{24 - k}": table[:, k] for k in range(24)}
+    columns["same_hour_last_week"] = table[:, 24]
+    columns["hour"] = np.asarray(hours)
+    columns["weekday"] = days.dayofweek.to_numpy(np.float64)
+    columns["day_of_year"] = days.dayofyear.to_numpy(np.float64)
+    return pd.DataFrame(columns), np.asarray(targets), days
 
 
 def forecast_fan() -> None:
-    """A 21-day fan from one origin, beside the 80% band's coverage over every test origin."""
+    """A 24-hour fan over one held-out day, beside the 80% band's coverage over every held-out day."""
     import pandas as pd
 
-    from ashlar import ASRForecaster
+    from ashlar import tabm_piecewise
 
-    values = pd.read_csv(bench._path("temperatures.csv"))["Temp"].to_numpy(np.float64)
-    cut = int(len(values) * 0.8)
-    model = ASRForecaster(lookback=FAN_LOOKBACK, horizon=FAN_HORIZON, head="mixture", random_state=0)
-    model.fit(values[:cut])
+    frame, y, days = taxi_demand_rows()
+    calendar = days.unique()
+    rng = np.random.default_rng(0)
+    chosen = rng.choice(calendar, size=len(calendar) // FAN_TEST_SHARE, replace=False)
+    held_out = set(pd.DatetimeIndex(chosen))
+    mask = np.array([day in held_out for day in days])
 
-    origins = np.arange(cut, len(values) - FAN_HORIZON)
-    histories = np.stack([values[origin - FAN_LOOKBACK : origin] for origin in origins])
-    truths = np.stack([values[origin : origin + FAN_HORIZON] for origin in origins])
-    draws = np.asarray(model.sample(histories, 0, n=400))
+    model = tabm_piecewise(task="mixture", cyclical=FAN_CYCLICAL, random_state=0)
+    model.fit(frame[~mask], y[~mask])
+    draws = np.asarray(model.sample(frame[mask], n=400, seed=0))
     low, high = np.percentile(draws, [10, 90], axis=0)
-    covered = float(np.mean((truths >= low) & (truths <= high)))
-    width = float(np.mean(high - low))
-    print(f"coverage_80 {covered:.4f} mean_width {width:.3f}", flush=True)
+    truth = y[mask]
+    median = np.median(draws, axis=0)
+    covered = float(np.mean((truth >= low) & (truth <= high)))
+    naive = frame[mask]["same_hour_last_week"].to_numpy(np.float64)
+    print(
+        f"test_days {len(held_out)} rows {int(mask.sum())} coverage_80 {covered:.4f} "
+        f"corr {np.corrcoef(median, truth)[0, 1]:.3f} MAE {np.mean(np.abs(median - truth)):.0f} "
+        f"seasonal_naive_MAE {np.mean(np.abs(naive - truth)):.0f}",
+        flush=True,
+    )
 
-    pick = int(np.argmax(origins >= cut + 400))
-    fan = draws[:, pick, :]
-    days = np.arange(1, FAN_HORIZON + 1)
+    # One held-out day, drawn in order: the twenty-four hours as the model saw them from midnight.
+    test_days = days[mask]
+    swing = {day: float(np.ptp(truth[test_days == day])) for day in sorted(held_out)}
+    full = [day for day in sorted(held_out) if int(np.sum(test_days == day)) == 24]
+    pick = max(full, key=lambda day: swing[day])
+    where = np.flatnonzero(test_days == pick)
+    order = np.argsort(frame[mask]["hour"].to_numpy()[where])
+    where = where[order]
+    fan = draws[:, where]
+
+    hours = np.arange(24)
     fig, ax = style._chart(
-        f"The 80% band holds {covered:.0%} of the days it forecast.",
-        "Melbourne daily minimum temperature, 21 days ahead from one origin. Bands are 400 draws from the mixture head.",
+        "Hourly taxi demand, forecast from midnight",
+        f"{pick:%A, %-d %B %Y}, a day held out of the fit. Bands are 400 draws; "
+        f"the 80% band holds {covered:.0%} of held-out hours.",
         height=7.6,
     )
-    past = np.arange(-21, 1)
-    ax.plot(past, values[origins[pick] - 21 : origins[pick] + 1], color=style.INK, linewidth=1.8, zorder=4)
-    # The fan starts at the last observed day, so the bands leave the history rather than float beside it.
-    last = float(values[origins[pick]])
-    joined = np.concatenate([[0], days])
     for lo, hi, alpha in ((10, 90, 0.16), (25, 75, 0.26)):
         band_low, band_high = np.percentile(fan, [lo, hi], axis=0)
-        ax.fill_between(
-            joined,
-            np.concatenate([[last], band_low]),
-            np.concatenate([[last], band_high]),
-            color=style.TEAL,
-            alpha=alpha,
-            linewidth=0,
-            zorder=2,
-        )
-    ax.plot(joined, np.concatenate([[last], np.median(fan, axis=0)]), color=style.TEAL, linewidth=2.2, zorder=5)
-    ax.plot(joined, np.concatenate([[last], truths[pick]]), color=style.CLAY, linewidth=1.8, zorder=6)
-    style._callout(ax, (days[-1], truths[pick][-1]), -26, 22, "what happened", ha="right")
-    style._callout(ax, (days[-1], float(np.median(fan, axis=0)[-1])), -26, -24, "median forecast", ha="right")
-    ax.set_xlabel("days ahead", fontproperties=style.AXIS, color=style.INK, labelpad=12)
-    ax.set_ylabel("°C", fontproperties=style.AXIS, color=style.INK, labelpad=12)
-    ax.axvline(0, color=style.HAIR, linewidth=1.2, zorder=1)
+        ax.fill_between(hours, band_low, band_high, color=style.TEAL, alpha=alpha, linewidth=0, zorder=2)
+    ax.plot(hours, np.median(fan, axis=0), color=style.TEAL, linewidth=2.2, zorder=5)
+    ax.plot(hours, truth[where], color=style.CLAY, linewidth=1.8, zorder=6)
+    peak = int(np.argmax(truth[where]))
+    style._callout(ax, (hours[peak], float(truth[where][peak])), 14, 18, "what happened", style.CLAY)
+    median_day = np.median(fan, axis=0)
+    style._callout(ax, (hours[11], float(median_day[11])), -14, -34, "median forecast", style.TEAL, ha="right", va="top")
+    ax.set_xlabel("hour of the day", fontproperties=style.AXIS, color=style.INK, labelpad=12)
+    ax.set_ylabel("pickups", fontproperties=style.AXIS, color=style.INK, labelpad=12)
+    ax.set_xticks(np.arange(0, 24, 3))
     style._save(fig, "forecast-fan.png")
+
+
+TIP_TREE = {"no_tip": None, "tip": ["under_two", "two_or_more"]}
+
+
+def tip_labels(frame) -> np.ndarray:
+    """Nested outcome: whether a tip happened, and if it did, how big it was."""
+    tip = frame["tip"].to_numpy(np.float64)
+    labels = np.where(tip <= 0.0, "no_tip", np.where(tip < 2.0, "under_two", "two_or_more"))
+    return labels.astype(object)
+
+
+def outcome_embeddings() -> None:
+    """The zone becomes a vector, and what that vector predicts depends on the fare beside it."""
+    import pandas as pd
+
+    from ashlar import ASROutcomeTree
+
+    frame = pd.read_csv(bench._path("taxis.csv"), parse_dates=["pickup"])
+    frame = frame.dropna(subset=["pickup_zone", "dropoff_zone"]).reset_index(drop=True)
+    pickup = frame["pickup"]
+    x = pd.DataFrame(
+        {
+            "hour": pickup.dt.hour.astype(np.float64),
+            "weekday": pickup.dt.dayofweek.astype(np.float64),
+            "passengers": frame["passengers"].astype(np.float64),
+            "distance": frame["distance"].astype(np.float64),
+            "fare": frame["fare"].astype(np.float64),
+            "color": frame["color"],
+            "pickup_zone": frame["pickup_zone"],
+            "dropoff_zone": frame["dropoff_zone"],
+            "pickup_borough": frame["pickup_borough"],
+            "dropoff_borough": frame["dropoff_borough"],
+        }
+    )
+    x = bench._strings(x)
+    y = tip_labels(frame)
+
+    model = ASROutcomeTree(TIP_TREE, random_state=0).fit(x, y)
+    tip_column = list(model.conditional_names(None)).index("tip")
+    names = [column.name for column in model.encoder_.embedding_columns]
+    index = names.index("pickup_zone")
+    column = model.encoder_.embedding_columns[index]
+    table = np.asarray(model.core_.categorical_embeddings.tables[index], dtype=np.float64)[1:]
+
+    counts = x["pickup_zone"].value_counts()
+    keep = [i for i, name in enumerate(column.categories) if counts.get(name, 0) >= 25]
+    vectors = table[keep]
+    labels = [column.categories[i] for i in keep]
+    centered = vectors - vectors.mean(axis=0)
+    _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+    plane = centered @ vh[:2].T
+
+    # P(tip | zone, fare): one zone vector read beside a sweep of fares, everything else fixed.
+    fares = np.linspace(4.0, 60.0, 57)
+
+    def curve(zone: str) -> np.ndarray:
+        rows = {
+            "hour": np.full(len(fares), 18.0),
+            "weekday": np.full(len(fares), 2.0),
+            "passengers": np.full(len(fares), 1.0),
+            "distance": np.full(len(fares), float(np.median(x["distance"]))),
+            "fare": fares,
+            "color": np.array(["yellow"] * len(fares), dtype=object),
+            "pickup_zone": np.array([zone] * len(fares), dtype=object),
+            "dropoff_zone": np.array(["Midtown Center"] * len(fares), dtype=object),
+            "pickup_borough": np.array(["Manhattan"] * len(fares), dtype=object),
+            "dropoff_borough": np.array(["Manhattan"] * len(fares), dtype=object),
+        }
+        return np.asarray(model.predict_conditional(rows, None))[:, tip_column]
+
+    curves = {name: curve(name) for name in labels}
+    swing = {name: float(line.max() - line.min()) for name, line in curves.items()}
+    order = sorted(labels, key=lambda name: swing[name])
+    tracked = [order[-1], order[-2], order[1], order[0]]
+    for name in tracked:
+        print(f"{name} P(tip) {curves[name][0]:.3f} at $4, {curves[name][-1]:.3f} at $60, swing {swing[name]:.3f}", flush=True)
+
+    share = {name: float(np.mean(y[(x["pickup_zone"] == name).to_numpy()] != "no_tip")) for name in labels}
+    color = np.array([share[name] for name in labels])
+
+    fig = plt.figure(figsize=(16.4, 7.8), facecolor=style.WHITE)
+    fig.text(
+        0.055,
+        0.968,
+        "Learned pickup-zone vectors, and the fare response they produce.",
+        fontproperties=style.TITLE,
+        color=style.INK,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.055,
+        0.908,
+        "An outcome tree over taxi tips: no tip, or a tip under or over $2. The zone enters as an 8-d vector,",
+        fontproperties=style.CLAIM,
+        color=style.MUTED,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.055,
+        0.868,
+        "and what that vector does to P(tip) depends on the fare it is read beside.",
+        fontproperties=style.CLAIM,
+        color=style.MUTED,
+        ha="left",
+        va="top",
+    )
+    fig.add_artist(plt.Line2D([0.055, 0.945], [0.828, 0.828], transform=fig.transFigure, color=style.HAIR, linewidth=1.05))
+
+    left = fig.add_axes([0.075, 0.12, 0.30, 0.62])
+    style._style_plot(left)
+    sizes = 22 + 3 * np.sqrt(np.array([counts[name] for name in labels]))
+    points = left.scatter(plane[:, 0], plane[:, 1], c=color, cmap=style.EFFECT, s=sizes,
+                          edgecolors=style.WHITE, linewidths=1.0, zorder=3)
+    # Park each label in the nearest free corner, with a leader to its point, so four
+    # callouts on a crowded cloud never land on each other.
+    corners = [(0.02, 0.97, "left", "top"), (0.98, 0.97, "right", "top"),
+               (0.02, 0.03, "left", "bottom"), (0.98, 0.03, "right", "bottom")]
+    taken = set()
+    for name in tracked:
+        i = labels.index(name)
+        point = left.transAxes.inverted().transform(left.transData.transform(plane[i]))
+        choice = min(
+            (c for c in range(len(corners)) if c not in taken),
+            key=lambda c: (corners[c][0] - point[0]) ** 2 + (corners[c][1] - point[1]) ** 2,
+        )
+        taken.add(choice)
+        cx, cy, ha, va = corners[choice]
+        left.annotate(
+            name,
+            xy=plane[i],
+            xycoords="data",
+            xytext=(cx, cy),
+            textcoords="axes fraction",
+            fontproperties=style.CALLOUT,
+            color=style.INK,
+            ha=ha,
+            va=va,
+            arrowprops={"arrowstyle": "-", "color": style.INK, "linewidth": 0.9,
+                        "shrinkA": 2, "shrinkB": 4},
+            zorder=6,
+        )
+    left.set_xticks([])
+    left.set_yticks([])
+    left.text(0.0, 1.04, "pickup-zone vectors, first two components", transform=left.transAxes,
+              fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
+    bar = fig.colorbar(points, ax=left, fraction=0.035, pad=0.06)
+    bar.set_label("share of trips tipped", fontproperties=style.TICK, color=style.MUTED)
+    bar.outline.set_visible(False)
+    for text in bar.ax.get_yticklabels():
+        text.set_fontproperties(style.TICK)
+        text.set_color(style.MUTED)
+
+    right = fig.add_axes([0.52, 0.12, 0.25, 0.62])
+    style._style_plot(right)
+    palette = {name: tone for name, tone in zip(tracked, [style.CLAY, "#8a8178", style.TEAL, "#2f6f8f"], strict=True)}
+    # Label slots, top to bottom in the order the curves end, so four labels never collide.
+    slots = dict(zip(sorted(tracked, key=lambda name: -curves[name][-1]), (0.93, 0.70, 0.47, 0.24), strict=True))
+    for name in tracked:
+        tone = palette[name]
+        right.plot(fares, curves[name], color=tone, linewidth=2.2, zorder=3)
+        right.text(1.06, slots[name], f"{name}\n{swing[name]:+.2f} from \\$4 to \\$60", transform=right.transAxes,
+                   fontproperties=style.TICK, color=tone, ha="left", va="center")
+    right.set_xlim(4, 60)
+    right.set_xticks([10, 30, 50])
+    style._ticks(right)
+    right.set_xlabel("fare, dollars", fontproperties=style.AXIS, color=style.INK, labelpad=10)
+    right.text(0.0, 1.04, "P(tip | zone, fare), other columns fixed", transform=right.transAxes,
+               fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
+    style._save(fig, "outcome-embeddings.png")
 
 
 def main() -> None:
@@ -353,6 +569,8 @@ def main() -> None:
         forecast_fan()
     if "fares" in which:
         fare_heads()
+    if "embeddings" in which:
+        outcome_embeddings()
 
 
 if __name__ == "__main__":

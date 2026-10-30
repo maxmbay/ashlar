@@ -62,6 +62,7 @@ SOURCES = {
     "adult.csv": f"{RAW}/jbrownlee/Datasets/master/adult-all.csv",
     "ames.csv": f"{RAW}/wblakecannon/ames/master/data/housing.csv",
     "temperatures.csv": f"{RAW}/jbrownlee/Datasets/master/daily-min-temperatures.csv",
+    "nyc_taxi.csv": f"{RAW}/numenta/NAB/master/data/realKnownCause/nyc_taxi.csv",
 }
 N_DRAWS = 400
 Z80 = 1.2815515655446004
