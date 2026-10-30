@@ -23,13 +23,16 @@ from ashlar.recipes import (
     ORDINAL_RECIPE,
     TABM_PAPER,
     TABM_PIECEWISE,
+    TREE_RECIPE,
     classifier,
     ordinal,
+    outcome_tree,
     residual_mlp,
     tabular,
     tabm,
     tabm_piecewise,
 )
+from ashlar.tree import OutcomeTree
 from ashlar.rounds import HistogramBooster, LearnedNeighborhood, LinearLeafBooster
 from ashlar.search import DEFAULT_SEARCH
 
@@ -51,9 +54,11 @@ __all__ = [
     "NormalMixture",
     "ORDINAL_RECIPE",
     "ObliviousEnsemble",
+    "OutcomeTree",
     "ShapeError",
     "TABM_PAPER",
     "TABM_PIECEWISE",
+    "TREE_RECIPE",
     "TabularEstimator",
     "TimeSeriesForecaster",
     "VariationalPairwise",
@@ -61,6 +66,7 @@ __all__ = [
     "__version__",
     "classifier",
     "ordinal",
+    "outcome_tree",
     "residual_mlp",
     "tabular",
     "tabm",

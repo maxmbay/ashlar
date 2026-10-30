@@ -231,6 +231,30 @@ def classifier(**overrides) -> TabularEstimator:
     return TabularEstimator(**_merge(deepcopy(CLASSIFIER_RECIPE), overrides))
 
 
+TREE_RECIPE = {
+    **DEFAULT_RECIPE,
+    "task": "tree",
+    "prediction_policy": "mean_probabilities",
+    "standardize_target": False,
+    "head_kwargs": {"edge_prior": "empirical"},
+}
+
+
+def outcome_tree(tree, **overrides) -> TabularEstimator:
+    """Nested outcome model: a shared backbone and one branch softmax per internal node.
+
+    ``tree`` is a nested dict, for example
+    ``{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}``.
+    Labels are node names. A label may stop at an internal node (``"runs"``),
+    and the loss is then that node's log-probability. ``predict_proba``
+    returns leaf probabilities in ``classes_`` order; ``predict_node_proba``
+    returns every node; ``predict_conditional(X, node)`` returns
+    ``P(child | node, x)``. The branch biases start at the training
+    frequencies of each split.
+    """
+    return TabularEstimator(**_merge(deepcopy(TREE_RECIPE), {"tree": tree, **overrides}))
+
+
 def tabular(**overrides) -> TabularEstimator:
     """The default recipe, with caller overrides applied on top.
 
