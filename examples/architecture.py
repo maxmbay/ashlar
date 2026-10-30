@@ -17,9 +17,9 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parents[1] / "docs" / "images"
 
 THEMES = {
-    "light": dict(bg="none", card="#fbfaf7"),
+    "light": {"bg": "none", "card": "#fbfaf7"},
     # Dark mode shows the same light card, so the diagram looks the same everywhere.
-    "dark": dict(bg="none", card="#fbfaf7"),
+    "dark": {"bg": "none", "card": "#fbfaf7"},
 }
 
 INK = "#1b1a17"
@@ -125,14 +125,20 @@ def _block(x: float, y: float, w: float, label: str, lit: bool, accent: bool) ->
     text = "#ffffff" if lit else (TEAL if accent else MUTED)
     weight = 500 if lit else 400
     parts = [
-        f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{BH:.1f}" rx="3" '
-        f'fill="{fill}" stroke="{stroke}" stroke-width="1"/>',
+        (
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{BH:.1f}" rx="3" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1"/>'
+        ),
         # A lit block gets a brighter top edge, the way a course of stone catches light.
-        f'<path d="M{x + 3:.1f} {y + 1.0:.1f}H{x + w - 3:.1f}" stroke="#ffffff" '
-        f'stroke-opacity="{0.45 if lit else 0.9:.2f}" stroke-width="1.4"/>',
-        f'<text x="{x + w / 2:.1f}" y="{y + BH / 2 + 4.2:.1f}" text-anchor="middle" '
-        f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" '
-        f'font-weight="{weight}" fill="{text}">{_escape(label)}</text>',
+        (
+            f'<path d="M{x + 3:.1f} {y + 1.0:.1f}H{x + w - 3:.1f}" stroke="#ffffff" '
+            f'stroke-opacity="{0.45 if lit else 0.9:.2f}" stroke-width="1.4"/>'
+        ),
+        (
+            f'<text x="{x + w / 2:.1f}" y="{y + BH / 2 + 4.2:.1f}" text-anchor="middle" '
+            f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" '
+            f'font-weight="{weight}" fill="{text}">{_escape(label)}</text>'
+        ),
     ]
     return parts
 
@@ -156,9 +162,11 @@ def draw(theme: str) -> str:
     total_w = width + 36.0 + PANEL
     total_h = y - VGAP + 34.0
     out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total_w:.0f} {total_h:.0f}" '
-        f'width="{total_w:.0f}" height="{total_h:.0f}" role="img" '
-        f'aria-label="Four courses of model choices with one path lit">',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total_w:.0f} {total_h:.0f}" '
+            f'width="{total_w:.0f}" height="{total_h:.0f}" role="img" '
+            f'aria-label="Four courses of model choices with one path lit">'
+        ),
         f'<rect width="{total_w:.0f}" height="{total_h:.0f}" rx="10" fill="{colors["card"]}"/>',
     ]
 

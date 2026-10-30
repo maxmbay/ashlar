@@ -914,10 +914,57 @@ def distributional_head() -> None:
     _save(fig, "distributional-head.png")
 
 
+def outcome_tree() -> None:
+    """The cricket tree of ``ASROutcomeTree``: one backbone, one softmax per internal node."""
+    fig, ax = _diagram(
+        "One backbone, one softmax per split.",
+        "A nested outcome, as a tree of labels. A leaf's probability is the product of the branches on its path.",
+        15.6,
+        9.0,
+    )
+    _rank(ax, 0.02, 6.5, "Row")
+    _rank(ax, 3.9, 6.5, "Splits")
+    _rank(ax, 11.1, 6.5, "Leaves")
+
+    row = _node(ax, 1.5, 3.3, 2.65, 0.96, "the row", "over, score, batter", rail=TEAL)
+    ball = _node(ax, 5.15, 3.3, 1.95, 0.9, "outcome", "3 ways")
+    runs = _node(ax, 8.6, 1.95, 1.75, 0.9, "runs", "2 ways")
+
+    tops = {"wicket": 5.35, "dot": 4.15, "four": 2.6, "six": 1.35}
+    nodes = {title: _node(ax, 12.6, y, 1.9, 0.78, title, rail=CLAY) for title, y in tops.items()}
+
+    _arrow(ax, [row["right"], ball["left"]])
+    _tag(ax, (row["right"][0] + ball["left"][0]) / 2, ball["cy"] + 0.18, "one backbone", va="bottom")
+
+    fan = 6.55
+    _stroke(ax, [ball["right"], (fan, ball["cy"])])
+    _stroke(ax, [(fan, tops["wicket"]), (fan, runs["cy"])])
+    for title in ("wicket", "dot"):
+        _arrow(ax, [(fan, tops[title]), nodes[title]["left"]])
+        _tag(ax, (fan + nodes[title]["left"][0]) / 2, tops[title] + 0.16, f"P({title} | x)", va="bottom")
+    _arrow(ax, [(fan, runs["cy"]), runs["left"]])
+    _tag(ax, (fan + runs["left"][0]) / 2, runs["cy"] + 0.16, "P(runs | x)", va="bottom")
+
+    split = 10.1
+    _stroke(ax, [runs["right"], (split, runs["cy"])])
+    _stroke(ax, [(split, tops["four"]), (split, tops["six"])])
+    for title in ("four", "six"):
+        _arrow(ax, [(split, tops[title]), nodes[title]["left"]])
+        _tag(ax, (split + nodes[title]["left"][0]) / 2, tops[title] + 0.16, f"P({title} | runs)", va="bottom")
+
+    for offset, text in (
+        (0.34, 'ASROutcomeTree({"wicket": None, "dot": None, "runs": ["four", "six"]})'),
+        (-0.18, 'predict_proba gives the leaves, predict_conditional(X, "runs") one split.'),
+    ):
+        ax.text(0.02, offset, text, fontproperties=EDGE, color=MUTED, ha="left", va="center", zorder=6)
+    _save(fig, "outcome-tree.png")
+
+
 def main() -> None:
     _load_fonts()
     selected = sys.argv[1:]
     jobs = [
+        ("outcome_tree", outcome_tree),
         ("tabular_fit", tabular_fit),
         ("categorical_embeddings", categorical_embeddings),
         ("ordinal_score", ordinal_score),

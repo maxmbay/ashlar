@@ -7,7 +7,7 @@
 | A bell whose width changes from row to row | `gaussian` | Two numbers per row, a mean and a scale. Cheap and easy to read. |
 | A few distinct regimes, or a sharp peak with a long tail | `mixture` | Five normals with learned weights. Each mode gets its own location and spread. |
 | Skewed, heavy-tailed, censored, or with a spike | `flow` | A monotone spline bends a normal into almost any one-dimensional shape and still gives an exact density. |
-| Any shape, when coarse resolution is enough | `histogram` | A softmax over 16 fixed bins across ±4 standard deviations. No shape assumption. Each bin is half a standard deviation wide, and the two end bins are open-ended. |
+| Any shape, including a spike at one value | `histogram` | A softmax over fixed bins across ±4 standard deviations. No shape assumption, and the resolution is yours: `head_kwargs={"bins": 48}`, 16 by default. The two end bins are open-ended. |
 | Only the interval matters | `quantile` | Pinball loss at 0.1, 0.5, and 0.9. No density and no draws. |
 
 ```python
@@ -44,6 +44,12 @@ CRPS scores the whole predictive distribution in the target's units, lower is be
 | | 80% coverage | 82% | 83% | 95% |
 
 The mixture has the best likelihood on every table and the best CRPS on three of four. Its intervals are honest: an interval that promises 80% holds about 80% of held-out values, where the trees' normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide as the trees' (33 minutes against 75) and still covers 80%. The taxi tips are the exception on CRPS: the trees' mean is so much closer there (RMSE 1.75 against 1.98) that CatBoost's mean and variance win on CRPS, while the mixture still puts far more density on the tips that happened, many of them exactly zero.
+
+## A conditional distribution
+
+![Four heads on taxi fare, under two conditions.](images/fare-heads.png)
+
+One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The same model answers with a different shape for each condition: a skewed bump for Manhattan hops, and a bimodal density for the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram head, at 48 bins, grows a real spike there (23% of its mass, against 5% for the mixture and 1% for the gaussian), because a spike at one value is exactly what a smooth density cannot make. [`examples/readme_figures.py`](../examples/readme_figures.py) draws it.
 
 ## Smaller tables
 

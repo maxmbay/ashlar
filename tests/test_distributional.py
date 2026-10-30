@@ -16,9 +16,14 @@ from ashlar.distributional import (
     flow_log_density,
     flow_parameter_count,
     histogram_bin,
+    histogram_edges,
+    log_density,
+    output_width,
     point_values,
+    sample_values,
 )
-from ashlar.errors import AshlarError
+from ashlar.errors import AshlarError, ShapeError
+from ashlar.heads import DistributionHead
 from ashlar.forecast import (
     ASRHistoryForecaster,
     ASRForecaster,
@@ -280,3 +285,41 @@ def _assert_fitted_api(model, history, single, origins=None):
         assert loc.shape == single.shape and scale.shape == single.shape
         assert np.allclose(loc, single)
         assert np.all(scale > 0.0)
+
+
+def test_histogram_bin_count_is_configurable():
+    """A wider histogram head keeps every density law, at finer resolution."""
+    bins = 48
+    assert output_width("histogram", 1, bins) == bins
+    edges = np.asarray(histogram_edges(jnp.float32, bins))
+    assert edges.shape == (bins + 1,)
+    assert np.isclose(edges[0], -4.0) and np.isclose(edges[-1], 4.0)
+
+    rng = np.random.default_rng(0)
+    flat = jnp.asarray(rng.normal(size=(5, bins)), dtype=jnp.float32)
+    decoded = decode("histogram", flat, 1)
+    assert decoded.shape == (5, 1, bins)
+
+    target = jnp.asarray(rng.normal(size=(5, 1)) * 0.5, dtype=jnp.float32)
+    assert np.isfinite(float(distributional_loss("histogram", decoded, target)))
+    assert np.isfinite(np.asarray(log_density("histogram", decoded, target))).all()
+    draws = sample_values("histogram", decoded, jax.random.PRNGKey(0), 32)
+    assert draws.shape == (32, 5, 1)
+    assert np.all(np.abs(np.asarray(draws)) <= 4.0)
+
+    # Each bin is narrower, so the index of a value moves with the count.
+    value = jnp.asarray([3.9], dtype=jnp.float32)
+    assert int(histogram_bin(value, bins)[0]) == bins - 1
+    assert int(histogram_bin(value, HISTOGRAM_BINS)[0]) == HISTOGRAM_BINS - 1
+
+    with pytest.raises(AshlarError):
+        output_width("histogram", 1, 1)
+
+
+def test_distribution_head_rejects_bins_for_other_kinds():
+    key = jax.random.PRNGKey(0)
+    head = DistributionHead(8, 2, n_events=1, n_classes=1, key=key, kind="histogram", bins=32)
+    hidden = jnp.zeros((3, 2, 8), dtype=jnp.float32)
+    assert head(hidden, key=None).shape[-1] == 32
+    with pytest.raises(ShapeError):
+        DistributionHead(8, 2, n_events=1, n_classes=1, key=key, kind="gaussian", bins=32)

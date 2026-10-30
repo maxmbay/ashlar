@@ -63,11 +63,13 @@ model.sample(X_new, n=1000)                 # draws
 model.log_prob(X_new, y_new)                # log density of what happened
 ```
 
-![Average predictive density of four heads on held-out taxi tips.](docs/images/tip-heads.png)
+The distribution is conditional, so it changes shape from row to row:
 
-NYC taxi tips, where a third of the tips are exactly zero. The Gaussian head covers the spike and the bump with one bell. The flow and the mixture grow a spike at zero and put 42% and 37% of their mass within 25¢ of it.
+![Four heads on taxi fare, under two conditions: Manhattan hops and the Queens airport corridor.](docs/images/fare-heads.png)
 
-`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes such as `{"wicket": None, "runs": {"dot": None, "scoring": [...]}}`. [docs/heads.md](docs/heads.md) says which to reach for and why.
+One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. Manhattan hops are a skewed bump the smooth heads catch. The Queens corridor is bimodal, because 32% of those trips run at the $52 airport flat fare, and only the histogram head grows a spike there: 23% of its mass against the mixture's 5% and the Gaussian's 1%. The bin count is yours (`head_kwargs={"bins": 48}` above, 16 by default).
+
+`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](docs/heads.md) says which to reach for and why.
 
 ## Forecasting
 
@@ -79,7 +81,23 @@ model.predict(history)                     # one point per horizon step
 model.sample(history, key, n=1000)         # draws
 ```
 
-The forecasters take the same heads by name. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
+![A 21-day forecast fan on Melbourne daily minimum temperature.](docs/images/forecast-fan.png)
+
+The forecasters take the same heads by name, so a forecast is a distribution per step rather than a line. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
+
+## Nested outcomes
+
+Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
+
+![One backbone with a softmax per split, over a tree of ball outcomes.](docs/images/outcome-tree.png)
+
+```python
+from ashlar import ASROutcomeTree
+
+model = ASROutcomeTree({"wicket": None, "dot": None, "runs": ["four", "six"]}).fit(X, outcomes)
+model.predict_proba(X_new)                  # the leaves
+model.predict_conditional(X_new, "runs")    # P(four or six | runs, x)
+```
 
 ## Results
 
