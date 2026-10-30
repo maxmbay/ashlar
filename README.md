@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
-    <img alt="ashlar" src="docs/images/logo-light.svg" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-dark.svg">
+    <img alt="ashlar" src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-light.svg" width="720">
   </picture>
 </p>
 
 Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
 
-It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](docs/benchmarks.md) have every number, including where the trees still win.
+It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
 ## Install
 
@@ -56,8 +56,8 @@ A model is one set of keyword arguments. Four slots — how the columns are enco
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-    <img alt="Four courses of model choices: encode, backbone, head, and train, with one path lit." src="docs/images/architecture-light.svg" width="900">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-dark.svg">
+    <img alt="Four courses of model choices: encode, backbone, head, and train, with one path lit." src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-light.svg" width="900">
   </picture>
 </p>
 
@@ -68,17 +68,17 @@ ASRRegressor(task="flow", backbone="tabm")          # skewed target, ensemble tr
 ASRClassifier(backbone="transformer")               # attention over the columns
 ```
 
-Nothing above is a wrapper class: every line is `ASRModel` with different arguments, so a recipe you like is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](docs/models.md) is the tour of what goes in each slot.
+Nothing above is a wrapper class: every line is `ASRModel` with different arguments, so a recipe you like is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md) is the tour of what goes in each slot.
 
 ## Heads: pick one for the shape of the target
 
 The distribution is conditional, so the same model answers with a different shape for every row, and the head decides which shapes it can make.
 
-![Four heads on taxi fare, under three conditions.](docs/images/fare-heads.png)
+![Four heads on taxi fare, under three conditions.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/fare-heads.png)
 
 One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. A different head wins each condition, by held-out log density: the `mixture` on Manhattan hops, the `flow` on the heavier Brooklyn tail, and the `histogram` on the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, because a spike at one value is what a smooth density cannot make. Its resolution is yours: `head_kwargs={"bins": 48}`, 16 by default.
 
-`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](docs/heads.md) says which to reach for and why.
+`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
 
 ## Forecasting
 
@@ -90,15 +90,15 @@ model.predict(history)                     # one point per horizon step
 model.sample(history, key, n=1000)         # draws
 ```
 
-![A 21-day forecast fan on Melbourne daily minimum temperature.](docs/images/forecast-fan.png)
+![A 21-day forecast fan on Melbourne daily minimum temperature.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/forecast-fan.png)
 
-The forecasters take the same heads by name, so a forecast is a distribution per step rather than a line. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
+The forecasters take the same heads by name, so a forecast is a distribution per step rather than a line. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md) covers both, call by call.
 
 ## Nested outcomes
 
 Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
 
-![One backbone with a softmax per split, over a tree of ball outcomes.](docs/images/outcome-tree.png)
+![One backbone with a softmax per split, over a tree of ball outcomes.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/outcome-tree.png)
 
 ```python
 from ashlar import ASROutcomeTree
@@ -140,13 +140,13 @@ Ask for a distribution and the gap widens. CRPS scores a whole predictive distri
 
 The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
 
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, and the forecast heads.
+On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, and the forecast heads.
 
 ## Documentation
 
-- [docs/models.md](docs/models.md): what goes in each slot, and the research models beyond the defaults.
-- [docs/heads.md](docs/heads.md): every head and the shape of target it suits.
-- [docs/tabular.md](docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
-- [docs/forecast.md](docs/forecast.md): the two forecasters, call by call.
-- [docs/benchmarks.md](docs/benchmarks.md): every number, per table and per metric, and how it was run.
-- [`examples/`](examples): runnable scripts, including the benchmarks and the figures on this page.
+- [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): what goes in each slot, and the research models beyond the defaults.
+- [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits.
+- [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
+- [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
+- [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
+- [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
