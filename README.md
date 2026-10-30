@@ -37,7 +37,7 @@ model.predict(X_new), model.predict_proba(X_new), model.score(X_new, labels_new)
 
 `X` is a NumPy array, a dict of columns, or a pandas or Polars frame. Numeric columns are imputed and scaled, string columns get a learned embedding, and a category that never appeared in training is not an error. `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` work as they did.
 
-Then comes the part a tree cannot do. One argument turns that same model into a predictive distribution:
+One argument turns the same model into a conditional predictive distribution, which a gradient-boosted tree cannot return from a single fit:
 
 ```python
 model = ASRRegressor(task="mixture").fit(X, y)
@@ -48,11 +48,11 @@ model.sample(X_new, n=1000)                 # draws
 model.log_prob(X_new, y_new)                # log density of what happened
 ```
 
-No second model per quantile, no fixed-width normal around the mean. The rest of this page is what that buys.
+No second model per quantile, and no fixed-width normal around the mean.
 
-## The architecture is an argument
+## Architecture is set by keyword arguments
 
-A model is one set of keyword arguments. Four slots — how the columns are encoded, the backbone that reads them, the head that answers, and the training schedule — and each one is independent of the others. Change the head and the same network returns a density instead of a number. Change the backbone and the head does not notice.
+A model is one set of keyword arguments with four independent slots: how the columns are encoded, the backbone that reads them, the head that answers, and the training schedule. Changing the head makes the same network return a density instead of a number. Changing the backbone leaves the head unchanged.
 
 <p align="center">
   <picture>
@@ -68,11 +68,11 @@ ASRRegressor(task="flow", backbone="tabm")          # skewed target, ensemble tr
 ASRClassifier(backbone="transformer")               # attention over the columns
 ```
 
-Nothing above is a wrapper class: every line is `ASRModel` with different arguments, so a recipe you like is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](docs/models.md) is the tour of what goes in each slot.
+None of these are wrapper classes: every line is `ASRModel` with different arguments, so a configuration is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](docs/models.md) is the tour of what goes in each slot.
 
-## Heads: pick one for the shape of the target
+## Conditional predictive distributions, one head per target shape
 
-The distribution is conditional, so the same model answers with a different shape for every row, and the head decides which shapes it can make.
+The distribution is conditional on the row, so one fitted model returns a different shape for every row, and the head sets which shapes it can represent.
 
 ![Four heads on taxi fare, under three conditions.](docs/images/fare-heads.png)
 
@@ -94,7 +94,7 @@ model.sample(history, key, n=1000)         # draws
 
 The forecasters take the same heads by name, so a forecast is a distribution per step rather than a line. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
 
-## Nested outcomes
+## Nested outcomes as a tree of labels
 
 Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
 
@@ -107,6 +107,12 @@ model = ASROutcomeTree({"wicket": None, "dot": None, "runs": ["four", "six"]}).f
 model.predict_proba(X_new)                  # the leaves
 model.predict_conditional(X_new, "runs")    # P(four or six | runs, x)
 ```
+
+Every categorical column in that model is a learned vector, and the branch probabilities are a function of those vectors together with the rest of the row, not of either alone:
+
+![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](docs/images/outcome-embeddings.png)
+
+An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
 
 ## Results
 
@@ -144,7 +150,7 @@ On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM o
 
 ## Documentation
 
-- [docs/models.md](docs/models.md): what goes in each slot, and the research models beyond the defaults.
+- [docs/models.md](docs/models.md): the four slots, and the research models beyond the defaults.
 - [docs/heads.md](docs/heads.md): every head and the shape of target it suits.
 - [docs/tabular.md](docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
 - [docs/forecast.md](docs/forecast.md): the two forecasters, call by call.

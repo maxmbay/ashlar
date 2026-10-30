@@ -225,7 +225,7 @@ def fare_heads() -> None:
     fig.text(
         0.055,
         0.982,
-        "One model, three conditions, three shapes.",
+        "Predictive distributions for taxi fare, three conditions and four heads.",
         fontproperties=style.TITLE,
         color=style.INK,
         ha="left",
@@ -342,6 +342,178 @@ def forecast_fan() -> None:
     style._save(fig, "forecast-fan.png")
 
 
+TIP_TREE = {"no_tip": None, "tip": ["under_two", "two_or_more"]}
+
+
+def tip_labels(frame) -> np.ndarray:
+    """Nested outcome: whether a tip happened, and if it did, how big it was."""
+    tip = frame["tip"].to_numpy(np.float64)
+    labels = np.where(tip <= 0.0, "no_tip", np.where(tip < 2.0, "under_two", "two_or_more"))
+    return labels.astype(object)
+
+
+def outcome_embeddings() -> None:
+    """The zone becomes a vector, and what that vector predicts depends on the fare beside it."""
+    import pandas as pd
+
+    from ashlar import ASROutcomeTree
+
+    frame = pd.read_csv(bench._path("taxis.csv"), parse_dates=["pickup"])
+    frame = frame.dropna(subset=["pickup_zone", "dropoff_zone"]).reset_index(drop=True)
+    pickup = frame["pickup"]
+    x = pd.DataFrame(
+        {
+            "hour": pickup.dt.hour.astype(np.float64),
+            "weekday": pickup.dt.dayofweek.astype(np.float64),
+            "passengers": frame["passengers"].astype(np.float64),
+            "distance": frame["distance"].astype(np.float64),
+            "fare": frame["fare"].astype(np.float64),
+            "color": frame["color"],
+            "pickup_zone": frame["pickup_zone"],
+            "dropoff_zone": frame["dropoff_zone"],
+            "pickup_borough": frame["pickup_borough"],
+            "dropoff_borough": frame["dropoff_borough"],
+        }
+    )
+    x = bench._strings(x)
+    y = tip_labels(frame)
+
+    model = ASROutcomeTree(TIP_TREE, random_state=0).fit(x, y)
+    tip_column = list(model.conditional_names(None)).index("tip")
+    names = [column.name for column in model.encoder_.embedding_columns]
+    index = names.index("pickup_zone")
+    column = model.encoder_.embedding_columns[index]
+    table = np.asarray(model.core_.categorical_embeddings.tables[index], dtype=np.float64)[1:]
+
+    counts = x["pickup_zone"].value_counts()
+    keep = [i for i, name in enumerate(column.categories) if counts.get(name, 0) >= 25]
+    vectors = table[keep]
+    labels = [column.categories[i] for i in keep]
+    centered = vectors - vectors.mean(axis=0)
+    _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+    plane = centered @ vh[:2].T
+
+    # P(tip | zone, fare): one zone vector read beside a sweep of fares, everything else fixed.
+    fares = np.linspace(4.0, 60.0, 57)
+
+    def curve(zone: str) -> np.ndarray:
+        rows = {
+            "hour": np.full(len(fares), 18.0),
+            "weekday": np.full(len(fares), 2.0),
+            "passengers": np.full(len(fares), 1.0),
+            "distance": np.full(len(fares), float(np.median(x["distance"]))),
+            "fare": fares,
+            "color": np.array(["yellow"] * len(fares), dtype=object),
+            "pickup_zone": np.array([zone] * len(fares), dtype=object),
+            "dropoff_zone": np.array(["Midtown Center"] * len(fares), dtype=object),
+            "pickup_borough": np.array(["Manhattan"] * len(fares), dtype=object),
+            "dropoff_borough": np.array(["Manhattan"] * len(fares), dtype=object),
+        }
+        return np.asarray(model.predict_conditional(rows, None))[:, tip_column]
+
+    curves = {name: curve(name) for name in labels}
+    swing = {name: float(line.max() - line.min()) for name, line in curves.items()}
+    order = sorted(labels, key=lambda name: swing[name])
+    tracked = [order[-1], order[-2], order[1], order[0]]
+    for name in tracked:
+        print(f"{name} P(tip) {curves[name][0]:.3f} at $4, {curves[name][-1]:.3f} at $60, swing {swing[name]:.3f}", flush=True)
+
+    share = {name: float(np.mean(y[(x["pickup_zone"] == name).to_numpy()] != "no_tip")) for name in labels}
+    color = np.array([share[name] for name in labels])
+
+    fig = plt.figure(figsize=(16.4, 7.8), facecolor=style.WHITE)
+    fig.text(
+        0.055,
+        0.968,
+        "Learned pickup-zone vectors, and the fare response they produce.",
+        fontproperties=style.TITLE,
+        color=style.INK,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.055,
+        0.908,
+        "An outcome tree over taxi tips: no tip, or a tip under or over $2. The zone enters as an 8-d vector,",
+        fontproperties=style.CLAIM,
+        color=style.MUTED,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.055,
+        0.868,
+        "and what that vector does to P(tip) depends on the fare it is read beside.",
+        fontproperties=style.CLAIM,
+        color=style.MUTED,
+        ha="left",
+        va="top",
+    )
+    fig.add_artist(plt.Line2D([0.055, 0.945], [0.828, 0.828], transform=fig.transFigure, color=style.HAIR, linewidth=1.05))
+
+    left = fig.add_axes([0.075, 0.12, 0.30, 0.62])
+    style._style_plot(left)
+    sizes = 22 + 3 * np.sqrt(np.array([counts[name] for name in labels]))
+    points = left.scatter(plane[:, 0], plane[:, 1], c=color, cmap=style.EFFECT, s=sizes,
+                          edgecolors=style.WHITE, linewidths=1.0, zorder=3)
+    # Park each label in the nearest free corner, with a leader to its point, so four
+    # callouts on a crowded cloud never land on each other.
+    corners = [(0.02, 0.97, "left", "top"), (0.98, 0.97, "right", "top"),
+               (0.02, 0.03, "left", "bottom"), (0.98, 0.03, "right", "bottom")]
+    taken = set()
+    for name in tracked:
+        i = labels.index(name)
+        point = left.transAxes.inverted().transform(left.transData.transform(plane[i]))
+        choice = min(
+            (c for c in range(len(corners)) if c not in taken),
+            key=lambda c: (corners[c][0] - point[0]) ** 2 + (corners[c][1] - point[1]) ** 2,
+        )
+        taken.add(choice)
+        cx, cy, ha, va = corners[choice]
+        left.annotate(
+            name,
+            xy=plane[i],
+            xycoords="data",
+            xytext=(cx, cy),
+            textcoords="axes fraction",
+            fontproperties=style.CALLOUT,
+            color=style.INK,
+            ha=ha,
+            va=va,
+            arrowprops={"arrowstyle": "-", "color": style.INK, "linewidth": 0.9,
+                        "shrinkA": 2, "shrinkB": 4},
+            zorder=6,
+        )
+    left.set_xticks([])
+    left.set_yticks([])
+    left.text(0.0, 1.04, "pickup-zone vectors, first two components", transform=left.transAxes,
+              fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
+    bar = fig.colorbar(points, ax=left, fraction=0.035, pad=0.06)
+    bar.set_label("share of trips tipped", fontproperties=style.TICK, color=style.MUTED)
+    bar.outline.set_visible(False)
+    for text in bar.ax.get_yticklabels():
+        text.set_fontproperties(style.TICK)
+        text.set_color(style.MUTED)
+
+    right = fig.add_axes([0.52, 0.12, 0.25, 0.62])
+    style._style_plot(right)
+    palette = {name: tone for name, tone in zip(tracked, [style.CLAY, "#8a8178", style.TEAL, "#2f6f8f"], strict=True)}
+    # Label slots, top to bottom in the order the curves end, so four labels never collide.
+    slots = dict(zip(sorted(tracked, key=lambda name: -curves[name][-1]), (0.93, 0.70, 0.47, 0.24), strict=True))
+    for name in tracked:
+        tone = palette[name]
+        right.plot(fares, curves[name], color=tone, linewidth=2.2, zorder=3)
+        right.text(1.06, slots[name], f"{name}\n{swing[name]:+.2f} from \\$4 to \\$60", transform=right.transAxes,
+                   fontproperties=style.TICK, color=tone, ha="left", va="center")
+    right.set_xlim(4, 60)
+    right.set_xticks([10, 30, 50])
+    style._ticks(right)
+    right.set_xlabel("fare, dollars", fontproperties=style.AXIS, color=style.INK, labelpad=10)
+    right.text(0.0, 1.04, "P(tip | zone, fare), other columns fixed", transform=right.transAxes,
+               fontproperties=style.AXIS, color=style.INK, ha="left", va="bottom")
+    style._save(fig, "outcome-embeddings.png")
+
+
 def main() -> None:
     style._load_fonts()
     which = sys.argv[1:] or ["tips", "zones"]
@@ -353,6 +525,8 @@ def main() -> None:
         forecast_fan()
     if "fares" in which:
         fare_heads()
+    if "embeddings" in which:
+        outcome_embeddings()
 
 
 if __name__ == "__main__":
