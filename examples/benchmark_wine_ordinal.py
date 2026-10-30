@@ -21,7 +21,7 @@ import xgboost
 from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
 
-from ashlar import ordinal, tabm
+from ashlar import ASROrdinalClassifier, tabm
 
 BIN_SOURCES = ("alcohol", "volatile.acidity", "sulphates")
 N_BINS = 8
@@ -146,7 +146,7 @@ def main():
     else:
         print("start ordinal residual", flush=True)
         rows["ordinal_residual"] = _fit_ordinal(
-            lambda: ordinal(max_epochs=50, random_state=0),
+            lambda: ASROrdinalClassifier(max_epochs=50, random_state=0),
             x_train,
             y_train,
             x_test,

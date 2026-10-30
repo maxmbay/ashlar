@@ -389,7 +389,7 @@ def ashlar_params(task, n_train, overrides):
 
 
 def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
-    from ashlar import TabularEstimator, classifier, tabm_piecewise
+    from ashlar import ASRModel, ASRClassifier, tabm_piecewise
 
     task, x_train, x_test, y_train, y_test = splits(table, seed)
     overrides = dict(overrides or {})
@@ -398,9 +398,9 @@ def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
         model = tabm_piecewise(task="classification" if task == "classification" else head or "regression",
                                random_state=seed, **overrides)
     elif task == "classification":
-        model = classifier(random_state=seed, **overrides)
+        model = ASRClassifier(random_state=seed, **overrides)
     else:
-        model = TabularEstimator(task=head or "regression", random_state=seed, **overrides)
+        model = ASRModel(task=head or "regression", random_state=seed, **overrides)
     if TRAIN_GROUPS is None:
         model.fit(x_train, y_train)
     else:

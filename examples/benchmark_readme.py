@@ -2,7 +2,7 @@
 
 Four stages, each written to its own key of one JSON file:
 
-- ``point``: default ``TabularEstimator()`` or ``classifier()`` against default
+- ``point``: default ``ASRModel()`` or ``ASRClassifier()`` against default
   XGBoost and LightGBM, and against early-stopped versions of both that see the
   same validation rows Ashlar holds out. Five public tables, three random
   80/20 splits each.
@@ -45,7 +45,7 @@ import xgboost
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
 
-from ashlar import TabularEstimator, TimeSeriesForecaster, classifier
+from ashlar import ASRModel, ASRForecaster, ASRClassifier
 from ashlar.distributional import QUANTILE_LEVELS
 from ashlar.forecast import _forecast_windows
 
@@ -242,7 +242,7 @@ def stage_point(results):
             )
             run = {}
             started = time.perf_counter()
-            model = (classifier if task == "classification" else TabularEstimator)(random_state=seed)
+            model = (classifier if task == "classification" else ASRModel)(random_state=seed)
             model.fit(x_train, y_train)
             point = np.asarray(model.predict(x_test))
             proba = np.asarray(model.predict_proba(x_test))[:, 1] if task == "classification" else None
@@ -266,7 +266,7 @@ def stage_point(results):
 
 def fit_distribution(kind, x_train, z_train, seed, **overrides):
     """``z_train`` is the standardized target, so the built-in z-score is close to the identity."""
-    return TabularEstimator(task=kind, random_state=seed, **overrides).fit(x_train, z_train)
+    return ASRModel(task=kind, random_state=seed, **overrides).fit(x_train, z_train)
 
 
 def distribution_scores(kind, model, x_test, y_test, mean, std, seed):
@@ -367,7 +367,7 @@ def stage_dist(results):
             mean, std = float(np.mean(y_train)), float(np.std(y_train))
             run = {}
             started = time.perf_counter()
-            point = TabularEstimator(random_state=seed).fit(x_train, y_train).predict(x_test)
+            point = ASRModel(random_state=seed).fit(x_train, y_train).predict(x_test)
             run["ashlar_mse"] = {
                 "rmse": float(np.sqrt(np.mean((point - y_test) ** 2))),
                 "mae": float(np.mean(np.abs(point - y_test))),
@@ -412,7 +412,7 @@ def stage_embed(results):
             ("ashlar_onehot_longer", {**LONGER, "categorical_embeddings": []}),
         ):
             started = time.perf_counter()
-            model = TabularEstimator(random_state=seed, **kwargs).fit(x_train, y_train)
+            model = ASRModel(random_state=seed, **kwargs).fit(x_train, y_train)
             run[label] = _score("regression", y_test, model.predict(x_test))
             run[label]["seconds"] = time.perf_counter() - started
         for kind in ("xgboost", "lightgbm"):
@@ -450,7 +450,7 @@ def stage_forecast(results):
         run = {}
         for head in ("mse", "gaussian", "mixture", "flow", "histogram", "quantile"):
             started = time.perf_counter()
-            model = TimeSeriesForecaster(lookback=FORECAST_LOOKBACK, horizon=1, head=head, random_state=seed)
+            model = ASRForecaster(lookback=FORECAST_LOOKBACK, horizon=1, head=head, random_state=seed)
             model.fit(values[:cut])
             point = np.asarray(model.predict(x_test)).reshape(-1)
             scores = {"rmse": float(np.sqrt(np.mean((point - y_test) ** 2))), "mae": float(np.mean(np.abs(point - y_test)))}

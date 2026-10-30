@@ -1,11 +1,11 @@
 """Direct multi-step forecasting with a small transformer.
 
-``TimeSeriesForecaster`` reads one univariate window of ``FORECAST_LOOKBACK``
+``ASRForecaster`` reads one univariate window of ``FORECAST_LOOKBACK``
 steps. Learned positions keep that order, which the feature-set transformer
 deliberately does not. The last token emits the next ``horizon`` values. A
 default XGBoost forecast on the same windows uses those lags as flat features.
 
-``FullHistoryForecaster`` reads the whole prefix before the forecast origin.
+``ASRHistoryForecaster`` reads the whole prefix before the forecast origin.
 The last ``FORECAST_LOOKBACK`` observations are one token each. Every older
 observation sits in exactly one non-overlapping patch of that same length, and
 each patch is a linear map to the model width. A short last patch is
@@ -33,6 +33,7 @@ import numpy as np
 import optax
 from equinox import Module, field, nn
 
+from ashlar._compat import renamed
 from ashlar.distributional import (
     check_output_head,
     decode,
@@ -314,7 +315,7 @@ def _scale(values: np.ndarray, mean: float, std: float) -> np.ndarray:
     return ((values - mean) / std).astype(np.float32)
 
 
-class TimeSeriesForecaster:
+class ASRForecaster:
     """Univariate direct multi-step forecast. History in, horizon out.
 
     Fit receives the series observed so far. The last ``val_fraction`` of that
@@ -866,7 +867,7 @@ def _pack_history(series: np.ndarray, origins: np.ndarray, lookback: int, max_pa
     return recent, patches, within, valid, ages
 
 
-class FullHistoryForecaster:
+class ASRHistoryForecaster:
     """Univariate direct multi-step forecast that reads the whole prefix.
 
     Fit receives the series observed so far. The last ``val_fraction`` of that
@@ -1223,3 +1224,13 @@ def _history_sample(model: FullHistoryNet, recent, patches, within, valid, ages,
 @eqx.filter_jit
 def _history_objective_jit(model: FullHistoryNet, recent, patches, within, valid, ages, target) -> jax.Array:
     return _history_objective(model, recent, patches, within, valid, ages, target)
+
+
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "TimeSeriesForecaster": "ASRForecaster",
+        "FullHistoryForecaster": "ASRHistoryForecaster",
+    },
+)

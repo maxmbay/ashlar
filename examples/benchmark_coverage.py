@@ -1,7 +1,7 @@
 """Current defaults on more public tables, one Grinsztajn medium split.
 
-Residual MLP, the regression ``tabm()`` recipe where it runs, ``classifier()``
-or ``ordinal()`` when that target fits, default XGBoost, and TabM-D at the
+Residual MLP, the regression ``tabm()`` recipe where it runs, ``ASRClassifier()``
+or ``ASROrdinalClassifier()`` when that target fits, default XGBoost, and TabM-D at the
 50-epoch cap. Finished keys are left in place. After the predictor default
 changed, no-argument models on the older tables are written to ``predictor``
 and ``ordinal_predictor``. A string-categorical table is scored from scratch.
@@ -457,7 +457,7 @@ def _baseline_matrices(parts: dict):
 def stage_ashlar() -> None:
     import xgboost
 
-    from ashlar import classifier, ordinal, tabular, tabm
+    from ashlar import ASRClassifier, ASROrdinalClassifier, ASRRegressor, tabm
 
     payload = _load()
     for spec in DATASETS:
@@ -495,15 +495,15 @@ def stage_ashlar() -> None:
         if spec["task"] == "classification":
             if "residual" not in row:
                 print(f"start classifier {spec['name']}", flush=True)
-                row["residual"] = _timed(lambda: _ashlar_accuracy(classifier(), parts))
-                row["residual"]["config"] = "classifier()"
+                row["residual"] = _timed(lambda: _ashlar_accuracy(ASRClassifier(), parts))
+                row["residual"]["config"] = "ASRClassifier()"
                 print(row["residual"], flush=True)
                 _save(payload)
         else:
             if "residual" not in row:
                 print(f"start tabular {spec['name']}", flush=True)
-                row["residual"] = _timed(lambda: _ashlar_regression(tabular(), parts))
-                row["residual"]["config"] = "tabular()"
+                row["residual"] = _timed(lambda: _ashlar_regression(ASRRegressor(), parts))
+                row["residual"]["config"] = "ASRRegressor()"
                 print(row["residual"], flush=True)
                 _save(payload)
             if "tabm_regression" not in row:
@@ -518,8 +518,8 @@ def stage_ashlar() -> None:
         if spec["ordinal"]:
             if "ordinal_residual" not in row:
                 print(f"start ordinal {spec['name']}", flush=True)
-                row["ordinal_residual"] = _timed(lambda: _ashlar_expected(ordinal(), parts))
-                row["ordinal_residual"]["config"] = "ordinal()"
+                row["ordinal_residual"] = _timed(lambda: _ashlar_expected(ASROrdinalClassifier(), parts))
+                row["ordinal_residual"]["config"] = "ASROrdinalClassifier()"
                 print(row["ordinal_residual"], flush=True)
                 _save(payload)
             if "ordinal_tabm" not in row:
@@ -544,11 +544,11 @@ def stage_ashlar() -> None:
         if had_residual and "predictor" not in row:
             print(f"start predictor default {spec['name']}", flush=True)
             if spec["task"] == "classification":
-                row["predictor"] = _timed(lambda: _ashlar_accuracy(classifier(), parts))
-                row["predictor"]["config"] = "classifier()"
+                row["predictor"] = _timed(lambda: _ashlar_accuracy(ASRClassifier(), parts))
+                row["predictor"]["config"] = "ASRClassifier()"
             else:
-                row["predictor"] = _timed(lambda: _ashlar_regression(tabular(), parts))
-                row["predictor"]["config"] = "tabular()"
+                row["predictor"] = _timed(lambda: _ashlar_regression(ASRRegressor(), parts))
+                row["predictor"]["config"] = "ASRRegressor()"
             print(row["predictor"], flush=True)
             _save(payload)
         elif not had_residual and "residual" in row and "predictor" not in row:
@@ -556,8 +556,8 @@ def stage_ashlar() -> None:
             _save(payload)
         if spec["ordinal"] and had_ordinal and "ordinal_predictor" not in row:
             print(f"start ordinal predictor default {spec['name']}", flush=True)
-            row["ordinal_predictor"] = _timed(lambda: _ashlar_expected(ordinal(), parts))
-            row["ordinal_predictor"]["config"] = "ordinal()"
+            row["ordinal_predictor"] = _timed(lambda: _ashlar_expected(ASROrdinalClassifier(), parts))
+            row["ordinal_predictor"]["config"] = "ASROrdinalClassifier()"
             print(row["ordinal_predictor"], flush=True)
             _save(payload)
     _save(payload)

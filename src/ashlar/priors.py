@@ -1,10 +1,10 @@
 """Differentiable classifiers with a prior or a data-dependent penalty.
 
-Three bodies, none of them a hard tree booster. ``BartPriorEnsemble`` is a sum
+Three bodies, none of them a hard tree booster. ``ASRBartPriorEnsemble`` is a sum
 of soft depth-2 trees with a BART-shaped penalty on depth, feature choice,
-gate decisiveness, and leaf size. ``VariationalPairwise`` is a variational
+gate decisiveness, and leaf size. ``ASRVariationalPairwise`` is a variational
 logistic head on soft quantile bins and every pairwise bin interaction.
-``GradientSparseNet`` is a small network whose input gradient is L1 penalized,
+``ASRGradientSparseNet`` is a small network whose input gradient is L1 penalized,
 which is the smooth version of a path that touches few columns. Two classes
 keep one logit and sigmoid cross-entropy. More classes use one logit per class,
 softmax cross-entropy, and the same penalty on the input Jacobian. Categorical
@@ -24,6 +24,7 @@ import numpy as np
 import optax
 from equinox import Module
 
+from ashlar._compat import renamed
 from ashlar.errors import AshlarError
 from ashlar.preprocess import _is_missing, _numeric_column, _stringify, frame_columns
 from ashlar.rounds import _accuracy, _codes, _labels, _matrix, _moments, _split_indices, _standardize
@@ -646,7 +647,7 @@ def _batches(rows: np.ndarray, target: np.ndarray, batch_size: int, epoch: int, 
         yield rows[chosen], target[chosen], start
 
 
-class BartPriorEnsemble:
+class ASRBartPriorEnsemble:
     """Soft depth-2 trees with a BART-shaped penalty. Summed, not grown greedily."""
 
     def __init__(
@@ -765,7 +766,7 @@ class BartPriorEnsemble:
         self.child_split_ = float(np.mean(split_rate[:, 1:]))
 
 
-class VariationalPairwise:
+class ASRVariationalPairwise:
     """Variational logistic head on soft bins and every pairwise bin product."""
 
     def __init__(
@@ -895,7 +896,7 @@ class VariationalPairwise:
         self._var_step = None
 
 
-class GradientSparseNet:
+class ASRGradientSparseNet:
     """Network classifier with an L1 penalty on the input gradient.
 
     Two classes keep the original one-logit sigmoid loss. More classes use a
@@ -1194,3 +1195,14 @@ def _prepare_multiclass(X, y, task: str, random_state: int):
         raise AshlarError(f"multiclass gradient penalty expects at least three classes; received {len(classes)}.")
     fit_idx, val_idx = _split_indices(labels, "classification", random_state)
     return features, _codes(classes, labels).astype(np.int32), classes, fit_idx, val_idx
+
+
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "BartPriorEnsemble": "ASRBartPriorEnsemble",
+        "VariationalPairwise": "ASRVariationalPairwise",
+        "GradientSparseNet": "ASRGradientSparseNet",
+    },
+)

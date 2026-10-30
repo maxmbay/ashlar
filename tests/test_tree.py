@@ -5,7 +5,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from ashlar import TabularEstimator, outcome_tree
+from ashlar import ASRModel, ASROutcomeTree
 from ashlar.errors import AshlarError
 from ashlar.tree import OutcomeTree, empirical_edge_prior, tree_objective
 
@@ -21,7 +21,7 @@ def _small(**kwargs):
         learning_rate=1e-2,
     )
     params.update(kwargs)
-    return outcome_tree(SPEC, **params)
+    return ASROutcomeTree(SPEC, **params)
 
 
 def _data(n=800, seed=0):
@@ -117,16 +117,16 @@ def test_tree_save_load_round_trip(tmp_path):
     X, y = _data(300)
     model = _small(max_epochs=2).fit(X, y)
     model.save(tmp_path)
-    loaded = TabularEstimator.load(tmp_path)
+    loaded = ASRModel.load(tmp_path)
     np.testing.assert_allclose(loaded.predict_proba(X), model.predict_proba(X), rtol=1e-6)
     assert loaded.tree == OutcomeTree(SPEC).spec
 
 
 def test_tree_config_errors():
     with pytest.raises(AshlarError):
-        TabularEstimator(task="tree").fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
+        ASRModel(task="tree").fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
     with pytest.raises(AshlarError):
-        TabularEstimator(task="classification", tree=SPEC).fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
+        ASRModel(task="classification", tree=SPEC).fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
     X, y = _data(50)
     y[0] = "not_a_node"
     with pytest.raises(AshlarError):

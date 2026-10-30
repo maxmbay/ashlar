@@ -2,7 +2,7 @@
 
 bank-marketing, MagicTelescope, and credit are numerical classification tables
 from the same Grinsztajn release as electricity, eye_movements, and california.
-The network is GradientSparseNet with its scored defaults. Default
+The network is ASRGradientSparseNet with its scored defaults. Default
 XGBClassifier is fit on the same outer split. Paper-validation is recorded and
 not used to train or to select. Does not change the residual regression default
 and does not refit earlier result files.
@@ -36,7 +36,7 @@ from ashlar.priors import (
     GRADIENT_MAX_EPOCHS,
     GRADIENT_PATIENCE,
     GRADIENT_WIDTH,
-    GradientSparseNet,
+    ASRGradientSparseNet,
     _init_sparse,
     _sparse_logits,
     _sparse_loss,
@@ -178,7 +178,7 @@ def _parts(spec: dict):
 
 def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
     started = time.perf_counter()
-    model = GradientSparseNet(random_state=0, verbose=True)
+    model = ASRGradientSparseNet(random_state=0, verbose=True)
     model.fit(x_train, y_train, "classification")
     test_pred = model.predict(x_test)
     val_pred = model.predict(x_val)
@@ -192,7 +192,7 @@ def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
         "n_internal_val": int(model.n_val_),
         "wall_seconds": time.perf_counter() - started,
         "config": (
-            "GradientSparseNet(random_state=0): width 128, SiLU, "
+            "ASRGradientSparseNet(random_state=0): width 128, SiLU, "
             "binary cross-entropy plus 0.01 times mean absolute input gradient, "
             "Adam 1e-3, batch 256, patience 16, cap 80"
         ),

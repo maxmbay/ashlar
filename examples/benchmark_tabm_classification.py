@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 
 import benchmark_coverage as coverage
-from ashlar import classifier, tabm
+from ashlar import ASRClassifier, tabm
 
 OUT_PATH = Path("/tmp/ashlar-bench/tabm-classification-results.json")
 CALIFORNIA_SPLIT = Path("/tmp/ashlar-bench/split-california.csv")
@@ -80,9 +80,9 @@ def _score_tabm(parts: dict) -> dict:
 
 
 def _score_classifier(parts: dict) -> dict:
-    model = classifier()
+    model = ASRClassifier()
     scores = coverage._timed(lambda: coverage._ashlar_accuracy(model, parts))
-    scores["config"] = "classifier()"
+    scores["config"] = "ASRClassifier()"
     return scores
 
 

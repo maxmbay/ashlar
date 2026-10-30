@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from ashlar import __version__
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     for index in range(n):
         tags[index] = catalog[index % len(catalog)]
     y = rooms + np.where(city == "sf", 0.3, 0.0) + np.array([0.1 * len(item) for item in tags], dtype=np.float32)
-    model = TabularEstimator(
+    model = ASRModel(
         backbone="transformer",
         backbone_kwargs={"n_blocks": 1, "d_block": 8, "n_heads": 2, "dropout": 0.0},
         categorical_embeddings=["city"],

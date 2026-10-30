@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import benchmark_readme as bench
 import figures as style
-from ashlar import TabularEstimator
+from ashlar import ASRModel
 
 HEADS = (
     ("gaussian", "Gaussian"),
@@ -100,7 +100,7 @@ def tip_heads() -> None:
 
 def taxi_zones() -> None:
     x, y = bench.taxis("duration")
-    model = TabularEstimator(random_state=0).fit(x, y)
+    model = ASRModel(random_state=0).fit(x, y)
     names = [column.name for column in model.encoder_.embedding_columns]
     column = model.encoder_.embedding_columns[names.index("pickup_zone")]
     table = np.asarray(model.core_.categorical_embeddings.tables[names.index("pickup_zone")], dtype=np.float64)[1:]

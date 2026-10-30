@@ -22,7 +22,7 @@ from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.font_manager import FontProperties
 from matplotlib.patches import FancyBboxPatch, Polygon, Rectangle
 
-from ashlar import TabularEstimator, TimeSeriesForecaster, ordinal
+from ashlar import ASRModel, ASRForecaster, ASROrdinalClassifier
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "images"
@@ -293,7 +293,7 @@ def tabular_fit() -> None:
     x = rng.uniform(-2.8, 2.8, size=n).astype(np.float32)
     y = np.sin(1.35 * x) + 0.28 * x
     y = (y + rng.normal(0.0, 0.16, size=n)).astype(np.float32)
-    model = TabularEstimator(
+    model = ASRModel(
         max_epochs=24,
         patience=8,
         batch_size=32,
@@ -353,7 +353,7 @@ def categorical_embeddings() -> None:
     signal = np.array([effect[item] for item in city], dtype=np.float32)
     y = (0.3 * rooms + signal + rng.normal(0.0, 0.12, size=len(city))).astype(np.float32)
     order = rng.permutation(len(city))
-    model = TabularEstimator(
+    model = ASRModel(
         max_epochs=36,
         patience=10,
         batch_size=48,
@@ -529,7 +529,7 @@ def ordinal_score() -> None:
     n = 420
     x = rng.uniform(-2.2, 2.2, size=(n, 1)).astype(np.float32)
     label = (np.digitize(x[:, 0], np.array([-1.3, -0.4, 0.4, 1.3])) + 1).astype(np.int32)
-    model = ordinal(
+    model = ASROrdinalClassifier(
         max_epochs=28,
         patience=8,
         batch_size=48,
@@ -586,7 +586,7 @@ def quantile_forecast() -> None:
     holdout = 24
     series = synthetic_cycle(lookback + 24 * 10 + holdout, seed=3)
     cut = len(series) - holdout
-    model = TimeSeriesForecaster(
+    model = ASRForecaster(
         lookback=lookback,
         horizon=1,
         head="quantile",
@@ -657,7 +657,7 @@ def mixture_density() -> None:
     n = 520
     series = rng.choice(np.array([-2.0, 2.0]), size=n) + rng.normal(0.0, 0.32, size=n)
     lookback = 24
-    model = TimeSeriesForecaster(
+    model = ASRForecaster(
         lookback=lookback,
         horizon=1,
         head="mixture",
@@ -707,7 +707,7 @@ def histogram_bins() -> None:
     lookback = 36
     origin = 366
     observed = series[:origin]
-    model = TimeSeriesForecaster(
+    model = ASRForecaster(
         lookback=lookback,
         horizon=1,
         head="histogram",

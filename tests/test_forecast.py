@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ashlar import DEFAULT_RECIPE, tabular
+from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.errors import AshlarError
 from ashlar.forecast import (
     FORECAST_D_MODEL,
@@ -12,8 +12,8 @@ from ashlar.forecast import (
     FORECAST_LAYERS,
     FORECAST_LEARNING_RATE,
     FORECAST_LOOKBACK,
-    FullHistoryForecaster,
-    TimeSeriesForecaster,
+    ASRHistoryForecaster,
+    ASRForecaster,
     _forecast_windows,
     _history_batch,
     _history_mse,
@@ -27,7 +27,7 @@ from ashlar.forecast import (
 
 
 def test_forecast_leaves_the_residual_default():
-    model = tabular()
+    model = ASRRegressor()
     assert model.task == "regression"
     assert model.standardize_target is True
     assert model.backbone == "residual_mlp"
@@ -69,7 +69,7 @@ def test_forecast_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
     cut = int(len(series) * 0.8)
-    model = TimeSeriesForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
+    model = ASRForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
     _origins, inputs, targets = _forecast_windows(series, model.lookback, model.horizon)
     test = _origins >= cut
     pred = model.predict(inputs[test])
@@ -78,7 +78,7 @@ def test_forecast_learns_a_sine_and_rejects_a_short_series():
     assert mae < 0.25
     assert mae < mean_mae
     try:
-        TimeSeriesForecaster(max_epochs=1, patience=1).fit(np.arange(20, dtype=np.float64))
+        ASRForecaster(max_epochs=1, patience=1).fit(np.arange(20, dtype=np.float64))
     except AshlarError:
         pass
     else:
@@ -145,7 +145,7 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
     cut = int(len(series) * 0.8)
-    model = FullHistoryForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
+    model = ASRHistoryForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
     origins = _history_origins(len(series), model.lookback, model.horizon)
     test = origins >= cut
     pred = model.predict(series, origins[test])
@@ -156,7 +156,7 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
     assert mae < mean_mae
     assert model.lookback == FORECAST_LOOKBACK
     try:
-        FullHistoryForecaster(max_epochs=1, patience=1).fit(np.arange(20, dtype=np.float64))
+        ASRHistoryForecaster(max_epochs=1, patience=1).fit(np.arange(20, dtype=np.float64))
     except AshlarError:
         pass
     else:

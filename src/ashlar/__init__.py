@@ -5,18 +5,24 @@ PyPI project ``ashlar`` is the unrelated microscopy stitcher. This package does
 not register either name.
 
 The names in ``__all__`` are the public surface. Helpers stay on their modules.
+Every model is ``ASR`` plus what it does, after LightGBM's ``LGBMRegressor``
+and ``LGBMClassifier``: ``ASRRegressor``, ``ASRClassifier``,
+``ASROrdinalClassifier``, ``ASROutcomeTree``, ``ASRForecaster``, and
+``ASRHistoryForecaster``, all on the generic ``ASRModel``. The old names
+still import, with a ``DeprecationWarning``.
 Forecast heads are the ``head`` argument of the two forecasters: ``mse``
 (default), ``quantile``, ``gaussian``, ``mixture``, ``flow``, and ``histogram``.
 """
 
+from ashlar._compat import renamed
 from ashlar._version import __version__
-from ashlar.additive import AdditiveModel, DiagonalNeighborhood, GatedAdditive
+from ashlar.additive import ASRAdditive, ASRDiagonalNeighborhood, ASRGatedAdditive
 from ashlar.errors import AshlarError, ShapeError, WeightError
-from ashlar.estimator import TabularEstimator
-from ashlar.forecast import FullHistoryForecaster, TimeSeriesForecaster
-from ashlar.node import ObliviousEnsemble
+from ashlar.estimator import ASRClassifier, ASRModel, ASROrdinalClassifier, ASROutcomeTree, ASRRegressor
+from ashlar.forecast import ASRForecaster, ASRHistoryForecaster
+from ashlar.node import ASRObliviousEnsemble
 from ashlar.predict import MeanParameterNormal, NormalMixture
-from ashlar.priors import BartPriorEnsemble, GradientSparseNet, VariationalPairwise
+from ashlar.priors import ASRBartPriorEnsemble, ASRGradientSparseNet, ASRVariationalPairwise
 from ashlar.recipes import (
     CLASSIFIER_RECIPE,
     DEFAULT_RECIPE,
@@ -32,43 +38,65 @@ from ashlar.recipes import (
     tabm,
     tabm_piecewise,
 )
-from ashlar.tree import OutcomeTree
-from ashlar.rounds import HistogramBooster, LearnedNeighborhood, LinearLeafBooster
+from ashlar.rounds import ASRHistogramBooster, ASRLearnedNeighborhood, ASRLinearLeafBooster
 from ashlar.search import DEFAULT_SEARCH
+from ashlar.tree import OutcomeTree
 
 __all__ = [
-    "AdditiveModel",
+    "ASRAdditive",
+    "ASRBartPriorEnsemble",
+    "ASRClassifier",
+    "ASRDiagonalNeighborhood",
+    "ASRForecaster",
+    "ASRGatedAdditive",
+    "ASRGradientSparseNet",
+    "ASRHistogramBooster",
+    "ASRHistoryForecaster",
+    "ASRLearnedNeighborhood",
+    "ASRLinearLeafBooster",
+    "ASRModel",
+    "ASRObliviousEnsemble",
+    "ASROrdinalClassifier",
+    "ASROutcomeTree",
+    "ASRRegressor",
+    "ASRVariationalPairwise",
     "AshlarError",
-    "BartPriorEnsemble",
     "CLASSIFIER_RECIPE",
     "DEFAULT_RECIPE",
     "DEFAULT_SEARCH",
-    "DiagonalNeighborhood",
-    "FullHistoryForecaster",
-    "GatedAdditive",
-    "GradientSparseNet",
-    "HistogramBooster",
-    "LearnedNeighborhood",
-    "LinearLeafBooster",
     "MeanParameterNormal",
     "NormalMixture",
     "ORDINAL_RECIPE",
-    "ObliviousEnsemble",
     "OutcomeTree",
     "ShapeError",
     "TABM_PAPER",
     "TABM_PIECEWISE",
     "TREE_RECIPE",
-    "TabularEstimator",
-    "TimeSeriesForecaster",
-    "VariationalPairwise",
     "WeightError",
     "__version__",
-    "classifier",
-    "ordinal",
-    "outcome_tree",
     "residual_mlp",
-    "tabular",
     "tabm",
     "tabm_piecewise",
 ]
+
+# ``tabular``, ``classifier``, ``ordinal``, and ``outcome_tree`` still import
+# from here and warn when called.
+__getattr__ = renamed(
+    __name__,
+    globals(),
+    {
+        "TabularEstimator": "ASRModel",
+        "TimeSeriesForecaster": "ASRForecaster",
+        "FullHistoryForecaster": "ASRHistoryForecaster",
+        "AdditiveModel": "ASRAdditive",
+        "GatedAdditive": "ASRGatedAdditive",
+        "DiagonalNeighborhood": "ASRDiagonalNeighborhood",
+        "ObliviousEnsemble": "ASRObliviousEnsemble",
+        "HistogramBooster": "ASRHistogramBooster",
+        "LinearLeafBooster": "ASRLinearLeafBooster",
+        "LearnedNeighborhood": "ASRLearnedNeighborhood",
+        "BartPriorEnsemble": "ASRBartPriorEnsemble",
+        "VariationalPairwise": "ASRVariationalPairwise",
+        "GradientSparseNet": "ASRGradientSparseNet",
+    },
+)

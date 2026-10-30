@@ -10,7 +10,9 @@ because that lookup is a host operation. Learned categorical indices are too.
 
 from __future__ import annotations
 
+import inspect
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import jax
@@ -18,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 from sklearn.base import BaseEstimator
 
+from ashlar._compat import renamed
 from ashlar._version import __version__
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
@@ -156,8 +159,12 @@ def _dist_from_raw(task, policy, raw, dist_fn):
     return dist_fn(raw)
 
 
-class TabularEstimator(BaseEstimator):
-    """Generic estimator. Architecture and task are constructor arguments, not subclasses.
+class ASRModel(BaseEstimator):
+    """Generic estimator. Architecture and task are constructor arguments.
+
+    ``ASRRegressor``, ``ASRClassifier``, ``ASROrdinalClassifier``, and
+    ``ASROutcomeTree`` are this class with the task and its defaults filled
+    in, the way ``LGBMRegressor`` and ``LGBMClassifier`` sit on ``LGBMModel``.
 
     Parameters
     ----------
@@ -167,7 +174,7 @@ class TabularEstimator(BaseEstimator):
         ``ordinal`` is a cumulative logit over numeric labels sorted by value.
         ``tree`` is a nested outcome model over the ``tree`` argument: one
         softmax per internal node on the shared hidden state. See
-        ``ashlar.tree`` and ``outcome_tree``.
+        ``ashlar.tree`` and ``ASROutcomeTree``.
         ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
         Jeffreys prior from the training counts. The default cuts stay learnable.
     backbone:
@@ -1240,7 +1247,7 @@ class TabularEstimator(BaseEstimator):
     def __sklearn_tags__(self):
         """Tag a classification or ordinal model as a classifier, anything else as a regressor.
 
-        The tag follows ``task``, so ``classifier()`` stratifies folds and the
+        The tag follows ``task``, so ``ASRClassifier()`` stratifies folds and the
         probability scorers read ``predict_proba``.
         """
         from sklearn.utils import ClassifierTags, RegressorTags
@@ -1392,6 +1399,7 @@ class TabularEstimator(BaseEstimator):
             "version": __version__,
             "distribution": "ashlar-tabular",
             "import": "ashlar",
+            "estimator": type(self).__name__,
             "reduction": REDUCTION,
             "task": self.task,
             "backbone": dump_ref(self.backbone),
@@ -1454,6 +1462,8 @@ class TabularEstimator(BaseEstimator):
     def load(cls, path: str | Path):
         directory = Path(path)
         payload = json.loads((directory / "metadata.json").read_text())
+        if cls is ASRModel:
+            cls = _TASK_MODELS.get(payload.get("estimator"), ASRModel)
         estimator = cls(
             task=payload["task"],
             backbone=load_ref(payload["backbone"]),
@@ -1541,6 +1551,123 @@ class TabularEstimator(BaseEstimator):
     def _require_fitted(self):
         if not getattr(self, "is_fitted_", False):
             raise AshlarError("this estimator is not fitted.")
+
+
+def _task_signature(defaults: dict, positional: tuple[str, ...]) -> inspect.Signature:
+    base = inspect.signature(ASRModel.__init__)
+    params = []
+    for name, param in base.parameters.items():
+        if name in positional:
+            continue
+        if name in defaults:
+            param = param.replace(default=defaults[name])
+        params.append(param)
+    front = [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in positional]
+    return base.replace(parameters=[params[0], *front, *params[1:]])
+
+
+class _TaskModel(ASRModel):
+    """``ASRModel`` with the task and its defaults filled in.
+
+    The constructor signature is ``ASRModel``'s with these defaults, so
+    ``get_params``, ``clone``, and the repr see them as ordinary defaults.
+    """
+
+    _tasks: tuple[str, ...] = ()
+    _defaults: dict = {}
+    _positional: tuple[str, ...] = ()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        def __init__(self, *args, **params):
+            if len(args) > len(cls._positional):
+                raise TypeError(f"{cls.__name__} takes {len(cls._positional)} positional argument(s).")
+            params.update(zip(cls._positional, args))
+            merged = {**deepcopy(cls._defaults), **params}
+            if merged["task"] not in cls._tasks:
+                raise AshlarError(f"{cls.__name__} takes task in {sorted(cls._tasks)}, not {merged['task']!r}. Use ASRModel.")
+            ASRModel.__init__(self, **merged)
+
+        __init__.__signature__ = _task_signature(cls._defaults, cls._positional)
+        __init__.__qualname__ = f"{cls.__name__}.__init__"
+        __init__.__doc__ = cls.__doc__
+        cls.__init__ = __init__
+
+
+class ASRRegressor(_TaskModel):
+    """Regression, the drop-in for ``LGBMRegressor``. ``ASRRegressor()`` is ``ASRModel()``.
+
+    ``task`` stays a regression task: ``regression`` (default, point
+    prediction), ``normal``, a distribution head (``gaussian``, ``mixture``,
+    ``flow``, ``histogram``, ``quantile``), or ``custom``.
+    """
+
+    _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS)
+    _defaults = {"task": "regression"}
+
+
+class ASRClassifier(_TaskModel):
+    """Classification, the drop-in for ``LGBMClassifier``.
+
+    Same feature preprocessing as ``ASRRegressor``: median impute, robust
+    scale, and a learned embedding for every categorical column unless you
+    pass ``categorical_embeddings=[]`` or name set features. Labels are not
+    z-scored. ``predict`` returns labels. ``predict_proba`` returns
+    probabilities with one column per class, in ``classes_`` order. Binary
+    targets are two classes, not one logit.
+    """
+
+    _tasks = ("classification",)
+    _defaults = {"task": "classification", "prediction_policy": "mean_probabilities", "standardize_target": False}
+
+
+class ASROrdinalClassifier(_TaskModel):
+    """Ordered numeric labels.
+
+    Same preprocessing as ``ASRClassifier``. Training labels are real numbers.
+    Their sorted order is the class order. The default head is a cumulative
+    logit, so a neighboring score is closer than a distant one. ``head="softmax"``
+    gives each class its own score instead. ``expectation_weight`` adds that
+    coefficient times the squared error of ``probabilities @ class_values``
+    beside the class negative log-likelihood. The default leaves it off.
+    ``histogram_variance`` with that head trains on a truncated Gaussian over
+    the class bins instead of the one-hot class.
+    ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
+    Jeffreys prior from the training counts. ``predict`` returns the most
+    likely label. ``predict_score`` returns the expected label.
+    """
+
+    _tasks = ("ordinal",)
+    _defaults = {"task": "ordinal", "prediction_policy": "mean_probabilities", "standardize_target": False}
+
+
+class ASROutcomeTree(_TaskModel):
+    """Nested outcome model: a shared backbone and one branch softmax per internal node.
+
+    ``tree`` is a nested dict, for example
+    ``{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}``.
+    Labels are node names. A label may stop at an internal node (``"runs"``),
+    and the loss is then that node's log-probability. ``predict_proba``
+    returns leaf probabilities in ``classes_`` order; ``predict_node_proba``
+    returns every node; ``predict_conditional(X, node)`` returns
+    ``P(child | node, x)``. The branch biases start at the training
+    frequencies of each split.
+    """
+
+    _tasks = ("tree",)
+    _defaults = {
+        "task": "tree",
+        "prediction_policy": "mean_probabilities",
+        "standardize_target": False,
+        "head_kwargs": {"edge_prior": "empirical"},
+    }
+    _positional = ("tree",)
+
+
+_TASK_MODELS = {model.__name__: model for model in (ASRRegressor, ASRClassifier, ASROrdinalClassifier, ASROutcomeTree)}
+
+__getattr__ = renamed(__name__, globals(), {"TabularEstimator": "ASRModel"})
 
 
 _FORWARD = None

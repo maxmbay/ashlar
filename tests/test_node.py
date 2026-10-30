@@ -2,12 +2,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ashlar import DEFAULT_RECIPE, tabular
-from ashlar.node import DEPTH, LEARNING_RATE, TREE_COUNT, ObliviousEnsemble, ObliviousLayer, entmax15
+from ashlar import DEFAULT_RECIPE, ASRRegressor
+from ashlar.node import DEPTH, LEARNING_RATE, TREE_COUNT, ASRObliviousEnsemble, ObliviousLayer, entmax15
 
 
 def test_residual_default_stays_a_regressor():
-    model = tabular()
+    model = ASRRegressor()
     assert model.task == "regression"
     assert model.standardize_target is True
     assert model.backbone == "residual_mlp"
@@ -56,7 +56,7 @@ def test_depth_six_ensemble_learns_a_conjunction():
     rng = np.random.default_rng(0)
     rows = rng.normal(size=(800, 4))
     labels = ((rows[:, 0] > 0) & (rows[:, 1] > 0)).astype(np.int32)
-    model = ObliviousEnsemble(random_state=0, n_trees=32, depth=4, max_epochs=30, patience=10, batch_size=200)
+    model = ASRObliviousEnsemble(random_state=0, n_trees=32, depth=4, max_epochs=30, patience=10, batch_size=200)
     model.fit(rows, labels, "classification")
     assert float(np.mean(model.predict(rows) == labels)) > 0.9
     assert model.depth_ == 4

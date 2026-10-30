@@ -3,7 +3,7 @@ import numpy as np
 import jax.numpy as jnp
 
 from ashlar.errors import AshlarError, ShapeError, WeightError
-from ashlar.estimator import TabularEstimator, _apply_class_weight
+from ashlar.estimator import ASRModel, _apply_class_weight
 from ashlar.heads import OrdinalHead, cut_raw_from_class_prior
 from ashlar.layers import DEFAULT_BOTTLENECK_WIDTH, SOFT_STAGE_SHRINKAGE, SoftStageHistogram
 from ashlar.objectives import (
@@ -15,7 +15,8 @@ from ashlar.objectives import (
     ordinal_objective,
     ordered_thresholds,
 )
-from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, classifier, ordinal, tabm
+from ashlar import ASRClassifier, ASROrdinalClassifier
+from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, tabm
 from ashlar.train import surface_learning_rate
 from ashlar.search import DEFAULT_SEARCH
 
@@ -33,7 +34,7 @@ def _regression(task="regression", **kwargs):
         random_state=0,
     )
     params.update(kwargs)
-    return TabularEstimator(**params)
+    return ASRModel(**params)
 
 
 def test_paper_recipe_records_tabm_defaults_without_training():
@@ -162,7 +163,7 @@ def test_gradient_flows_through_standardization():
 
 
 def test_default_recipe_is_the_no_argument_estimator():
-    params = TabularEstimator().get_params()
+    params = ASRModel().get_params()
     for key, value in DEFAULT_RECIPE.items():
         assert params[key] == value
     assert params["weight_decay"] == 1e-4
@@ -244,7 +245,7 @@ def test_transformer_backbone_fits_a_feature_set():
 
 
 def test_classifier_recipe_predicts_binary_and_multiclass_labels():
-    params = classifier().get_params()
+    params = ASRClassifier().get_params()
     for key, value in CLASSIFIER_RECIPE.items():
         assert params[key] == value
     assert params["task"] == "classification"
@@ -252,7 +253,7 @@ def test_classifier_recipe_predicts_binary_and_multiclass_labels():
     binary_x = rng.normal(size=(28, 2)).astype(np.float32)
     binary_x[0, 0] = np.nan
     binary_y = np.where(binary_x[:, 1] > 0, "yes", "no")
-    binary = classifier(max_epochs=4, patience=2, batch_size=8, learning_rate=1e-2, random_state=0)
+    binary = ASRClassifier(max_epochs=4, patience=2, batch_size=8, learning_rate=1e-2, random_state=0)
     binary.fit(binary_x, binary_y)
     labels = np.asarray(binary.predict(binary_x))
     probabilities = np.asarray(binary.predict_proba(binary_x))
@@ -263,7 +264,7 @@ def test_classifier_recipe_predicts_binary_and_multiclass_labels():
     cities = np.array(["ny", "sf", "la"] * 12, dtype=object)
     multi_x = {"rooms": rng.normal(size=36).astype(np.float32), "city": cities}
     multi_y = np.array(["low", "mid", "high"] * 12)
-    multi = classifier(max_epochs=3, patience=2, batch_size=12, learning_rate=1e-2, random_state=1)
+    multi = ASRClassifier(max_epochs=3, patience=2, batch_size=12, learning_rate=1e-2, random_state=1)
     multi.fit(multi_x, multi_y)
     multi_labels = np.asarray(multi.predict({"rooms": np.array([0.0, np.nan]), "city": np.array(["boston", "sf"], dtype=object)}))
     multi_probabilities = np.asarray(multi.predict_proba({"rooms": np.array([0.0, np.nan]), "city": np.array(["boston", "sf"], dtype=object)}))
@@ -276,10 +277,10 @@ def test_classification_search_scores_weighted_accuracy():
     rng = np.random.default_rng(5)
     x = rng.normal(size=(32, 2)).astype(np.float32)
     y = (x[:, 0] > 0).astype(int)
-    plain = classifier(max_epochs=2, patience=0, batch_size=8, learning_rate=1e-2, random_state=0)
+    plain = ASRClassifier(max_epochs=2, patience=0, batch_size=8, learning_rate=1e-2, random_state=0)
     plain.fit(x, y)
     assert plain.search_ is None
-    searched = classifier(max_epochs=2, patience=0, batch_size=8, learning_rate=1e-3, random_state=0)
+    searched = ASRClassifier(max_epochs=2, patience=0, batch_size=8, learning_rate=1e-3, random_state=0)
     searched.fit(x, y, search=True)
     scores = [trial["val_score"] for trial in searched.search_["trials"]]
     assert [trial["metric"] for trial in searched.search_["trials"]] == ["weighted_accuracy", "weighted_accuracy"]
@@ -297,8 +298,8 @@ def test_classification_embeddings_transformer_and_set():
     city = np.array(["ny", "sf"] * (n // 2), dtype=object)
     y = np.where(rooms + np.where(city == "sf", 0.5, 0.0) > 0, "a", "b")
     shared = dict(max_epochs=2, patience=0, batch_size=8, learning_rate=1e-2, categorical_embeddings=["city"], categorical_embedding_dim=4, random_state=0)
-    transformer = classifier(backbone="transformer", backbone_kwargs={"n_blocks": 1, "d_block": 8, "n_heads": 2, "dropout": 0.0}, **shared)
-    pooled = classifier(backbone="set", backbone_kwargs={"d_block": 8, "dropout": 0.0}, **shared)
+    transformer = ASRClassifier(backbone="transformer", backbone_kwargs={"n_blocks": 1, "d_block": 8, "n_heads": 2, "dropout": 0.0}, **shared)
+    pooled = ASRClassifier(backbone="set", backbone_kwargs={"d_block": 8, "dropout": 0.0}, **shared)
     transformer.fit({"rooms": rooms, "city": city}, y)
     pooled.fit({"rooms": rooms, "city": city}, y)
     query = {"rooms": np.array([0.2]), "city": np.array(["boston"], dtype=object)}
@@ -390,14 +391,14 @@ def test_regression_labels_are_standardized_unless_another_task_or_an_old_file(t
     assert DEFAULT_RECIPE["standardize_target"] is True
     assert CLASSIFIER_RECIPE["standardize_target"] is False
     assert ORDINAL_RECIPE["standardize_target"] is False
-    assert TabularEstimator().standardize_target is True
-    assert classifier().standardize_target is False
-    assert ordinal().standardize_target is False
+    assert ASRModel().standardize_target is True
+    assert ASRClassifier().standardize_target is False
+    assert ASROrdinalClassifier().standardize_target is False
     assert tabm().standardize_target is True
     assert tabm(task="ordinal", prediction_policy="mean_probabilities").standardize_target is False
-    assert TabularEstimator(task="classification").standardize_target is False
+    assert ASRModel(task="classification").standardize_target is False
     with pytest.raises(AshlarError, match="standardize_target"):
-        TabularEstimator(task="classification", standardize_target=True)._check_config()
+        ASRModel(task="classification", standardize_target=True)._check_config()
 
     y = np.full(8, 5.0, dtype=np.float32)
     x = np.linspace(0, 1, len(y), dtype=np.float32)[:, None]
@@ -424,7 +425,7 @@ def test_regression_labels_are_standardized_unless_another_task_or_an_old_file(t
     payload = json.loads(meta_path.read_text())
     del payload["standardize_target"]
     meta_path.write_text(json.dumps(payload))
-    restored = TabularEstimator.load(directory)
+    restored = ASRModel.load(directory)
     assert restored.standardize_target is False
     assert np.allclose(off.predict(x), restored.predict(x), atol=1e-6)
 
@@ -603,7 +604,7 @@ def test_softmax_ordinal_head_can_peak_on_one_class():
     assert np.allclose(probabilities.sum(axis=-1), 1.0, atol=1e-5)
     assert np.all(probabilities.argmax(axis=-1) == 2)
     try:
-        ordinal(head="logits", max_epochs=1, patience=0, validation_size=0).fit(np.ones((8, 1)), np.arange(8) % 3)
+        ASROrdinalClassifier(head="logits", max_epochs=1, patience=0, validation_size=0).fit(np.ones((8, 1)), np.arange(8) % 3)
     except AshlarError:
         return
     raise AssertionError("a logits head was accepted for an ordinal task")
@@ -640,7 +641,7 @@ def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
     measure = rng.normal(size=80).astype(np.float32)
     group = np.where(measure > 0, "high", "low").astype(object)
     y = np.where(measure < -0.5, 3, np.where(measure < 0.5, 5, 8)).astype(np.int32)
-    model = ordinal(
+    model = ASROrdinalClassifier(
         max_epochs=3,
         patience=0,
         batch_size=16,
@@ -658,11 +659,11 @@ def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
     restored = type(model).load(model.save(tmp_path / "prior"))
     assert restored.core_.head.freeze_class_prior is True
     assert np.allclose(score, np.asarray(restored.predict_score({"measure": measure, "group": group}), dtype=np.float64))
-    assert ordinal().head_kwargs is None
+    assert ASROrdinalClassifier().head_kwargs is None
     assert DEFAULT_RECIPE["learning_rate_schedule"] == "cosine"
     assert DEFAULT_RECIPE["task"] == "regression"
     try:
-        TabularEstimator(
+        ASRModel(
             max_epochs=1,
             patience=0,
             validation_size=0.25,
@@ -686,7 +687,7 @@ def test_ordinal_log_probabilities_respect_order():
 
 
 def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
-    params = ordinal().get_params()
+    params = ASROrdinalClassifier().get_params()
     for key, value in ORDINAL_RECIPE.items():
         assert params[key] == value
     assert DEFAULT_RECIPE["task"] == "regression"
@@ -695,7 +696,7 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
     rng = np.random.default_rng(0)
     x = rng.normal(size=(96, 1)).astype(np.float32)
     y = np.where(x[:, 0] < -0.4, 2, np.where(x[:, 0] < 0.5, 5, 9)).astype(np.int32)
-    model = ordinal(
+    model = ASROrdinalClassifier(
         max_epochs=25,
         patience=8,
         batch_size=16,
@@ -718,7 +719,7 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
     restored = type(model).load(model.save(tmp_path / "ordinal"))
     assert np.allclose(score, np.asarray(restored.predict_score(x), dtype=np.float64), atol=1e-5)
     try:
-        ordinal(max_epochs=1, patience=0, validation_size=0).fit(x[:8], np.array(["low"] * 8, dtype=object))
+        ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0).fit(x[:8], np.array(["low"] * 8, dtype=object))
     except AshlarError:
         return
     raise AssertionError("string labels were accepted for an ordinal task")
@@ -726,9 +727,9 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
 
 def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp_path):
     assert DEFAULT_BOTTLENECK_WIDTH == 32
-    assert TabularEstimator().bottleneck is None
+    assert ASRModel().bottleneck is None
     assert DEFAULT_RECIPE["bottleneck"] is None
-    assert ordinal().bottleneck is None
+    assert ASROrdinalClassifier().bottleneck is None
     assert tabm().bottleneck is None
     rng = np.random.default_rng(0)
     x = rng.normal(size=(40, 2)).astype(np.float32)
@@ -741,13 +742,13 @@ def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp
         backbone_kwargs={"n_blocks": 1, "d_block": 64, "dropout": 0.0},
         random_state=0,
     )
-    plain = ordinal(**common)
+    plain = ASROrdinalClassifier(**common)
     plain.fit(x, y)
     assert plain.core_.bottleneck is None
     assert int(plain.core_.backbone.d_out) == 64
     assert plain.core_.head.output.weight.shape == (1, 64, 1)
 
-    narrow = ordinal(**common, bottleneck=True)
+    narrow = ASROrdinalClassifier(**common, bottleneck=True)
     narrow.fit(x, y)
     assert int(narrow.core_.bottleneck.width) == 32
     assert int(narrow.core_.backbone.d_out) == 64
@@ -777,14 +778,14 @@ def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp
     assert int(ensemble.core_.bottleneck.width) == 4
     assert ensemble.core_.head.output.weight.shape == (2, 4, 1)
 
-    wide = ordinal(**common, bottleneck=64)
+    wide = ASROrdinalClassifier(**common, bottleneck=64)
     try:
         wide.fit(x, y)
     except ShapeError:
         pass
     else:
         raise AssertionError("a bottleneck as wide as the backbone was accepted")
-    bad = ordinal(**common, bottleneck=0)
+    bad = ASROrdinalClassifier(**common, bottleneck=0)
     try:
         bad.fit(x, y)
     except AshlarError:
@@ -795,7 +796,7 @@ def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp
 
 def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
     assert DEFAULT_RECIPE["histogram_variance"] is None
-    assert ordinal().histogram_variance is None
+    assert ASROrdinalClassifier().histogram_variance is None
     probs = np.asarray(gaussian_bin_probabilities(jnp.array([3]), 7, 0.5))
     assert probs.shape == (1, 7)
     assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-5)
@@ -815,18 +816,18 @@ def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
         random_state=0,
     )
     try:
-        ordinal(**common, histogram_variance=0.5).fit(x, y)
+        ASROrdinalClassifier(**common, histogram_variance=0.5).fit(x, y)
     except AshlarError:
         pass
     else:
         raise AssertionError("histogram variance was accepted on the cumulative head")
     try:
-        TabularEstimator(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0).fit(x, y)
     except AshlarError:
         pass
     else:
         raise AssertionError("histogram variance was accepted for regression")
-    model = ordinal(**common, head="softmax", histogram_variance=0.5)
+    model = ASROrdinalClassifier(**common, head="softmax", histogram_variance=0.5)
     model.fit(x, y)
     score = np.asarray(model.predict_score(x), dtype=np.float64)
     assert score.shape == (len(x),)
@@ -843,7 +844,7 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
 
     assert SOFT_STAGE_SHRINKAGE == 0.3
     assert DEFAULT_RECIPE["soft_stages"] is None
-    assert ordinal().soft_stages is None
+    assert ASROrdinalClassifier().soft_stages is None
     assert tabm().soft_stages is None
     module = SoftStageHistogram(3, 4, 8, shrinkage=SOFT_STAGE_SHRINKAGE, key=jax.random.PRNGKey(0))
     raw = jax.random.normal(jax.random.PRNGKey(1), (6, 3))
@@ -872,12 +873,12 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
         random_state=0,
     )
     try:
-        TabularEstimator(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0).fit(x, y)
     except AshlarError:
         pass
     else:
         raise AssertionError("soft stages were accepted for regression")
-    model = ordinal(**common, soft_stages=2)
+    model = ASROrdinalClassifier(**common, soft_stages=2)
     model.fit(x, y)
     assert model.core_.soft_histogram is not None
     assert int(model.core_.soft_histogram.n_stages) == 2
@@ -948,10 +949,10 @@ def test_rare_class_stays_in_training_and_the_rest_is_stratified():
         _split_indices(3, np.array([4, 5, 6]), mode="iid", validation_size=0.25, groups=None, random_state=0, task="ordinal")
 
     x = np.arange(len(rare), dtype=np.float32)[:, None]
-    model = ordinal(max_epochs=1, patience=0, validation_size=0.25, batch_size=4, random_state=0)
+    model = ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0.25, batch_size=4, random_state=0)
     model.fit(x, rare)
     assert 9 in set(np.asarray(model.classes_).tolist())
-    assert TabularEstimator().task == "regression"
+    assert ASRModel().task == "regression"
 
 
 def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_path):
@@ -972,17 +973,17 @@ def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_pat
     grads = jax.grad(lambda logits: mixed(logits, y, weights))(log_probs)
     assert np.any(np.abs(np.asarray(grads)) > 0.0)
 
-    assert ordinal().expectation_weight is None
-    assert TabularEstimator().expectation_weight is None
+    assert ASROrdinalClassifier().expectation_weight is None
+    assert ASRModel().expectation_weight is None
     with pytest.raises(AshlarError, match="expectation_weight"):
-        TabularEstimator(task="regression", expectation_weight=1.0)._check_config()
+        ASRModel(task="regression", expectation_weight=1.0)._check_config()
     with pytest.raises(AshlarError, match="histogram_variance"):
-        ordinal(expectation_weight=1.0, head="softmax", histogram_variance=0.5)._check_config()
+        ASROrdinalClassifier(expectation_weight=1.0, head="softmax", histogram_variance=0.5)._check_config()
 
     rng = np.random.default_rng(0)
     x = rng.normal(size=(16, 2)).astype(np.float32)
     y = np.where(x[:, 0] < 0, 3, 7).astype(np.int32)
-    model = ordinal(
+    model = ASROrdinalClassifier(
         expectation_weight=1.0,
         max_epochs=1,
         patience=0,

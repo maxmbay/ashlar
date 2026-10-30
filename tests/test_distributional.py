@@ -20,8 +20,8 @@ from ashlar.distributional import (
 )
 from ashlar.errors import AshlarError
 from ashlar.forecast import (
-    FullHistoryForecaster,
-    TimeSeriesForecaster,
+    ASRHistoryForecaster,
+    ASRForecaster,
     _forecast_batch,
     _forecast_objective,
     _forecast_objective_jit,
@@ -79,12 +79,12 @@ def _history_loss(net, series, mean: float, std: float) -> float:
 
 
 def test_default_forecast_head_is_squared_error():
-    assert TimeSeriesForecaster().head == "mse"
-    assert FullHistoryForecaster().head == "mse"
+    assert ASRForecaster().head == "mse"
+    assert ASRHistoryForecaster().head == "mse"
     assert QUANTILE_LEVELS == (0.1, 0.5, 0.9)
     assert HISTOGRAM_LOCATION_WEIGHT < 1.0
     try:
-        TimeSeriesForecaster(head="student")
+        ASRForecaster(head="student")
     except AshlarError:
         pass
     else:
@@ -179,7 +179,7 @@ def test_full_history_loss_reaches_the_distributional_head(head):
 def test_window_fit_lowers_the_distributional_loss(head):
     series = _sine(360)
     fresh = _init_forecast(jax.random.PRNGKey(0), 16, 1, head=head)
-    model = TimeSeriesForecaster(
+    model = ASRForecaster(
         lookback=16, horizon=1, head=head, max_epochs=5, patience=5, batch_size=64, random_state=0
     ).fit(series)
     before = _window_loss(fresh, series, model.mean_, model.std_)
@@ -201,7 +201,7 @@ def test_window_fit_lowers_the_distributional_loss(head):
 def test_full_history_fit_lowers_the_distributional_loss(head):
     series = _sine(220, seed=1)
     fresh = _init_history(jax.random.PRNGKey(0), 12, 1, head=head)
-    model = FullHistoryForecaster(
+    model = ASRHistoryForecaster(
         lookback=12, horizon=1, head=head, max_epochs=4, patience=4, batch_size=32, random_state=0
     ).fit(series)
     before = _history_loss(fresh, series, model.mean_, model.std_)

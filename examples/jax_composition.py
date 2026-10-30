@@ -19,7 +19,7 @@ import numpy as np
 import optax
 
 from ashlar import __version__
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     rooms = rng.normal(size=n).astype(np.float32)
     city = rng.choice(["ny", "sf"], size=n).astype(object)
     y = rooms + np.where(city == "sf", 0.4, -0.2)
-    model = TabularEstimator(
+    model = ASRModel(
         task="regression",
         backbone="tabm",
         backbone_kwargs={"n_blocks": 2, "d_block": 16, "dropout": 0.0, "k": 4, "start_scaling_init": "random-signs"},

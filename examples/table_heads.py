@@ -1,6 +1,6 @@
 """The forecast heads on a table, through the custom-head API.
 
-``TabularEstimator`` ships a point head and a normal head (``task="normal"``).
+``ASRModel`` ships a point head and a normal head (``task="normal"``).
 The other distributional heads live in ``ashlar.distributional`` and are wired
 into the two forecasters. This file attaches any of them to a table with
 ``task="custom"``: a head that emits the flat parameters per member, the head's
@@ -22,7 +22,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from ashlar import TabularEstimator
+from ashlar import ASRModel
 from ashlar.distributional import (
     decode,
     distributional_loss,
@@ -81,8 +81,8 @@ def _point_fn(kind):
     return point
 
 
-def table_head(kind: str, **overrides) -> TabularEstimator:
-    """A default ``TabularEstimator`` whose head is ``kind``: gaussian, mixture, flow, histogram, or quantile."""
+def table_head(kind: str, **overrides) -> ASRModel:
+    """A default ``ASRModel`` whose head is ``kind``: gaussian, mixture, flow, histogram, or quantile."""
     params = dict(
         task="custom",
         head=DistributionHead,
@@ -91,4 +91,4 @@ def table_head(kind: str, **overrides) -> TabularEstimator:
         point_fn=_point_fn(kind),
     )
     params.update(overrides)
-    return TabularEstimator(**params)
+    return ASRModel(**params)

@@ -35,7 +35,7 @@ import pandas as pd
 import xgboost
 from sklearn.multioutput import MultiOutputRegressor
 
-from ashlar import tabular
+from ashlar import ASRRegressor
 from ashlar.forecast import (
     FORECAST_BATCH_SIZE,
     FORECAST_D_MODEL,
@@ -48,8 +48,8 @@ from ashlar.forecast import (
     FORECAST_PATIENCE,
     FORECAST_TEST_FRACTION,
     FORECAST_VAL_FRACTION,
-    FullHistoryForecaster,
-    TimeSeriesForecaster,
+    ASRHistoryForecaster,
+    ASRForecaster,
     _forecast_windows,
     _history_batch,
     _history_mse,
@@ -170,7 +170,7 @@ def _wins(payload: dict, key: str) -> list[str]:
 
 
 def _check_constants() -> None:
-    model = tabular()
+    model = ASRRegressor()
     if model.task != "regression" or model.standardize_target is not True or model.backbone != "residual_mlp":
         raise RuntimeError("the residual regression default changed.")
     if DEFAULT_RECIPE["task"] != "regression" or DEFAULT_RECIPE["standardize_target"] is not True:
@@ -361,7 +361,7 @@ def main() -> None:
         if "window" not in row:
             print(f"window {name}", flush=True)
             started = time.perf_counter()
-            model = TimeSeriesForecaster(verbose=True).fit(series[: split["test_start"]])
+            model = ASRForecaster(verbose=True).fit(series[: split["test_start"]])
             _check_counts(model, split, "window")
             pred = model.predict(split["inputs"][split["test"]])
             row["window"] = _model_record(model, pred, target, time.perf_counter() - started)
@@ -370,7 +370,7 @@ def main() -> None:
         if "full_history" not in row:
             print(f"full-history {name}", flush=True)
             started = time.perf_counter()
-            model = FullHistoryForecaster(verbose=True).fit(series[: split["test_start"]])
+            model = ASRHistoryForecaster(verbose=True).fit(series[: split["test_start"]])
             _check_counts(model, split, "full-history")
             pred = model.predict(series, split["origins"][split["test"]])
             row["full_history"] = _model_record(model, pred, target, time.perf_counter() - started)

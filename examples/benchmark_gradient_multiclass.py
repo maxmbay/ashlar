@@ -40,7 +40,7 @@ from ashlar.priors import (
     GRADIENT_MAX_EPOCHS,
     GRADIENT_PATIENCE,
     GRADIENT_WIDTH,
-    GradientSparseNet,
+    ASRGradientSparseNet,
     _init_sparse_multi,
     _multi_logits,
     _multi_loss,
@@ -198,7 +198,7 @@ def _parts(spec: dict):
 
 def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
     started = time.perf_counter()
-    model = GradientSparseNet(random_state=0, verbose=True)
+    model = ASRGradientSparseNet(random_state=0, verbose=True)
     model.fit(x_train, y_train, "classification")
     test_pred = model.predict(x_test)
     val_pred = model.predict(x_val)
@@ -213,7 +213,7 @@ def _gradient(x_train, y_train, x_val, y_val, x_test, y_test) -> dict:
         "n_classes": int(model.n_classes_),
         "wall_seconds": time.perf_counter() - started,
         "config": (
-            "GradientSparseNet(random_state=0): width 128, SiLU, one logit per class, "
+            "ASRGradientSparseNet(random_state=0): width 128, SiLU, one logit per class, "
             "softmax cross-entropy plus 0.01 times mean absolute input Jacobian, "
             "Adam 1e-3, batch 256, patience 16, cap 80"
         ),

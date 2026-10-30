@@ -1,4 +1,4 @@
-"""Score ``ordinal()`` on the existing abalone split.
+"""Score ``ASROrdinalClassifier()`` on the existing abalone split.
 
 Classes with fewer than two outer-training rows stay in the training
 partition. Does not refit the residual regressor, XGBoost, or TabM-D.
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 
 import benchmark_coverage as coverage
-from ashlar import ordinal
+from ashlar import ASROrdinalClassifier
 
 OUT_PATH = Path("/tmp/ashlar-bench/abalone-ordinal-results.json")
 
@@ -41,11 +41,11 @@ def main() -> None:
     parts = coverage._load_split(spec)
     rare = _rare_levels(parts["y_train"])
     print("rare outer-train levels", rare, flush=True)
-    model = ordinal()
+    model = ASROrdinalClassifier()
     if model.task != "ordinal" or model.backbone != "residual_mlp" or model.expectation_weight is not None:
-        raise SystemExit("ordinal() is no longer the residual ordinal recipe")
+        raise SystemExit("ASROrdinalClassifier() is no longer the residual ordinal recipe")
     scores = coverage._timed(lambda: coverage._ashlar_expected(model, parts))
-    scores["config"] = "ordinal()"
+    scores["config"] = "ASROrdinalClassifier()"
     scores["rare_train_levels"] = rare
     scores["rule"] = (
         "a class with fewer than two rows stays in the training partition; "

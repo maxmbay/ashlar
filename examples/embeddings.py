@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from ashlar import __version__
-from ashlar.estimator import TabularEstimator
+from ashlar.estimator import ASRModel
 
 
 def main():
@@ -26,7 +26,7 @@ def main():
     rooms = rng.normal(size=n).astype(np.float32)
     city = rng.choice(["ny", "sf", "la"], size=n).astype(object)
     y = rooms + np.where(city == "sf", 0.4, 0.0)
-    model = TabularEstimator(
+    model = ASRModel(
         max_epochs=6,
         patience=3,
         batch_size=16,
