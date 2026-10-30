@@ -158,7 +158,7 @@ model.save("models/fare")              # a directory: metadata.json and the weig
 model = ASRModel.load("models/fare")   # comes back as the class it was saved as
 ```
 
-Every tabular model saves this way, distributional heads included, and reloads with identical predictions. Pass `save_optimizer=False` to leave out the optimizer state when you only need to predict. Loading imports any custom head or backbone by its module path, so load only models you trust. The forecasters cannot be saved yet.
+A saved model is JSON plus Equinox weight files, not a pickle. Every model saves this way, distributional heads included, and reloads with identical predictions. The forecasters load with their own class: `ASRForecaster.load(path)`. Pass `save_optimizer=False` to a tabular model to leave out the optimizer state when you only need to predict. A custom head or backbone is recorded by its module path and imported on load, so load only models you trust.
 
 ## Results
 
