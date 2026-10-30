@@ -31,12 +31,22 @@ Models:
 that did not record the detail. The flat models must drop those seasons; the
 tree and the per-node models use them for the splits they reach.
 
+``--season`` adds season context; every option is known before a match:
+
+* ``none`` (default): no season information.
+* ``embed``: the season as a learned category. A season the model never
+  trained on (validation and test) reuses the latest training season.
+* ``era``: an impact-player-rule flag (2023 on) and the previous season's
+  league-wide wicket, dot, boundary and extra rates.
+* ``both``: ``embed`` and ``era`` together.
+
 Reported on test: leaf log loss, the conditional log loss at each internal
 node (on the test rows that reach it), and expected calibration error of
 P(wicket), P(dot), and P(boundary) with 20 equal-mass bins.
 
     python examples/benchmark_outcome_tree.py --models prior lgbm_flat lgbm_nodes ashlar_flat ashlar_tree
     python examples/benchmark_outcome_tree.py --coarse 2015
+    python examples/benchmark_outcome_tree.py --season both
     python examples/benchmark_outcome_tree.py --report
 """
 
@@ -213,6 +223,31 @@ def split(frame, coarse: int | None):
     return train, val, test
 
 
+def add_season(frame, train, val, test, mode):
+    """Season columns for ``mode`` and the names to add to ``FEATURES``."""
+    extra = []
+    if mode in {"embed", "both"}:
+        last = str(int(train.season.max()))
+        seen = sorted({str(int(v)) for v in train.season.unique()})
+        for part in (train, val, test):
+            name = part.season.astype(int).astype(str)
+            part["season_cat"] = pd.Categorical(name.where(name.isin(seen), last), categories=seen)
+        extra.append("season_cat")
+    if mode in {"era", "both"}:
+        paths = frame.y.astype(str).map(lambda v: _tree().path(v))
+        flags = pd.DataFrame(
+            {event: paths.map(lambda p, e=event: e in p) for event in ("wicket", "dot", "boundary", "extra")}
+        )
+        rates = flags.groupby(frame.season.values).mean()
+        previous = rates.shift(1).add_prefix("last_season_")
+        for part in (train, val, test):
+            part["impact_player"] = (part.season >= 2023).astype(float)
+            for column in previous.columns:
+                part[column] = part.season.map(previous[column]).astype(float)
+        extra += ["impact_player", *previous.columns]
+    return extra
+
+
 FEATURES = [
     "innings", "over", "ball_in_over", "legal_balls", "runs", "wickets", "run_rate", "target",
     "required_rate", "batter_runs", "batter_balls", "bowler_balls", "bowler_runs", "previous", *CATEGORICAL,
@@ -338,7 +373,8 @@ def fit_lgbm_nodes(train, val, test, tree):
 
 
 def _ashlar_kwargs(train):
-    return dict(categorical=[*CATEGORICAL, "previous"], random_state=0)
+    categorical = [*CATEGORICAL, "previous", *[c for c in FEATURES if c == "season_cat"]]
+    return dict(categorical=categorical, random_state=0)
 
 
 def fit_ashlar_flat(train, val, test, tree):
@@ -410,23 +446,25 @@ def scores(tree, nodes, labels):
 def _done():
     if not OUT.exists():
         return set()
-    return {(r["model"], r["coarse"]) for r in map(json.loads, OUT.read_text().splitlines())}
+    return {(r["model"], r["coarse"], r.get("season", "none")) for r in map(json.loads, OUT.read_text().splitlines())}
 
 
-def run(models, coarse):
+def run(models, coarse, season="none"):
+    global FEATURES
     frame = load_balls()
     train, val, test = split(frame, coarse)
+    FEATURES = [*FEATURES, *add_season(frame, train, val, test, season)]
     tree = _tree()
     labels = test.y.astype(str).tolist()
     done = _done()
     print(f"train {len(train):,} val {len(val):,} test {len(test):,} balls", flush=True)
     for name in models:
-        if (name, coarse) in done:
+        if (name, coarse, season) in done:
             print(f"skip {name} coarse={coarse}")
             continue
         start = time.time()
         nodes = MODELS[name](train, val, test, tree)
-        record = {"model": name, "coarse": coarse, "seconds": round(time.time() - start, 1), **scores(tree, nodes, labels)}
+        record = {"model": name, "coarse": coarse, "season": season, "seconds": round(time.time() - start, 1), **scores(tree, nodes, labels)}
         with OUT.open("a") as handle:
             handle.write(json.dumps(record) + "\n")
         print(json.dumps(record), flush=True)
@@ -434,7 +472,9 @@ def run(models, coarse):
 
 def report():
     rows = [json.loads(line) for line in OUT.read_text().splitlines()]
-    table = pd.DataFrame(rows).set_index(["coarse", "model"]).sort_index()
+    table = pd.DataFrame(rows)
+    table["season"] = table.get("season", pd.Series(index=table.index, dtype=object)).fillna("none")
+    table = table.set_index(["coarse", "season", "model"]).sort_index()
     columns = ["leaf_logloss", *[c for c in table.columns if c.startswith("cond_")], "ece/wicket", "ece/dot", "ece/boundary", "seconds"]
     print(table[columns].round(4).to_markdown())
 
@@ -443,9 +483,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", default=list(MODELS))
     parser.add_argument("--coarse", type=int, default=None)
+    parser.add_argument("--season", choices=["none", "embed", "era", "both"], default="none")
     parser.add_argument("--report", action="store_true")
     args = parser.parse_args()
     if args.report:
         report()
     else:
-        run(args.models, args.coarse)
+        run(args.models, args.coarse, args.season)
