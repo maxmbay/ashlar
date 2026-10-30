@@ -110,3 +110,13 @@ def test_forecaster_takes_the_student_t_head(tmp_path):
     restored = ASRForecaster.load(model.save(tmp_path / "t"))
     future = series[-4:]
     assert np.allclose(model.log_prob(series[-44:-4], future), restored.log_prob(series[-44:-4], future))
+
+
+def test_count_heads_calibrate_with_whole_number_intervals():
+    X, y = _counts(3500)
+    model = ASRRegressor(task="negative_binomial", max_epochs=8).fit(X[:1500], y[:1500])
+    model.calibrate(X[1500:2500], y[1500:2500], n_samples=400)
+    interval = model.predict_interval(X[2500:], 0.8, n_samples=400)
+    assert np.all(interval == np.round(interval))
+    covered = np.mean((y[2500:] >= interval[:, 0]) & (y[2500:] <= interval[:, 1]))
+    assert covered >= 0.76
