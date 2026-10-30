@@ -69,6 +69,8 @@ model.log_prob(X_new, y_new)                # log density of what happened
 
 No second model per quantile, and no fixed-width normal around the mean.
 
+To guarantee the coverage, calibrate on rows the model did not see: `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` is a split-conformal interval. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#calibrated-intervals) has the detail.
+
 ## Architecture is set by keyword arguments
 
 A model is one set of keyword arguments with four independent slots: how the columns are encoded, the backbone that reads them, the head that answers, and the training schedule. Changing the head makes the same network return a density instead of a number. Changing the backbone leaves the head unchanged.
