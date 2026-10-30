@@ -169,3 +169,7 @@ On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM o
 - [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
 - [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
+
+## Acknowledgements
+
+The `tabm` backbone and the `tabm()` and `tabm_piecewise()` recipes follow TabM, by Yury Gorishniy, Akim Kotelnikov, and Artem Babenko ([paper](https://arxiv.org/abs/2410.24210), [code](https://github.com/yandex-research/tabm)). The piecewise-linear and periodic numeric embeddings follow [Gorishniy, Rubachev, and Babenko (2022)](https://arxiv.org/abs/2203.05556). TabM is also the strongest neural baseline in our benchmarks.
