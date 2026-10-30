@@ -30,15 +30,23 @@ MIN_CALIBRATION_ROWS = 20
 
 
 def pit_values(draws: np.ndarray, y: np.ndarray, seed: int = 0) -> np.ndarray:
-    """Randomized PIT of ``y`` under ``draws`` of shape ``(n, rows)``. One value per row in ``[0, 1]``."""
+    """Randomized PIT of ``y`` under ``draws`` of shape ``(n, rows)``. One value per row in ``(0, 1)``.
+
+    ``y`` is ranked among the ``n`` draws with ties broken at random, and the
+    rank is spread uniformly over its ``1 / (n + 1)`` slot. When ``y`` is a
+    draw from the same distribution the result is exactly uniform, so the
+    scores carry no grid from the finite number of draws.
+    """
     draws = np.asarray(draws, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64).reshape(-1)
     if draws.ndim != 2 or draws.shape[1] != y.shape[0]:
         raise ShapeError(f"draws must have shape (n, {y.shape[0]}); received {draws.shape}.")
-    below = np.mean(draws < y[None, :], axis=0)
-    tied = np.mean(draws == y[None, :], axis=0)
-    noise = np.random.default_rng(int(seed)).uniform(size=y.shape[0])
-    return below + noise * tied
+    n = draws.shape[0]
+    below = np.sum(draws < y[None, :], axis=0)
+    tied = np.sum(draws == y[None, :], axis=0)
+    rng = np.random.default_rng(int(seed))
+    rank = below + np.floor(rng.uniform(size=y.shape[0]) * (tied + 1))
+    return (rank + rng.uniform(size=y.shape[0])) / (n + 1)
 
 
 def conformal_quantile(scores, coverage: float) -> float:
@@ -80,6 +88,21 @@ def cqr_calibration(low, high, y) -> dict:
     check_rows(y.size)
     scores = np.sort(np.maximum(low - y, y - high))
     return {"kind": "cqr", "values": [float(value) for value in scores]}
+
+
+def draw_interval(draws: np.ndarray, low: float, high: float) -> np.ndarray:
+    """Interval per row from ``draws`` of shape ``(n, rows)``, shape ``(rows, 2)``.
+
+    The ends are the order statistics that bracket the levels in the PIT of
+    ``pit_values``: a value whose PIT lies in ``[low, high]`` is always inside,
+    so the PIT coverage the calibration measured carries over to the interval.
+    A level outside what ``n`` draws resolve takes the smallest or largest draw.
+    """
+    ordered = np.sort(np.asarray(draws, dtype=np.float64), axis=0)
+    n = ordered.shape[0]
+    first = min(max(math.floor(float(low) * (n + 1)), 1), n)
+    last = min(max(math.ceil(float(high) * (n + 1)), 1), n)
+    return np.stack((ordered[first - 1], ordered[last - 1]), axis=1)
 
 
 def interval_levels(calibration: dict, coverage: float) -> tuple[float, float]:

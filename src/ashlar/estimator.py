@@ -54,6 +54,7 @@ from ashlar.objectives import (
 )
 from ashlar.calibrate import (
     check_coverage,
+    draw_interval,
     cqr_calibration,
     cqr_margin,
     interval_levels,
@@ -1417,7 +1418,9 @@ class ASRModel(BaseEstimator):
         """Central interval per row, shape ``(rows, 2)``, on the scale of ``y``.
 
         Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
-        quantiles of the head. After ``calibrate`` it is the split-conformal
+        quantiles of the head, read as order statistics of the draws so that a
+        value whose PIT lies between the two levels is always inside. After
+        ``calibrate`` it is the split-conformal
         interval: on rows exchangeable with the calibration rows it holds at
         least ``coverage`` of them. The quantile head gives only its 80%
         interval, calibrated or not.
@@ -1435,9 +1438,7 @@ class ASRModel(BaseEstimator):
             levels = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
         else:
             levels = interval_levels(calibration, coverage)
-        draws = self.sample(X, n=n_samples, seed=seed)
-        method = "inverted_cdf" if self.task in COUNT_HEADS else "linear"
-        return np.quantile(draws, levels, axis=0, method=method).T
+        return draw_interval(self.sample(X, n=n_samples, seed=seed), *levels)
 
     def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0):
         """Split-conformal calibration on held-out rows. Returns ``self``.
