@@ -917,7 +917,7 @@ def distributional_head() -> None:
 def outcome_tree() -> None:
     """The cricket tree of ``ASROutcomeTree``: one backbone, one softmax per internal node."""
     fig, ax = _diagram(
-        "One backbone, one softmax per split.",
+        "Nested outcome tree: one backbone, one softmax per internal node.",
         "A nested outcome, as a tree of labels. A leaf's probability is the product of the branches on its path.",
         15.6,
         9.0,

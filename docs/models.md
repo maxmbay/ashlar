@@ -1,4 +1,4 @@
-# What goes in each slot
+# Model slots: encode, backbone, head, train
 
 [Ashlar](../README.md) builds a model from keyword arguments rather than from a class per architecture. `ASRModel` is the generic estimator; `ASRRegressor`, `ASRClassifier`, `ASROrdinalClassifier`, and `ASROutcomeTree` are the same estimator with a task and its recipe filled into the signature, the way `LGBMRegressor` is `LGBMModel` with `objective="regression"`.
 

@@ -1,4 +1,4 @@
-# Pick a head for the shape of the target
+# Heads and the target shapes they fit
 
 [Ashlar](../README.md) answers with whatever head you ask for. A tree regressor predicts a mean; for an interval you fit one more model per quantile, or put a fixed-width normal around the mean, and neither gives a density you can evaluate or sample from. An Ashlar head gives the whole predictive distribution from one fit, and the head is a choice you make for the shape of the target.
 
@@ -45,7 +45,7 @@ CRPS scores the whole predictive distribution in the target's units, lower is be
 
 The mixture has the best likelihood on every table and the best CRPS on three of four. Its intervals are honest: an interval that promises 80% holds about 80% of held-out values, where the trees' normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide as the trees' (33 minutes against 75) and still covers 80%. The taxi tips are the exception on CRPS: the trees' mean is so much closer there (RMSE 1.75 against 1.98) that CatBoost's mean and variance win on CRPS, while the mixture still puts far more density on the tips that happened, many of them exactly zero.
 
-## A conditional distribution
+## Conditional predictive distributions
 
 ![Four heads on taxi fare, under three conditions.](images/fare-heads.png)
 
