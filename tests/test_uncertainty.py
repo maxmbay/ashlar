@@ -18,7 +18,7 @@ def _gap(n=1200, seed=0):
     return X, y
 
 
-@pytest.mark.parametrize("task", ["regression", "gaussian", "mixture", "quantile"])
+@pytest.mark.parametrize("task", ["regression", "gaussian", "mixture", "quantile", "student_t"])
 def test_uncertainty_has_one_value_per_row_and_adds_up(task):
     X, y = _gap()
     model = ASRRegressor(task=task, max_epochs=6, **TABM).fit(X, y)
@@ -68,3 +68,11 @@ def test_tree_tasks_are_refused():
     model = ASROutcomeTree({"a": None, "b": None}, max_epochs=1).fit(X, labels)
     with pytest.raises(AshlarError):
         model.predict_uncertainty(X)
+
+
+def test_count_heads_report_both_parts():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(800, 2)).astype(np.float32)
+    y = rng.poisson(np.exp(1.0 + 0.5 * X[:, 0])).astype(float)
+    parts = ASRRegressor(task="negative_binomial", max_epochs=4, **TABM).fit(X, y).predict_uncertainty(X[:40], n_samples=100)
+    assert np.all(parts["aleatoric"] > 0) and np.all(parts["epistemic"] >= 0)

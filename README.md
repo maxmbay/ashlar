@@ -69,6 +69,8 @@ model.log_prob(X_new, y_new)                # log density of what happened
 
 No second model per quantile, and no fixed-width normal around the mean.
 
+To guarantee the coverage, calibrate on rows the model did not see: `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` is a split-conformal interval. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#calibrated-intervals) has the detail.
+
 ## Architecture is set by keyword arguments
 
 A model is one set of keyword arguments with four independent slots: how the columns are encoded, the backbone that reads them, the head that answers, and the training schedule. Changing the head makes the same network return a density instead of a number. Changing the backbone leaves the head unchanged.
@@ -99,7 +101,7 @@ The distribution is conditional on the row, so one fitted model returns a differ
 
 One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. A different head wins each condition, by held-out log density: the `mixture` on Manhattan hops, the `flow` on the heavier Brooklyn tail, and the `histogram` on the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, because a spike at one value is what a smooth density cannot make. Its resolution is yours: `head_kwargs={"bins": 48}`, 16 by default.
 
-`gaussian`, `mixture`, `flow`, `histogram`, and `quantile` for a number; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
+`gaussian`, `mixture`, `flow`, `histogram`, `quantile`, and `student_t` for a number; `poisson` and `negative_binomial`, optionally zero-inflated, for a count; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
 
 ## Forecasting
 

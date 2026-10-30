@@ -52,7 +52,16 @@ from ashlar.objectives import (
     ordinal_objective,
     regression_objective,
 )
-from ashlar.distributional import QUANTILE_LEVELS, decode, log_density, point_values, sample_values
+from ashlar.calibrate import (
+    check_coverage,
+    cqr_calibration,
+    cqr_margin,
+    interval_levels,
+    pit_calibration,
+    pit_values,
+    recalibrated_levels,
+)
+from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, log_density, point_values, sample_values
 from ashlar.predict import distribution_from_normal_raw, mean_logits, mean_probabilities, split_normal_parameters
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
@@ -89,8 +98,8 @@ _LABELED_TASKS = {"classification", "ordinal"}
 # Tasks whose ``predict`` returns a label and whose ``predict_proba`` exists.
 _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
-DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile")
-_SCALED_TASKS = {"regression", *DISTRIBUTION_TASKS}
+DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
+_SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS)}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
@@ -387,7 +396,8 @@ class ASRModel(BaseEstimator):
             )
         if self.standardize_target and self.task not in _SCALED_TASKS:
             raise AshlarError(
-                "standardize_target is a regression label z-score. It applies to regression and the distribution tasks."
+                "standardize_target is a regression label z-score. It applies to regression and the distribution tasks, "
+                "not to the count heads, which read the raw count."
             )
         if self.task in {"flow", "histogram"} and not self.standardize_target:
             raise AshlarError(f"the {self.task} head works on a standardized axis, so standardize_target must stay on.")
@@ -563,7 +573,10 @@ class ASRModel(BaseEstimator):
         if self.task not in {"custom", *_LABELED_TASKS}:
             if not np.isfinite(np.asarray(y_train_model, dtype=np.float64)).all():
                 raise AshlarError("regression and normal targets must be finite. Mask missing outcomes in a custom objective.")
+        if self.task in COUNT_HEADS:
+            _check_counts(y_train_model, self.task)
         y_train_model = self._fit_target_scale(y_train_model)
+        self.calibration_ = None
         categorical = list(self._categorical_names(names, columns))
         encoder = FeatureEncoder.fit(
             train_frame,
@@ -894,6 +907,9 @@ class ASRModel(BaseEstimator):
         kwargs = dict(self.head_kwargs or {})
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
+        if self.task in COUNT_HEADS:
+            mean = float(np.mean(np.asarray(y_encoded, dtype=np.float64)))
+            kwargs["log_mean"] = float(np.log(max(mean, 1e-3)))
         if self.task == "tree":
             kwargs["tree"] = self.tree_.to_json()
             if kwargs.get("edge_prior") == "empirical":
@@ -1364,24 +1380,104 @@ class ASRModel(BaseEstimator):
         mixed = jax.nn.logsumexp(per_member, axis=1) - jnp.log(float(members))
         return np.asarray(mixed, dtype=np.float64) - np.log(std)
 
-    def predict_quantiles(self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0):
+    def predict_quantiles(
+        self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None
+    ):
         """Quantiles per row, shape ``(rows, len(levels))``, on the scale of ``y``.
 
         A density head reads them from ``n_samples`` draws of the member
         mixture. The quantile head has its three trained levels, 0.1, 0.5, and
         0.9, averaged across members, and no others.
+
+        After ``calibrate``, each level is first mapped to the nominal level
+        that held that fraction of the calibration rows, and the quantile
+        head's outer levels move out (or in) by the conformal margin at 80%.
+        ``calibrated=False`` reads the raw head; ``None`` uses the calibration
+        when there is one.
         """
         self._require_distribution("predict_quantiles")
         levels = tuple(float(level) for level in np.atleast_1d(levels))
+        calibration = self._calibration(calibrated)
         mean, std = self._target_affine()
         if self.task == "quantile":
             if levels != tuple(QUANTILE_LEVELS):
                 raise AshlarError(f"the quantile head was trained at {QUANTILE_LEVELS} only.")
-            decoded, batch, members = _decode_members(self.task, jnp.asarray(self.predict_raw(X)))
-            values = np.asarray(decoded, dtype=np.float64).reshape(batch, members, 3).mean(axis=1)
-            return values * std + mean
+            values = self._quantile_head_levels(X) * std + mean
+            if calibration is not None:
+                margin = cqr_margin(calibration, QUANTILE_LEVELS[2] - QUANTILE_LEVELS[0])
+                values = values + np.asarray([-margin, 0.0, margin])
+            return values
+        if calibration is not None:
+            levels = recalibrated_levels(calibration, levels)
         draws = self.sample(X, n=n_samples, seed=seed)
-        return np.quantile(draws, levels, axis=0).T
+        method = "inverted_cdf" if self.task in COUNT_HEADS else "linear"
+        return np.quantile(draws, levels, axis=0, method=method).T
+
+    def predict_interval(self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None):
+        """Central interval per row, shape ``(rows, 2)``, on the scale of ``y``.
+
+        Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
+        quantiles of the head. After ``calibrate`` it is the split-conformal
+        interval: on rows exchangeable with the calibration rows it holds at
+        least ``coverage`` of them. The quantile head gives only its 80%
+        interval, calibrated or not.
+        """
+        self._require_distribution("predict_interval")
+        coverage = check_coverage(coverage)
+        calibration = self._calibration(calibrated)
+        if self.task == "quantile":
+            outer = QUANTILE_LEVELS[2] - QUANTILE_LEVELS[0]
+            if not np.isclose(coverage, outer):
+                raise AshlarError(f"the quantile head gives only its {outer:.0%} interval.")
+            values = self.predict_quantiles(X, calibrated=calibration is not None)
+            return values[:, [0, 2]]
+        if calibration is None:
+            levels = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
+        else:
+            levels = interval_levels(calibration, coverage)
+        draws = self.sample(X, n=n_samples, seed=seed)
+        method = "inverted_cdf" if self.task in COUNT_HEADS else "linear"
+        return np.quantile(draws, levels, axis=0, method=method).T
+
+    def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0):
+        """Split-conformal calibration on held-out rows. Returns ``self``.
+
+        Pass rows the model was not fitted on. A density head stores each
+        row's PIT, read from ``n_samples`` draws. The quantile head stores how
+        far each ``y`` falls outside its 80% interval. Afterwards
+        ``predict_interval`` and ``predict_quantiles`` use the calibration, it
+        is saved with the model, and ``fit`` clears it. See
+        ``ashlar.calibrate`` for the method.
+        """
+        self._require_distribution("calibrate")
+        target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
+        if not np.isfinite(target).all():
+            raise AshlarError("calibration targets must be finite.")
+        if self.task == "quantile":
+            mean, std = self._target_affine()
+            values = self._quantile_head_levels(X) * std + mean
+            if values.shape[0] != target.shape[0]:
+                raise ShapeError(f"X has {values.shape[0]} rows and y has {target.shape[0]}.")
+            self.calibration_ = cqr_calibration(values[:, 0], values[:, 2], target)
+            return self
+        draws = self.sample(X, n=n_samples, seed=seed)
+        if draws.shape[1] != target.shape[0]:
+            raise ShapeError(f"X has {draws.shape[1]} rows and y has {target.shape[0]}.")
+        self.calibration_ = pit_calibration(pit_values(draws, target, seed=seed))
+        return self
+
+    def _calibration(self, calibrated: bool | None):
+        calibration = getattr(self, "calibration_", None)
+        if calibrated is None:
+            return calibration
+        if calibrated and calibration is None:
+            raise AshlarError("this model has no calibration; call calibrate(X_holdout, y_holdout) first.")
+        return calibration if calibrated else None
+
+    def _quantile_head_levels(self, X):
+        """The quantile head's three levels averaged across members, standardized, ``(rows, 3)``."""
+        decoded, batch, members = _decode_members(self.task, jnp.asarray(self.predict_raw(X)))
+        return np.asarray(decoded, dtype=np.float64).reshape(batch, members, 3).mean(axis=1)
 
     def predict_uncertainty(self, X, n_samples: int = 200, seed: int = 0) -> dict:
         """Split each row's uncertainty into what the members agree on and what they do not.
@@ -1488,6 +1584,7 @@ class ASRModel(BaseEstimator):
             "soft_stages": self._soft_stage_count(),
             "target_mean": _json_ready(getattr(self, "target_mean_", None)),
             "target_std": _json_ready(getattr(self, "target_std_", None)),
+            "calibration": getattr(self, "calibration_", None),
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
             "numeric_scaling": self.numeric_scaling,
@@ -1584,6 +1681,7 @@ class ASRModel(BaseEstimator):
         estimator.history_ = payload["history"]
         estimator.target_mean_ = payload.get("target_mean")
         estimator.target_std_ = payload.get("target_std")
+        estimator.calibration_ = payload.get("calibration")
         estimator.reduction_ = payload["reduction"]
         estimator.n_features_in_ = len(encoder.feature_names)
         estimator.is_fitted_ = True
@@ -1663,7 +1761,8 @@ class ASRRegressor(_TaskModel):
 
     ``task`` stays a regression task: ``regression`` (default, point
     prediction), ``normal``, a distribution head (``gaussian``, ``mixture``,
-    ``flow``, ``histogram``, ``quantile``), or ``custom``.
+    ``flow``, ``histogram``, ``quantile``, ``student_t``), a count head
+    (``poisson``, ``negative_binomial``), or ``custom``.
     """
 
     _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS)
@@ -1835,6 +1934,12 @@ def _take_rows(names, columns, indices):
 def _entropy(probabilities):
     clipped = np.clip(probabilities, 1e-12, 1.0)
     return -np.sum(probabilities * np.log(clipped), axis=-1)
+
+
+def _check_counts(y, task):
+    array = np.asarray(y, dtype=np.float64)
+    if np.any(array < 0) or np.any(array != np.round(array)):
+        raise AshlarError(f"the {task} head models counts: y must hold non-negative whole numbers.")
 
 
 def _regression_target(y, n_events):
