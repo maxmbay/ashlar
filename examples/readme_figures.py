@@ -3,10 +3,14 @@
 ``tip-heads.png``: the average predictive density of four heads on held-out
 NYC taxi tips, over the tips themselves. ``taxi-zones.png``: the learned
 pickup-zone embedding, projected to two dimensions and colored by the
-median trip length from that zone.
+median trip length from that zone. ``fare-heads.png``: four heads on taxi
+fare under three conditions. ``forecast-fan.png``: hourly NYC taxi demand
+over a day held out of the fit. ``outcome-embeddings.png``: pickup-zone
+vectors beside the tip probability they produce.
 All reuse the tables and the fit settings of ``benchmark_readme.py``.
 
     JAX_PLATFORMS=cpu python examples/readme_figures.py
+    JAX_PLATFORMS=cpu python examples/readme_figures.py fan
 """
 
 from __future__ import annotations
@@ -284,61 +288,101 @@ def fare_heads() -> None:
     style._save(fig, "fare-heads.png")
 
 
-FAN_LOOKBACK = 60
-FAN_HORIZON = 21
+FAN_CYCLICAL = {"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25}
+FAN_TEST_SHARE = 6
+
+
+def taxi_demand_rows():
+    """Hourly NYC taxi pickups as a supervised table: a full day forecast from midnight.
+
+    Every row is one hour of one day. The features are the twenty-four hours of the
+    previous day, the same hour a week earlier, and the calendar, so one fit covers
+    all twenty-four steps and nothing after midnight of the forecast day is read.
+    """
+    import pandas as pd
+
+    frame = pd.read_csv(bench._path("nyc_taxi.csv"), parse_dates=["timestamp"])
+    series = frame.set_index("timestamp")["value"].resample("1h").sum()
+    values = series.to_numpy(np.float64)
+    stamps = series.index
+
+    rows, targets, days, hours = [], [], [], []
+    for i in range(168, len(values)):
+        start = i - stamps[i].hour
+        if start - 168 < 0:
+            continue
+        rows.append(np.concatenate([values[start - 24 : start], [values[i - 168]]]))
+        targets.append(values[i])
+        days.append(stamps[i].normalize())
+        hours.append(float(stamps[i].hour))
+
+    table = np.asarray(rows)
+    days = pd.DatetimeIndex(days)
+    columns = {f"lag{24 - k}": table[:, k] for k in range(24)}
+    columns["same_hour_last_week"] = table[:, 24]
+    columns["hour"] = np.asarray(hours)
+    columns["weekday"] = days.dayofweek.to_numpy(np.float64)
+    columns["day_of_year"] = days.dayofyear.to_numpy(np.float64)
+    return pd.DataFrame(columns), np.asarray(targets), days
 
 
 def forecast_fan() -> None:
-    """A 21-day fan from one origin, beside the 80% band's coverage over every test origin."""
+    """A 24-hour fan over one held-out day, beside the 80% band's coverage over every held-out day."""
     import pandas as pd
 
-    from ashlar import ASRForecaster
+    from ashlar import tabm_piecewise
 
-    values = pd.read_csv(bench._path("temperatures.csv"))["Temp"].to_numpy(np.float64)
-    cut = int(len(values) * 0.8)
-    model = ASRForecaster(lookback=FAN_LOOKBACK, horizon=FAN_HORIZON, head="mixture", random_state=0)
-    model.fit(values[:cut])
+    frame, y, days = taxi_demand_rows()
+    calendar = days.unique()
+    rng = np.random.default_rng(0)
+    chosen = rng.choice(calendar, size=len(calendar) // FAN_TEST_SHARE, replace=False)
+    held_out = set(pd.DatetimeIndex(chosen))
+    mask = np.array([day in held_out for day in days])
 
-    origins = np.arange(cut, len(values) - FAN_HORIZON)
-    histories = np.stack([values[origin - FAN_LOOKBACK : origin] for origin in origins])
-    truths = np.stack([values[origin : origin + FAN_HORIZON] for origin in origins])
-    draws = np.asarray(model.sample(histories, 0, n=400))
+    model = tabm_piecewise(task="mixture", cyclical=FAN_CYCLICAL, random_state=0)
+    model.fit(frame[~mask], y[~mask])
+    draws = np.asarray(model.sample(frame[mask], n=400, seed=0))
     low, high = np.percentile(draws, [10, 90], axis=0)
-    covered = float(np.mean((truths >= low) & (truths <= high)))
-    width = float(np.mean(high - low))
-    print(f"coverage_80 {covered:.4f} mean_width {width:.3f}", flush=True)
+    truth = y[mask]
+    median = np.median(draws, axis=0)
+    covered = float(np.mean((truth >= low) & (truth <= high)))
+    naive = frame[mask]["same_hour_last_week"].to_numpy(np.float64)
+    print(
+        f"test_days {len(held_out)} rows {int(mask.sum())} coverage_80 {covered:.4f} "
+        f"corr {np.corrcoef(median, truth)[0, 1]:.3f} MAE {np.mean(np.abs(median - truth)):.0f} "
+        f"seasonal_naive_MAE {np.mean(np.abs(naive - truth)):.0f}",
+        flush=True,
+    )
 
-    pick = int(np.argmax(origins >= cut + 400))
-    fan = draws[:, pick, :]
-    days = np.arange(1, FAN_HORIZON + 1)
+    # One held-out day, drawn in order: the twenty-four hours as the model saw them from midnight.
+    test_days = days[mask]
+    swing = {day: float(np.ptp(truth[test_days == day])) for day in sorted(held_out)}
+    full = [day for day in sorted(held_out) if int(np.sum(test_days == day)) == 24]
+    pick = max(full, key=lambda day: swing[day])
+    where = np.flatnonzero(test_days == pick)
+    order = np.argsort(frame[mask]["hour"].to_numpy()[where])
+    where = where[order]
+    fan = draws[:, where]
+
+    hours = np.arange(24)
     fig, ax = style._chart(
-        f"The 80% band holds {covered:.0%} of the days it forecast.",
-        "Melbourne daily minimum temperature, 21 days ahead from one origin. Bands are 400 draws from the mixture head.",
+        "Hourly taxi demand, forecast from midnight",
+        f"{pick:%A, %-d %B %Y}, a day held out of the fit. Bands are 400 draws; "
+        f"the 80% band holds {covered:.0%} of held-out hours.",
         height=7.6,
     )
-    past = np.arange(-21, 1)
-    ax.plot(past, values[origins[pick] - 21 : origins[pick] + 1], color=style.INK, linewidth=1.8, zorder=4)
-    # The fan starts at the last observed day, so the bands leave the history rather than float beside it.
-    last = float(values[origins[pick]])
-    joined = np.concatenate([[0], days])
     for lo, hi, alpha in ((10, 90, 0.16), (25, 75, 0.26)):
         band_low, band_high = np.percentile(fan, [lo, hi], axis=0)
-        ax.fill_between(
-            joined,
-            np.concatenate([[last], band_low]),
-            np.concatenate([[last], band_high]),
-            color=style.TEAL,
-            alpha=alpha,
-            linewidth=0,
-            zorder=2,
-        )
-    ax.plot(joined, np.concatenate([[last], np.median(fan, axis=0)]), color=style.TEAL, linewidth=2.2, zorder=5)
-    ax.plot(joined, np.concatenate([[last], truths[pick]]), color=style.CLAY, linewidth=1.8, zorder=6)
-    style._callout(ax, (days[-1], truths[pick][-1]), -26, 22, "what happened", ha="right")
-    style._callout(ax, (days[-1], float(np.median(fan, axis=0)[-1])), -26, -24, "median forecast", ha="right")
-    ax.set_xlabel("days ahead", fontproperties=style.AXIS, color=style.INK, labelpad=12)
-    ax.set_ylabel("°C", fontproperties=style.AXIS, color=style.INK, labelpad=12)
-    ax.axvline(0, color=style.HAIR, linewidth=1.2, zorder=1)
+        ax.fill_between(hours, band_low, band_high, color=style.TEAL, alpha=alpha, linewidth=0, zorder=2)
+    ax.plot(hours, np.median(fan, axis=0), color=style.TEAL, linewidth=2.2, zorder=5)
+    ax.plot(hours, truth[where], color=style.CLAY, linewidth=1.8, zorder=6)
+    peak = int(np.argmax(truth[where]))
+    style._callout(ax, (hours[peak], float(truth[where][peak])), 14, 18, "what happened", style.CLAY)
+    median_day = np.median(fan, axis=0)
+    style._callout(ax, (hours[11], float(median_day[11])), -14, -34, "median forecast", style.TEAL, ha="right", va="top")
+    ax.set_xlabel("hour of the day", fontproperties=style.AXIS, color=style.INK, labelpad=12)
+    ax.set_ylabel("pickups", fontproperties=style.AXIS, color=style.INK, labelpad=12)
+    ax.set_xticks(np.arange(0, 24, 3))
     style._save(fig, "forecast-fan.png")
 
 

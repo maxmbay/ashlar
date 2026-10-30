@@ -82,17 +82,30 @@ One fit per head on taxi fares, given the zones, the hour, the weekday, the pass
 
 ## Forecasting
 
+A series reaches Ashlar two ways. `ASRForecaster` reads a window of the series itself and emits the next steps:
+
 ```python
 from ashlar import ASRForecaster
 
-model = ASRForecaster(lookback=48, horizon=1, head="mixture").fit(series)
+model = ASRForecaster(lookback=48, horizon=24, head="mixture").fit(series)
 model.predict(history)                     # one point per horizon step
 model.sample(history, key, n=1000)         # draws
 ```
 
-![A 21-day forecast fan on Melbourne daily minimum temperature.](docs/images/forecast-fan.png)
+Or the series is already a table of lags and calendar columns, and every tabular head applies to it. `cyclical=` turns a calendar column into a sine and a cosine, so hour 23 sits beside hour 0 and days near each other in the year share what the model learns about them:
 
-The forecasters take the same heads by name, so a forecast is a distribution per step rather than a line. `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
+```python
+from ashlar import tabm_piecewise
+
+model = tabm_piecewise(task="mixture", cyclical={"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25})
+model.fit(lags, pickups)
+```
+
+![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](docs/images/forecast-fan.png)
+
+Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours.
+
+`ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](docs/forecast.md) covers both, call by call.
 
 ## Nested outcomes as a tree of labels
 
