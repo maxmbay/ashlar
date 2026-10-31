@@ -76,7 +76,11 @@ model.sample(X_new, n=1000)                 # draws by rows
 model.log_prob(X_new, y_new)                # log density of each observed value
 ```
 
-`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (fixed bins over ±4 standard deviations, 16 by default and `head_kwargs={"bins": 48}` for more), or `quantile` (pinball loss at 0.1, 0.5, and 0.9). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels.
+`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (fixed bins over ±4 standard deviations, 16 by default and `head_kwargs={"bins": 48}` for more), `quantile` (pinball loss at 0.1, 0.5, and 0.9), or `student_t` (learned degrees of freedom, above 2). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels. `predict` is the location for student_t.
+
+`poisson` and `negative_binomial` model a count on its raw scale, without z-scoring, and reject a target that is not non-negative whole numbers; `head_kwargs={"zero_inflated": True}` adds a structural-zero probability. Their draws and quantiles are whole numbers and `log_prob` is a log mass.
+
+`model.calibrate(X_holdout, y_holdout)` makes `predict_interval` and `predict_quantiles` split-conformal on rows the model did not train on, and `model.predict_uncertainty(X_new)` splits the spread of an ensemble backbone into `aleatoric` and `epistemic` parts. [docs/heads.md](heads.md#calibrated-intervals) covers both.
 
 A distribution task caps the global gradient norm at 1, because a density head on a target with a spike, such as tips that are exactly zero, can shrink a component until one minibatch's gradient blows up. `gradient_clip` sets the cap for any task, and `0` turns it off.
 

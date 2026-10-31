@@ -5,11 +5,11 @@
   </picture>
 </p>
 
-Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, or a set of quantiles.
+Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, or a Poisson or negative binomial for counts. Calibration makes its intervals hold the coverage they promise.
 
 It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
-It needs no GPU. Every number on this page was trained on a laptop CPU, where the default model fits two million rows in just a few minutes.
+It needs no GPU. Every number on this page was trained on a CPU, most of them on a laptop, where the default model fits two million rows in just a few minutes.
 
 ## Install
 
@@ -201,11 +201,12 @@ On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM o
 ## Documentation
 
 - [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): the four slots, and the research models beyond the defaults.
-- [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits.
+- [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits, calibrated intervals, and member uncertainty.
 - [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
 - [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
 - [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
+- [CHANGELOG.md](https://github.com/maxmbay/ashlar/blob/main/CHANGELOG.md): what changed in each release.
 
 ## Acknowledgements
 
