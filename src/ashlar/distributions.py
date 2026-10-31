@@ -942,3 +942,23 @@ def head_distribution(kind: str, flat, horizon: int = 1) -> Distribution:
     if kind == "quantile":
         return QuantileLevels(values=shaped(decoded), levels=tuple(QUANTILE_LEVELS))
     raise AshlarError(f"the {kind} head has no distribution.")
+
+
+def joint_normal_distribution(flat, n_events: int) -> LowRankMultivariateNormal:
+    """The joint normal of the ``multivariate_gaussian`` head from its flat projection ``batch + (width,)``.
+
+    The width is ``n_events * (2 + rank)``: locations, raw scales, then the
+    covariance factor row by row.
+    """
+    from ashlar.predict import positive_scale
+
+    flat = jnp.asarray(flat)
+    d = int(n_events)
+    width = flat.shape[-1]
+    if width < 2 * d or (width - 2 * d) % d:
+        raise ShapeError(f"a joint normal over {d} columns needs a width of {d} * (2 + rank); received {width}.")
+    rank = (width - 2 * d) // d
+    loc = flat[..., :d]
+    std = positive_scale(flat[..., d : 2 * d])
+    factor = flat[..., 2 * d :].reshape(flat.shape[:-1] + (d, rank))
+    return LowRankMultivariateNormal(loc, factor, jnp.square(std))

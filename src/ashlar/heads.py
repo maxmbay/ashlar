@@ -260,3 +260,44 @@ class DistributionHead(_EnsembleHead):
         del key
         self._check(hidden)
         return self.output(hidden)
+
+
+class MultivariateNormalHead(_EnsembleHead):
+    """Joint normal over ``n_events`` target columns. Output ``(batch, member, event * (2 + rank))``.
+
+    Per row and member: ``event`` locations, ``event`` raw scales, and an
+    ``event × rank`` covariance factor, so the covariance is ``W Wᵀ + diag(D)``
+    with ``D = (softplus(raw) + 1e-4)²``. ``rank`` (2 by default, at most the
+    number of columns) sets how many shared directions the columns can move
+    along together; ``rank=0`` makes them independent. The factor starts
+    small and nonzero, so a fit starts close to independent columns and
+    learns the dependence the data supports.
+    """
+
+    n_events: int = field(static=True)
+    rank: int = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, rank=None, **kwargs):
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"multivariate normal head received unknown arguments {sorted(kwargs)}.")
+        if n_events < 1:
+            raise ShapeError("n_events must be positive.")
+        rank = min(2, int(n_events)) if rank is None else int(rank)
+        if not 0 <= rank <= int(n_events):
+            raise ShapeError(f"rank must be between 0 and the number of target columns, {n_events}; received {rank}.")
+        loc_key, factor_key, bias_key = jax.random.split(key, 3)
+        scale = (1.0 / d_in) ** 0.5
+        moments = scale * jax.random.normal(loc_key, (k, d_in, 2 * n_events), dtype=jnp.float32)
+        factor = 0.01 * jax.random.normal(factor_key, (k, d_in, n_events * rank), dtype=jnp.float32)
+        factor_bias = 0.1 * jax.random.normal(bias_key, (k, n_events * rank), dtype=jnp.float32)
+        bias = jnp.concatenate([jnp.zeros((k, 2 * n_events), dtype=jnp.float32), factor_bias], axis=-1)
+        self.output = LinearEnsemble(weight=jnp.concatenate([moments, factor], axis=-1), bias=bias)
+        self.k = k
+        self.n_events = int(n_events)
+        self.rank = rank
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
