@@ -19,6 +19,18 @@ dist[:10]                            # the first ten rows, still a distribution
 
 `model.sample`, `model.log_prob`, `model.predict_quantiles`, `model.predict_interval`, and `model.calibrate` all read this object, so they agree with it and with each other.
 
+A univariate distribution also gives the probabilities a coarse label needs, in log space so they stay finite far into the tails:
+
+```python
+dist.log_cdf(t), dist.log_survival(t)            # log P(y <= t), log P(y > t)
+dist.log_cdf_left(t), dist.log_survival_left(t)  # log P(y < t), log P(y >= t); differ only at an atom
+dist.log_interval(a, b)                          # log P(a <= y <= b), closed at both ends
+dist.cdf_interval(a, b)                          # (P(y < a), P(y <= b)), where a coarse row's PIT lies
+dist.convolve_normal(s)                          # y plus normal noise of sd s: normal, mixture, affine
+```
+
+They are what [`ashlar.observed`](observed.md) trains and scores censored, interval, truncated, and noisy labels with.
+
 ## Shapes
 
 `batch_shape` indexes rows, and `event_shape` is the shape of one outcome: `()` for one number, `(d,)` for a joint outcome over `d` columns. A value passed to `log_prob` or `cdf` broadcasts against `batch_shape + event_shape`, and `sample(key, sample_shape)` returns `sample_shape + batch_shape + event_shape`. A quantile level broadcasts against `batch_shape`, so levels in a column give one row of quantiles per level:

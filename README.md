@@ -105,6 +105,22 @@ One fit per head on taxi fares, given the zones, the hour, the weekday, the pass
 
 `gaussian`, `mixture`, `flow`, `histogram`, `quantile`, and `student_t` for a number; `poisson` and `negative_binomial`, optionally zero-inflated, for a count (on hourly bike rentals the negative binomial's 80% interval holds 80% of counts, where LightGBM's Poisson objective holds 54%); `hurdle` for a target that is often exactly zero and otherwise a positive amount; `multivariate_gaussian` and `multivariate_flow` for several columns at once; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
 
+## Labels that say what was observed
+
+A day that sold out recorded the stock, not the demand. An income survey recorded a bracket, a lab a reading below its detection limit, a churn table customers who are still active, a ledger a weekly total for seven days. Pass a label from `ashlar.observed` as `y`, and the head trains on the probability it gives to what was actually seen:
+
+```python
+from ashlar import ASRRegressor, observed
+
+y = observed.censored(sales, sold_out)   # a sold-out day says demand >= sales
+model = ASRRegressor(task="negative_binomial").fit(X, y)
+model.predict_quantiles(X_new, [0.9])    # the 90% quantile of demand, not of sales
+```
+
+On simulated store-days where a third of the days sell out, the censored negative binomial matches a model trained on the true demand, which no shop has: the same log-likelihood, and a 90% quantile that is above the true demand on 90.9% of days. The same head fitted to sales as if they were demand manages 79.5%, and LightGBM's quantile regression on sales 73.0%. Stocking each day's 75% quantile costs 1.1% more than stocking the true one, against 7.9% for the fit on sales. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#labels-that-say-what-was-observed) has the tables.
+
+Ranges, rounding, truncation, survival times with delayed entry, known measurement noise, and totals over groups of rows work the same way, and compose. Every head with a CDF takes the first four, the normal-based heads take noise, and `gaussian`, `normal`, and `poisson` take totals. `calibrate` accepts censored rows, and a label is a NumPy array that scikit-learn splits like any `y`. [docs/observed.md](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md) has the detail.
+
 ## Forecasting
 
 A series reaches Ashlar two ways. `ASRForecaster` reads a window of the series itself and emits the next steps:
@@ -213,13 +229,14 @@ Ask for a distribution and the gap widens. CRPS scores a whole predictive distri
 
 The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
 
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, the hurdle head, joint demand across locations, and member uncertainty.
+On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, the hurdle head, censored and total labels, joint demand across locations, and member uncertainty.
 
 ## Documentation
 
 - [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): the four slots, and the research models beyond the defaults.
 - [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits, calibrated intervals, and member uncertainty.
 - [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md): the one distribution object every head returns, its shapes, and JAX transforms.
+- [docs/observed.md](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md): censored, interval, rounded, truncated, noisy, and total labels, and which heads take them.
 - [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
 - [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.

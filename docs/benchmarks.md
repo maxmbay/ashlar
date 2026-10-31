@@ -23,6 +23,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
 - [Hurdle head](#hurdle-head)
+- [Labels that say what was observed](#labels-that-say-what-was-observed)
 - [Joint demand across locations](#joint-demand-across-locations)
 - [Member uncertainty](#member-uncertainty)
 
@@ -439,6 +440,55 @@ From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi
 | `hurdle`, gamma | 0.867 ± 0.015 | **0.204 ± 0.003** | 93.2% | 4.00 |
 
 The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
+
+## Labels that say what was observed
+
+From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py). Two simulations, so the true values are known and every fit is scored against them. Five seeds, 0 to 4, mean ± standard deviation across seeds. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments. [docs/observed.md](observed.md) describes the labels.
+
+### Demand when shelves sell out
+
+The sales of 50 stores, with 20,000 store-days per seed: 14,000 to train, 2,000 to calibrate on, and 4,000 to test. Demand is negative binomial with dispersion 5. Its mean, mostly between 3 and 50 units, moves with the store, the weekday, a promotion, a discount, and the temperature. Each day's stock is the true mean times a lognormal forecast error (sd 0.25) times a safety factor between 1.0 and 1.5, so given the features it is independent of the demand. Between 32% and 33% of days sell out, losing 13% to 14% of demand. Each head is fitted four ways: on the true demand (an oracle no shop has), on sales as if they were demand, on only the days that did not sell out, and on `observed.censored(sales, sold_out)`. LightGBM's quantile regression on sales (400 trees, learning rate 0.05) is the tree baseline.
+
+- **NLL** is of the true demand. For the mixture it is the log probability of each count's rounding bin, `[d - 0.5, d + 0.5]`, so it is comparable with the count head's log mass.
+- **CRPS** is from 1,000 draws.
+- **Below the 90% quantile** is the share of test days whose true demand is at or below the predicted 90% quantile.
+- **Order cost** is the newsvendor cost of stocking each day's 75% quantile when a lost sale costs 3 and a leftover unit 1, in percent above stocking the true 75% quantile.
+- **Calibrated 80%** is after `calibrate` on the calibration days: on their true demand for the oracle, their censored labels for the censored fit, and their sales for the others.
+
+| Head | Trained on | NLL ↓ | CRPS ↓ | Below the 90% quantile | Order cost above best ↓ | Calibrated 80% holds | Seconds |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `negative_binomial` | true demand (oracle) | 3.251 ± 0.067 | 4.116 ± 0.265 | 90.8% ± 1.4% | 1.3 ± 0.5% | 83.0% ± 0.7% | 28 |
+| `negative_binomial` | sales as demand | 3.387 ± 0.085 | 4.296 ± 0.326 | 79.5% ± 1.6% | 7.9 ± 2.2% | 70.5% ± 1.2% | 22 |
+| `negative_binomial` | days not sold out | 3.541 ± 0.057 | 4.648 ± 0.305 | 72.0% ± 1.3% | 20.1 ± 2.4% | 70.0% ± 0.7% | 20 |
+| `negative_binomial` | censored | **3.251 ± 0.067** | **4.112 ± 0.271** | 90.9% ± 0.6% | **1.1 ± 0.4%** | 83.7% ± 0.5% | 49 |
+| `mixture` | true demand (oracle) | 3.260 ± 0.068 | 4.124 ± 0.272 | 89.0% ± 1.6% | 1.5 ± 0.8% | 79.7% ± 0.6% | 19 |
+| `mixture` | sales as demand | 3.489 ± 0.073 | 4.286 ± 0.304 | 75.8% ± 0.7% | 6.7 ± 0.9% | 65.8% ± 0.9% | 17 |
+| `mixture` | days not sold out | 3.637 ± 0.056 | 4.614 ± 0.299 | 69.2% ± 1.0% | 18.2 ± 0.9% | 65.6% ± 0.8% | 13 |
+| `mixture` | censored | 3.266 ± 0.065 | 4.132 ± 0.266 | 92.4% ± 0.9% | 1.9 ± 0.3% | 82.8% ± 1.1% | 18 |
+| LightGBM quantile | sales as demand | | | 73.0% ± 0.6% | 9.4 ± 0.5% | | |
+
+- **The censored fit matches the oracle.** With either head it scores within 0.006 nats of the fit trained on the true demand, and its orders cost as little, from sales alone. The spread across seeds is mostly the seeds' own data: within a seed, the censored and oracle negative binomials differ by at most 0.006 nats, in either direction.
+- **Fitting sales as demand learns demand that is too low.** Its 90% quantile is above the true demand on 76% to 80% of days, and stocking its 75% quantile costs 7% to 8% more than it should. LightGBM's quantile regression on sales is worse on both, because a tree has no way to know which days were capped.
+- **Dropping the sold-out days is the worst of all**, because what remains are the slow days: 69% to 72% below the 90% quantile, and orders that cost 18% to 20% too much.
+- **Calibration cannot repair a fit on capped data**, because the calibration days are capped too: calibrated on sales, the fits on sales hold 66% to 71% of true demand in an interval that promises 80%. Calibrated on censored labels, the censored fits hold 83% to 84%. A count's interval holds a little more than it promises, because it includes both end counts.
+- **The censored negative binomial trains in about 1.7 times the oracle's time**, since its survival function is an incomplete beta whose gradient in the dispersion is taken by finite differences. The mixture's censored fit costs nothing extra.
+
+### Daily values from weekly totals
+
+1,500 weeks of seven days, with only each week's sum recorded. A daily value has mean `10 + 3 x1 + 2 sin(3 x2)` and standard deviation 0.5, or 1.5 on the volatile days with `x2 > 0`. A daily count is Poisson with mean `exp(0.5 + 0.8 x1)`. The features change from day to day. Each head is fitted on the days themselves (the oracle), on `observed.total(weekly, week)`, and on each week's total spread evenly over its days (rounded for the count). Scored on 3,000 new days: the NLL of the true daily value, the root-mean-square error of the predicted mean against the true mean, the mean predicted standard deviation on calm and on volatile days, and the share of true values inside the uncalibrated 80% interval.
+
+| Head | Trained on | NLL ↓ | Mean error ↓ | SD, calm days (true 0.5) | SD, volatile days (true 1.5) | 80% interval holds | Seconds |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `gaussian` | the days (oracle) | 1.304 ± 0.014 | 0.102 ± 0.010 | 0.510 ± 0.010 | 1.491 ± 0.021 | 79.6% ± 0.6% | 23 |
+| `gaussian` | weekly totals | 1.429 ± 0.050 | 0.250 ± 0.055 | 0.809 ± 0.125 | 1.408 ± 0.082 | 83.4% ± 1.9% | 20 |
+| `gaussian` | total spread evenly | 4.295 ± 0.123 | 2.843 ± 0.056 | 1.218 ± 0.031 | 1.225 ± 0.019 | 38.9% ± 0.8% | 11 |
+| `poisson` | the days (oracle) | 1.591 ± 0.014 | 0.136 ± 0.014 | | | 91.8% ± 0.5% | 15 |
+| `poisson` | weekly totals | 1.596 ± 0.016 | 0.224 ± 0.049 | | | 91.7% ± 0.6% | 23 |
+| `poisson` | total spread evenly | 2.010 ± 0.019 | 1.500 ± 0.020 | | | 88.1% ± 0.6% | 14 |
+
+- **From totals alone, the Poisson head comes within 0.005 nats of the oracle.** It learns each day's rate from sums it never sees broken down.
+- **The gaussian learns each day's mean, and the spread only partly.** Its mean error is 0.25 against the oracle's 0.10, and it places the volatile days' spread nearly right (1.41), but it puts 0.81 on calm days whose spread is 0.5. A sum's variance blends seven days' variances, so from 1,500 sums the split between them is harder to learn than the means. Its 80% intervals hold 83%.
+- **Spreading a total evenly teaches every day its week's average**, which is wrong for each of them: an NLL of 4.3, means off by 2.8, and an interval that holds 39%.
 
 ## Joint demand across locations
 
