@@ -11,6 +11,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - **Joint outputs.** `task="multivariate_gaussian"` takes `y` with one column per outcome and predicts their joint normal, with a covariance `W Wᵀ + diag(D)` of learned rank (`head_kwargs={"rank": 2}` by default) that changes from row to row. It trains on the joint log density. `predict_dist` gives the joint distribution in the units of `y`; `marginals()` gives each column on its own, and `Independent(dist.marginals())` the same columns with the dependence dropped. `predict` returns every column's mean and `predict_quantiles` each column's quantiles, `(rows, columns, levels)`.
 - **Hurdle head.** `task="hurdle"` predicts the probability that `y` is exactly zero and, otherwise, a `lognormal` (default) or `gamma` amount (`head_kwargs={"severity": "gamma"}`), on the raw target. New `LogNormal`, `Gamma`, and `Hurdle` distributions. Calibration and quantiles handle the atom at zero.
 - `Distribution.cdf_left(y)`, `P(Y < y)`, so the randomized PIT works for any distribution with an atom.
+- `examples/joint_demand.py`: eight electricity clients forecast jointly a day ahead and scored at 25 rolling origins against the same marginals made independent, independent per-client heads, and independent heads with a fixed residual correlation. Its results are in the README and in [docs/benchmarks.md](docs/benchmarks.md#joint-demand-across-locations).
 
 ### Changed
 
@@ -20,6 +21,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - `predict_uncertainty` reads each member's variance in closed form instead of from draws; `n_samples` and `seed` are unused.
 - `predict_dist` on a `normal` model returns the new `Mixture` (or a `Normal` for `policy="mean_parameters"`) instead of `NormalMixture` and `MeanParameterNormal`. Those two classes still import. Its `mean()` and `variance()` are now `(rows,)` for one target column, not `(rows, 1)`.
 - `log_prob` and `sample` work on classifiers too: a log probability of the observed label, and drawn labels.
+- The calibrated-interval benchmark was rerun with exact quantiles; the `mixture` column moved by at most 0.9 points.
 
 ## 0.0.2 — 2026-10-30
 

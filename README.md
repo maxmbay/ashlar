@@ -133,6 +133,23 @@ Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and re
 
 `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md) covers both, call by call.
 
+## Several targets, one joint distribution
+
+`task="multivariate_gaussian"` takes one column per outcome and predicts how they vary together, with a covariance that changes from row to row. Draws from it are coherent scenarios, so a question about the columns together, such as a total, has an answer:
+
+```python
+import jax
+from ashlar import ASRRegressor
+
+model = ASRRegressor(task="multivariate_gaussian").fit(X, loads)   # one column per site
+draws = model.predict_dist(X_new).sample(jax.random.key(0), (4000,))
+p_over = (draws.sum(axis=-1) > capacity).mean(axis=0)              # P(total > capacity), per row
+```
+
+![The 80% band for the total load of eight clients, joint against independent, and the reliability of P(total > capacity).](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/joint-demand.png)
+
+Eight electricity clients, a day ahead, from the calendar and each client's load a day and a week earlier, at 25 rolling forecast origins of four held-out weeks each. Every client's own forecast is the same with or without the covariance; their total is not. The joint model's 80% interval for the total holds 81% of held-out hours, and the same model with its covariance dropped holds 72%, because errors that move together do not cancel. A fixed correlation fitted to the residuals of independent per-client models also reaches 81%, so on these loads most of the gain comes from modelling the dependence at all rather than from letting it change with the row. [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md#several-targets-at-once) has the API, and [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#joint-demand-across-locations) every score.
+
 ## Nested outcomes as a tree of labels
 
 Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
@@ -196,7 +213,7 @@ Ask for a distribution and the gap widens. CRPS scores a whole predictive distri
 
 The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
 
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, and member uncertainty.
+On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, the hurdle head, joint demand across locations, and member uncertainty.
 
 ## Documentation
 
