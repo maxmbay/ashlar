@@ -8,6 +8,9 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 - **One distribution object for every head.** `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` in the units of `y` for every task that has a likelihood: the distribution heads, `normal`, the count heads, and, as a `Categorical`, classification, ordinal, and tree models. It has explicit `batch_shape` and `event_shape`, `log_prob`, `sample`, `mean`, `variance`, and for one target column `cdf` and `quantile`. It is an Equinox module, so it passes through `jax.jit`, `jax.vmap`, and `jax.grad`, and the draws of the normal, Student-t, and flow heads are reparameterized. `dist[rows]` slices it like an array. [docs/distributions.md](docs/distributions.md) has the detail.
 - `ASRForecaster.predict_dist` and `ASRHistoryForecaster.predict_dist` return the same objects, one marginal per horizon step.
+- **Joint outputs.** `task="multivariate_gaussian"` takes `y` with one column per outcome and predicts their joint normal, with a covariance `W Wᵀ + diag(D)` of learned rank (`head_kwargs={"rank": 2}` by default) that changes from row to row. It trains on the joint log density. `predict_dist` gives the joint distribution in the units of `y`; `marginals()` gives each column on its own, and `Independent(dist.marginals())` the same columns with the dependence dropped. `predict` returns every column's mean and `predict_quantiles` each column's quantiles, `(rows, columns, levels)`.
+- **Hurdle head.** `task="hurdle"` predicts the probability that `y` is exactly zero and, otherwise, a `lognormal` (default) or `gamma` amount (`head_kwargs={"severity": "gamma"}`), on the raw target. New `LogNormal`, `Gamma`, and `Hurdle` distributions. Calibration and quantiles handle the atom at zero.
+- `Distribution.cdf_left(y)`, `P(Y < y)`, so the randomized PIT works for any distribution with an atom.
 
 ### Changed
 

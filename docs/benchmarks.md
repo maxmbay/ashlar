@@ -22,6 +22,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Forecast heads](#forecast-heads)
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
+- [Hurdle head](#hurdle-head)
 - [Member uncertainty](#member-uncertainty)
 
 ## How it was run
@@ -422,6 +423,19 @@ Bold is the best in its column per target; NLL ties within 0.01.
 - **Against the continuous heads it is close.** The `mixture` has the best CRPS on bike totals (16.34 against 16.55) and taxi pickups (310.8 against 314.7), within about one standard deviation across splits; the zero-inflated negative binomial has the best on casual riders (5.98 against 6.08). What the count heads add is a real probability for each count: whole-number draws and quantiles, a log mass you can compare across models, and the 9% of zero hours in the casual counts, which the negative binomial reproduces (9.2% of its draws are 0) and the mixture does not (0.0%).
 - **On abalone the count heads lose.** Rings vary less than their mean once the shell measurements are known, and neither a Poisson nor a negative binomial can be narrower than a Poisson. Their 80% intervals hold 96% of rings and are 70% wider than the mixture's. Use `gaussian` or `mixture` for an underdispersed count.
 - **Zero inflation helps only where there are zeros.** It ties the plain negative binomial on log mass everywhere and helps CRPS only on the casual counts.
+
+## Hurdle head
+
+From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi tips from the seaborn `taxis` table, 6,383 trips, 35.8% with no tip, payment type and total dropped. Five random 80/20 splits, seeds 0 to 4, mean ± standard error. Every model is `ASRRegressor(task=...)` with no other arguments. CRPS is from 2,000 draws of `predict_dist`; `P(no tip)` is `cdf(0)`, which for a smooth head is the mass it puts at or below zero; the interval is the uncalibrated 80% one.
+
+| Head | CRPS, $ ↓ | Brier of P(no tip) ↓ | 80% interval holds | Width, $ |
+|---|---:|---:|---:|---:|
+| `gaussian` | 0.936 ± 0.013 | 0.261 ± 0.005 | 79.4% | 4.03 |
+| `mixture` | **0.863 ± 0.022** | 0.239 ± 0.005 | 84.8% | 3.59 |
+| `hurdle`, lognormal | 0.892 ± 0.017 | 0.207 ± 0.002 | 94.5% | 4.13 |
+| `hurdle`, gamma | 0.867 ± 0.015 | **0.204 ± 0.003** | 93.2% | 4.00 |
+
+The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
 
 ## Member uncertainty
 

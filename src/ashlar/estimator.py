@@ -24,7 +24,16 @@ from ashlar._compat import renamed
 from ashlar._version import __version__
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
-from ashlar.heads import DistributionHead, LogitsHead, NormalHead, OrdinalHead, PointHead, SoftmaxHead
+from ashlar.heads import (
+    DistributionHead,
+    HurdleHead,
+    LogitsHead,
+    MultivariateNormalHead,
+    NormalHead,
+    OrdinalHead,
+    PointHead,
+    SoftmaxHead,
+)
 from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_state, load_opt_state
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
@@ -47,6 +56,8 @@ from ashlar.objectives import (
     classification_objective,
     normal_objective,
     make_distribution_objective,
+    make_hurdle_objective,
+    make_joint_objective,
     make_ordinal_expectation_objective,
     make_ordinal_histogram_objective,
     ordinal_objective,
@@ -70,6 +81,8 @@ from ashlar.distributions import (
     Normal,
     QuantileLevels,
     head_distribution,
+    hurdle_distribution,
+    joint_normal_distribution,
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
@@ -93,6 +106,8 @@ _HEADS = {
     "ordinal": OrdinalHead,
     "softmax": SoftmaxHead,
     "distribution": DistributionHead,
+    "multivariate_normal": MultivariateNormalHead,
+    "hurdle": HurdleHead,
     "tree": TreeHead,
 }
 _ORDINAL_HEADS = {"ordinal", "softmax"}
@@ -109,8 +124,14 @@ _LABELED_TASKS = {"classification", "ordinal"}
 _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
 DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
-_SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS)}
+# Tasks whose head is one joint distribution over several target columns.
+JOINT_TASKS = ("multivariate_gaussian",)
+_SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
+_TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
+# An exact zero or a positive severity, on the raw target.
+HURDLE_TASKS = ("hurdle",)
+_TASK_HEAD["hurdle"] = "hurdle"
 _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
 DISTRIBUTION_GRADIENT_CLIP = 1.0
@@ -210,7 +231,13 @@ class ASRModel(BaseEstimator):
     ----------
     task:
         ``regression``, ``classification``, ``ordinal``, ``normal``, ``tree``,
-        or ``custom``.
+        a distribution head, ``multivariate_gaussian``, or ``custom``.
+        ``multivariate_gaussian`` takes ``y`` with one column per outcome and
+        predicts their joint normal, with a covariance of learned rank
+        (``head_kwargs={"rank": 2}`` by default) that changes from row to row.
+        ``hurdle`` predicts an exact zero with one probability and a positive
+        amount from a ``lognormal`` (default) or ``gamma`` severity,
+        ``head_kwargs={"severity": "gamma"}``, on the raw target.
         ``ordinal`` is a cumulative logit over numeric labels sorted by value.
         ``tree`` is a nested outcome model over the ``tree`` argument: one
         softmax per internal node on the shared hidden state. See
@@ -392,10 +419,13 @@ class ASRModel(BaseEstimator):
         self.tree = tree
 
     def _check_config(self):
-        if self.task not in {"regression", "classification", "ordinal", "normal", "tree", "custom", *DISTRIBUTION_TASKS}:
+        if self.task not in {
+            "regression", "classification", "ordinal", "normal", "tree", "custom",
+            *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS,
+        }:
             raise AshlarError(
                 "task must be 'regression', 'classification', 'ordinal', 'normal', 'tree', 'custom', "
-                "or a distribution: 'gaussian', 'mixture', 'flow', 'histogram', 'quantile'."
+                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', or 'multivariate_gaussian'."
             )
         if (self.task == "tree") != (self.tree is not None):
             raise AshlarError("task='tree' needs a tree= outcome spec, and tree= only applies to task='tree'.")
@@ -461,7 +491,7 @@ class ASRModel(BaseEstimator):
             raise AshlarError("normal prediction_policy must be 'mixture' or 'mean_parameters'.")
         if self.task == "regression" and policy != "mean_members":
             raise AshlarError("regression prediction_policy must be 'mean_members'.")
-        if self.task in DISTRIBUTION_TASKS and policy != "mixture":
+        if self.task in {*DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} and policy != "mixture":
             raise AshlarError("a distribution task predicts the equal-weight mixture of its members: prediction_policy='mixture'.")
         if isinstance(self.backbone, str) and self.backbone not in _BACKBONES:
             raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', or a class.")
@@ -492,7 +522,7 @@ class ASRModel(BaseEstimator):
             return self.prediction_policy
         if self.task in _CLASSIFIER_TASKS:
             return "mean_probabilities"
-        if self.task == "normal" or self.task in DISTRIBUTION_TASKS:
+        if self.task in {"normal", *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS}:
             return "mixture"
         return "mean_members"
 
@@ -606,6 +636,8 @@ class ASRModel(BaseEstimator):
                 raise AshlarError("regression and normal targets must be finite. Mask missing outcomes in a custom objective.")
         if self.task in COUNT_HEADS:
             _check_counts(y_train_model, self.task)
+        if self.task in HURDLE_TASKS and np.any(np.asarray(y_train_model) < 0):
+            raise AshlarError("the hurdle head models an exact zero or a positive amount: y must be non-negative.")
         y_train_model = self._fit_target_scale(y_train_model)
         self.calibration_ = None
         categorical = list(self._categorical_names(names, columns))
@@ -649,7 +681,7 @@ class ASRModel(BaseEstimator):
             encoded.categorical_onehot,
             y_device,
             w_device,
-            objective=self._objective(classes),
+            objective=self._objective(classes, n_events),
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
@@ -713,7 +745,7 @@ class ASRModel(BaseEstimator):
         blow up the run. ``0`` turns the cap off for every task.
         """
         if self.gradient_clip is None:
-            return DISTRIBUTION_GRADIENT_CLIP if self.task in DISTRIBUTION_TASKS else None
+            return DISTRIBUTION_GRADIENT_CLIP if self.task in {*DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} else None
         value = float(self.gradient_clip)
         return None if value == 0.0 else value
 
@@ -806,7 +838,7 @@ class ASRModel(BaseEstimator):
             encoded.categorical_onehot,
             y_device,
             w_device,
-            objective=self._objective(classes),
+            objective=self._objective(classes, n_events),
             learning_rate=float(resolved["learning_rate"]),
             learning_rate_schedule=self.learning_rate_schedule,
             share_training_batches=bool(self.share_training_batches),
@@ -919,13 +951,17 @@ class ASRModel(BaseEstimator):
             )
         return weight
 
-    def _objective(self, class_values=None):
+    def _objective(self, class_values=None, n_events: int = 1):
         if self.objective is not None:
             return self.objective
         if self.task == "ordinal" and self.histogram_variance is not None:
             return make_ordinal_histogram_objective(float(self.histogram_variance))
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
+        if self.task in JOINT_TASKS:
+            return make_joint_objective(n_events)
+        if self.task in HURDLE_TASKS:
+            return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
         weight = self._expectation_weight()
         if weight is None:
@@ -941,6 +977,8 @@ class ASRModel(BaseEstimator):
         if self.task in COUNT_HEADS:
             mean = float(np.mean(np.asarray(y_encoded, dtype=np.float64)))
             kwargs["log_mean"] = float(np.log(max(mean, 1e-3)))
+        if self.task in HURDLE_TASKS:
+            kwargs["start"] = _hurdle_start(y_encoded, self._severity())
         if self.task == "tree":
             kwargs["tree"] = self.tree_.to_json()
             if kwargs.get("edge_prior") == "empirical":
@@ -972,6 +1010,9 @@ class ASRModel(BaseEstimator):
             if kwargs.get("edge_prior") == "empirical":
                 kwargs["edge_prior"] = None
         return kwargs
+
+    def _severity(self) -> str:
+        return str((self.head_kwargs or {}).get("severity", "lognormal"))
 
     def _bottleneck_width(self) -> int | None:
         value = self.bottleneck
@@ -1255,7 +1296,13 @@ class ASRModel(BaseEstimator):
 
     def predict(self, X):
         raw = self._raw_from_frame(X)
-        point = np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn))
+        if self.task in HURDLE_TASKS:
+            point = np.asarray(hurdle_distribution(raw, self._severity()).mean().mean(axis=1))
+        elif self.task in JOINT_TASKS:
+            # The mean of the member locations: the mean of the joint mixture.
+            point = np.asarray(jnp.mean(raw[..., : int(self.n_events_)], axis=1))
+        else:
+            point = np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn))
         if self.task in _SCALED_TASKS and self.standardize_target:
             point = point * np.asarray(self.target_std_, dtype=np.float64) + np.asarray(self.target_mean_, dtype=np.float64)
         if self.task in _LABELED_TASKS:
@@ -1375,6 +1422,8 @@ class ASRModel(BaseEstimator):
     def _target_affine(self):
         if self.target_mean_ is None:
             return 0.0, 1.0
+        if np.ndim(self.target_mean_):
+            return np.asarray(self.target_mean_, dtype=np.float64), np.asarray(self.target_std_, dtype=np.float64)
         return float(self.target_mean_), float(self.target_std_)
 
     def predict_dist(self, X, policy: str | None = None):
@@ -1427,7 +1476,11 @@ class ASRModel(BaseEstimator):
             if loc.shape[-1] == 1:
                 return Mixture(Normal(loc[..., 0], scale[..., 0]))
             return Mixture(Independent(Normal(loc, scale)))
-        if task == "quantile":
+        if task in HURDLE_TASKS:
+            return Mixture(hurdle_distribution(raw, self._severity()))
+        if task in JOINT_TASKS:
+            base = Mixture(joint_normal_distribution(raw, int(self.n_events_)))
+        elif task == "quantile":
             levels = head_distribution(task, raw).values.mean(axis=1)
             base = QuantileLevels(values=levels, levels=tuple(QUANTILE_LEVELS))
         else:
@@ -1483,16 +1536,26 @@ class ASRModel(BaseEstimator):
 
     def _univariate_dist(self, name: str):
         self._require_fitted()
-        if self.task not in {"normal", *DISTRIBUTION_TASKS} and not (self.task == "custom" and self.dist_fn is not None):
+        if self.task not in {"normal", *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} and not (
+            self.task == "custom" and self.dist_fn is not None
+        ):
             raise AshlarError(f"{name} needs a distribution task: {', '.join(DISTRIBUTION_TASKS)}.")
         if self.task == "normal" and int(self.n_events_) != 1:
             raise AshlarError(f"{name} reads one target column; this model has {self.n_events_}.")
 
     def _quantiles(self, X, levels, n_samples: int, seed: int) -> np.ndarray:
-        """Quantiles of ``predict_dist(X)``, shape ``(rows, len(levels))``. Exact where the family has a quantile."""
+        """Quantiles of ``predict_dist(X)``, shape ``(rows, len(levels))``. Exact where the family has a quantile.
+
+        A joint outcome gives the quantiles of each column's marginal, ``(rows, columns, len(levels))``.
+        """
         q = jnp.asarray(levels, dtype=jnp.float32)[:, None]
         pieces = []
         for _start, dist in self._dist_chunks(X):
+            if dist.event_shape:
+                marginal = dist.marginals()
+                values = np.asarray(_jit_quantile()(marginal, q[..., None]), dtype=np.float64)
+                pieces.append(np.moveaxis(values, 0, -1))
+                continue
             try:
                 pieces.append(np.asarray(_jit_quantile()(dist, q), dtype=np.float64).T)
             except NotImplementedError:
@@ -1574,6 +1637,8 @@ class ASRModel(BaseEstimator):
         custom distribution without a CDF, whose PIT is then read from draws.
         """
         self._univariate_dist("calibrate")
+        if self.task in JOINT_TASKS:
+            raise AshlarError("calibrate reads one target column; a joint model's columns are calibrated together, not yet supported.")
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if not np.isfinite(target).all():
             raise AshlarError("calibration targets must be finite.")
@@ -1651,9 +1716,28 @@ class ASRModel(BaseEstimator):
             members = np.asarray(raw[..., 0], dtype=np.float64)
         elif self.task in DISTRIBUTION_TASKS:
             members = np.asarray(_member_points(self.task, raw), dtype=np.float64)
+        elif self.task in HURDLE_TASKS:
+            members = hurdle_distribution(raw, self._severity())
+            epistemic = np.asarray(members.mean(), dtype=np.float64).std(axis=1)
+            aleatoric = np.sqrt(np.asarray(members.variance(), dtype=np.float64).mean(axis=1))
+            return {
+                "epistemic": epistemic,
+                "aleatoric": aleatoric,
+                "total": np.sqrt(np.square(epistemic) + np.square(aleatoric)),
+            }
+        elif self.task in JOINT_TASKS:
+            members = joint_normal_distribution(raw, int(self.n_events_))
+            std = np.asarray(self.target_std_, dtype=np.float64)
+            epistemic = np.asarray(members.mean(), dtype=np.float64).std(axis=1) * std
+            aleatoric = np.sqrt(np.asarray(members.variance(), dtype=np.float64).mean(axis=1)) * std
+            return {
+                "epistemic": epistemic,
+                "aleatoric": aleatoric,
+                "total": np.sqrt(np.square(epistemic) + np.square(aleatoric)),
+            }
         else:
             raise AshlarError(
-                "predict_uncertainty is for regression, distribution, classification, and ordinal tasks."
+                "predict_uncertainty is for regression, distribution, joint, classification, and ordinal tasks."
             )
         mean, std = self._target_affine()
         epistemic = members.std(axis=1) * std
@@ -1883,10 +1967,12 @@ class ASRRegressor(_TaskModel):
     ``task`` stays a regression task: ``regression`` (default, point
     prediction), ``normal``, a distribution head (``gaussian``, ``mixture``,
     ``flow``, ``histogram``, ``quantile``, ``student_t``), a count head
-    (``poisson``, ``negative_binomial``), or ``custom``.
+    (``poisson``, ``negative_binomial``), ``hurdle`` for an exact zero or a
+    positive amount, ``multivariate_gaussian`` for several target columns at
+    once, or ``custom``.
     """
 
-    _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS)
+    _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS)
     _defaults = {"task": "regression"}
 
 
@@ -2057,6 +2143,23 @@ def _entropy(probabilities):
     return -np.sum(probabilities * np.log(clipped), axis=-1)
 
 
+def _hurdle_start(y, severity: str) -> list[float]:
+    """Initial hurdle bias: the training share of zeros, and the severity fitted to the positive values."""
+    values = np.asarray(y, dtype=np.float64).reshape(-1)
+    positive = values[values > 0]
+    share = float(np.clip(np.mean(values == 0), 1e-3, 1 - 1e-3))
+    logit = float(np.log(share) - np.log1p(-share))
+    if positive.size < 2:
+        return [logit, 0.0, 0.5]
+    if severity == "lognormal":
+        logs = np.log(positive)
+        location, spread = float(logs.mean()), float(max(logs.std(), 1e-2))
+    else:
+        location = float(np.log(positive.mean()))
+        spread = float(np.clip(positive.mean() ** 2 / max(positive.var(), 1e-12), 1e-2, 1e3))
+    return [logit, location, float(np.log(np.expm1(spread)))]
+
+
 def _check_counts(y, task):
     array = np.asarray(y, dtype=np.float64)
     if np.any(array < 0) or np.any(array != np.round(array)):
@@ -2166,6 +2269,8 @@ def _json_ready(value):
         return {str(key): _json_ready(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_ready(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_ready(value.tolist())
     if isinstance(value, (bool, str)) or value is None:
         return value
     if isinstance(value, (int, np.integer)):
