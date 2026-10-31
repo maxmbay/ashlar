@@ -12,6 +12,9 @@
 | Heavy tails, outliers you should not chase | `student_t` | A location, a scale, and degrees of freedom (above 2, so the variance is finite) per row. The point is the location, not the mean. |
 | Counts: visits, claims, goals | `poisson` | One rate per row. The target stays raw and must hold non-negative whole numbers. |
 | Counts with more spread than their mean | `negative_binomial` | A mean and a dispersion per row, the variance being mean + dispersion × mean². |
+| Often exactly zero, otherwise a positive amount | `hurdle` | The probability of zero, plus a lognormal or gamma amount. Tips, claims, rainfall. |
+| Several columns that move together | `multivariate_gaussian` | A joint normal with a learned low-rank covariance, so totals and joint events come out right. |
+| Several columns whose dependence is curved, skewed, or heavier in the tails | `multivariate_flow` | An autoregressive flow: each column's whole conditional shape can change with the columns before it. |
 
 ```python
 from ashlar import ASRRegressor
@@ -21,7 +24,10 @@ model.predict(X_new)                       # the mean
 model.predict_quantiles(X_new, [0.1, 0.9])
 model.sample(X_new, n=1000)                # draws, on the scale of y
 model.log_prob(X_new, y_new)               # log density of what happened
+model.predict_dist(X_new)                  # all of the above as one JAX object
 ```
+
+Every head returns the same kind of object from `predict_dist`, with `log_prob`, `sample`, moments, a CDF, and quantiles. [docs/distributions.md](distributions.md) describes it.
 
 On hourly bike rentals and NYC taxi pickups, both overdispersed, the negative binomial's 80% interval holds 76% to 82% of held-out counts where a Poisson's, Ashlar's or LightGBM's, holds 24% to 62%, and its log mass is far better (4.50 against LightGBM's 6.52 on bike rentals). The `mixture` stays as good on CRPS for large counts; the count heads win where the counts are small and zeros matter, and lose on an underdispersed count such as abalone rings, where `gaussian` or `mixture` is the better choice. [docs/benchmarks.md](benchmarks.md#count-heads) has the tables.
 

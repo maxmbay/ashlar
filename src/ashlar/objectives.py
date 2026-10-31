@@ -286,3 +286,43 @@ def make_distribution_objective(kind: str):
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
 
     return objective
+
+
+def make_joint_objective(n_events: int, family: str = "normal"):
+    """Mean member negative log-density of a joint head, weighted over rows.
+
+    ``family`` is ``normal`` for ``multivariate_gaussian`` or ``flow`` for
+    ``multivariate_flow``.
+
+    ``y`` is the standardized ``(batch, event)`` target. The density is the
+    full joint one, so the loss rewards getting the dependence between
+    columns right, not only each column.
+    """
+    from ashlar.distributions import joint_flow_distribution, joint_normal_distribution
+
+    build = joint_flow_distribution if family == "flow" else joint_normal_distribution
+
+    def objective(raw, y, sample_weight):
+        context = raw[0] if family == "flow" else raw
+        if context.ndim != 3:
+            raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
+        target = _target_events(y, int(n_events))
+        dist = build(raw, n_events)
+        losses = -dist.log_prob(target[:, None, :])
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
+
+
+def make_hurdle_objective(severity: str):
+    """Mean member negative log-likelihood of the hurdle head on the raw target, weighted over rows."""
+    from ashlar.distributions import hurdle_distribution
+
+    def objective(raw, y, sample_weight):
+        if raw.ndim != 3:
+            raise ShapeError(f"hurdle head output must be (batch, member, 3); received {raw.shape}.")
+        value = jnp.asarray(y, dtype=raw.dtype).reshape(-1)
+        losses = -hurdle_distribution(raw, severity).log_prob(value[:, None])
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective

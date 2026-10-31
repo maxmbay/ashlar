@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, or a Poisson or negative binomial for counts. Calibration makes its intervals hold the coverage they promise.
+Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, a Poisson or negative binomial for counts, a hurdle for targets that are often zero, or a joint distribution over several targets. Calibration makes its intervals hold the coverage they promise.
 
 It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
@@ -103,7 +103,7 @@ The distribution is conditional on the row, so one fitted model returns a differ
 
 One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. A different head wins each condition, by held-out log density: the `mixture` on Manhattan hops, the `flow` on the heavier Brooklyn tail, and the `histogram` on the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, because a spike at one value is what a smooth density cannot make. Its resolution is yours: `head_kwargs={"bins": 48}`, 16 by default.
 
-`gaussian`, `mixture`, `flow`, `histogram`, `quantile`, and `student_t` for a number; `poisson` and `negative_binomial`, optionally zero-inflated, for a count (on hourly bike rentals the negative binomial's 80% interval holds 80% of counts, where LightGBM's Poisson objective holds 54%); `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
+`gaussian`, `mixture`, `flow`, `histogram`, `quantile`, and `student_t` for a number; `poisson` and `negative_binomial`, optionally zero-inflated, for a count (on hourly bike rentals the negative binomial's 80% interval holds 80% of counts, where LightGBM's Poisson objective holds 54%); `hurdle` for a target that is often exactly zero and otherwise a positive amount; `multivariate_gaussian` and `multivariate_flow` for several columns at once; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
 
 ## Forecasting
 
@@ -132,6 +132,23 @@ model.fit(lags, pickups)
 Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours.
 
 `ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md) covers both, call by call.
+
+## Several targets, one joint distribution
+
+`task="multivariate_gaussian"` takes one column per outcome and predicts how they vary together, with a covariance that changes from row to row. Draws from it are coherent scenarios, so a question about the columns together, such as a total, has an answer:
+
+```python
+import jax
+from ashlar import ASRRegressor
+
+model = ASRRegressor(task="multivariate_gaussian").fit(X, loads)   # one column per site
+draws = model.predict_dist(X_new).sample(jax.random.key(0), (4000,))
+p_over = (draws.sum(axis=-1) > capacity).mean(axis=0)              # P(total > capacity), per row
+```
+
+![The 80% band for the total load of eight clients, joint against independent, and the reliability of P(total > capacity).](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/joint-demand.png)
+
+Eight electricity clients, a day ahead, from the calendar and each client's load a day and a week earlier, at 25 rolling forecast origins of four held-out weeks each. Every client's own forecast is the same with or without the covariance; their total is not. The joint model's 80% interval for the total holds 81% of held-out hours, and the same model with its covariance dropped holds 72%, because errors that move together do not cancel. A fixed correlation fitted to the residuals of independent per-client models also reaches 81%, so on these loads most of the gain comes from modelling the dependence at all rather than from letting it change with the row. When the dependence is curved or skewed rather than a correlation, `task="multivariate_flow"` takes the same `y` and fits an autoregressive flow over the columns. [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md#several-targets-at-once) has the API, and [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#joint-demand-across-locations) every score.
 
 ## Nested outcomes as a tree of labels
 
@@ -196,12 +213,13 @@ Ask for a distribution and the gap widens. CRPS scores a whole predictive distri
 
 The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
 
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, and member uncertainty.
+On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, the hurdle head, joint demand across locations, and member uncertainty.
 
 ## Documentation
 
 - [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): the four slots, and the research models beyond the defaults.
 - [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits, calibrated intervals, and member uncertainty.
+- [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md): the one distribution object every head returns, its shapes, and JAX transforms.
 - [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
 - [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.

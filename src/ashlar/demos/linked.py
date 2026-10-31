@@ -13,7 +13,8 @@ import jax.numpy as jnp
 from equinox import Module, field
 
 from ashlar.heads import LogitsHead, NormalHead
-from ashlar.predict import distribution_from_normal_raw, positive_scale
+from ashlar.distributions import Mixture, Normal
+from ashlar.predict import positive_scale
 from ashlar.weights import weighted_mean
 
 
@@ -58,4 +59,6 @@ def linked_point(raw):
 
 
 def linked_dist(raw):
-    return distribution_from_normal_raw(raw["normal"], "mixture")
+    """The continuous outcome as the equal-weight mixture of the members' normals."""
+    normal = raw["normal"][..., 0, :]
+    return Mixture(Normal(normal[..., 0], positive_scale(normal[..., 1])))

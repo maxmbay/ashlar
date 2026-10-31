@@ -260,3 +260,124 @@ class DistributionHead(_EnsembleHead):
         del key
         self._check(hidden)
         return self.output(hidden)
+
+
+class MultivariateNormalHead(_EnsembleHead):
+    """Joint normal over ``n_events`` target columns. Output ``(batch, member, event * (2 + rank))``.
+
+    Per row and member: ``event`` locations, ``event`` raw scales, and an
+    ``event × rank`` covariance factor, so the covariance is ``W Wᵀ + diag(D)``
+    with ``D = (softplus(raw) + 1e-4)²``. ``rank`` (2 by default, at most the
+    number of columns) sets how many shared directions the columns can move
+    along together; ``rank=0`` makes them independent. The factor starts
+    small and nonzero, so a fit starts close to independent columns and
+    learns the dependence the data supports.
+    """
+
+    n_events: int = field(static=True)
+    rank: int = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, rank=None, **kwargs):
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"multivariate normal head received unknown arguments {sorted(kwargs)}.")
+        if n_events < 1:
+            raise ShapeError("n_events must be positive.")
+        rank = min(2, int(n_events)) if rank is None else int(rank)
+        if not 0 <= rank <= int(n_events):
+            raise ShapeError(f"rank must be between 0 and the number of target columns, {n_events}; received {rank}.")
+        loc_key, factor_key, bias_key = jax.random.split(key, 3)
+        scale = (1.0 / d_in) ** 0.5
+        moments = scale * jax.random.normal(loc_key, (k, d_in, 2 * n_events), dtype=jnp.float32)
+        factor = 0.01 * jax.random.normal(factor_key, (k, d_in, n_events * rank), dtype=jnp.float32)
+        factor_bias = 0.1 * jax.random.normal(bias_key, (k, n_events * rank), dtype=jnp.float32)
+        bias = jnp.concatenate([jnp.zeros((k, 2 * n_events), dtype=jnp.float32), factor_bias], axis=-1)
+        self.output = LinearEnsemble(weight=jnp.concatenate([moments, factor], axis=-1), bias=bias)
+        self.k = k
+        self.n_events = int(n_events)
+        self.rank = rank
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
+
+
+class MultivariateFlowHead(_EnsembleHead):
+    """Conditional masked autoregressive flow over ``n_events`` target columns.
+
+    Output ``(context, w_in, w_out)``, read by
+    ``ashlar.distributions.AutoregressiveFlow``: a per-row context
+    ``(batch, member, depth * width)`` from the trunk, and masked network
+    weights shared by every row. ``hidden`` (64 by default) is the masked
+    network's width and ``depth`` (1 by default) the number of autoregressive
+    blocks, the column order reversed in every other one. The context starts
+    near zero, which is the standard normal on the standardized target.
+    """
+
+    w_in: jax.Array
+    w_out: jax.Array
+    n_events: int = field(static=True)
+    depth: int = field(static=True)
+    hidden: int = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, depth=1, hidden=64, **kwargs):
+        from ashlar.distributions import autoregressive_context_width
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"multivariate flow head received unknown arguments {sorted(kwargs)}.")
+        if n_events < 1:
+            raise ShapeError("n_events must be positive.")
+        if int(depth) < 1 or int(hidden) < 1:
+            raise ShapeError(f"depth and hidden must be at least 1; received {depth} and {hidden}.")
+        d, depth, hidden = int(n_events), int(depth), int(hidden)
+        width = autoregressive_context_width(d, hidden)
+        out_key, in_key, made_key = jax.random.split(key, 3)
+        self.output = LinearEnsemble(
+            weight=0.01 * jax.random.normal(out_key, (k, d_in, depth * width), dtype=jnp.float32),
+            bias=jnp.zeros((k, depth * width), dtype=jnp.float32),
+        )
+        self.w_in = jax.random.normal(in_key, (k, depth, hidden, d), dtype=jnp.float32) / max(d, 1) ** 0.5
+        self.w_out = 0.01 * jax.random.normal(made_key, (k, depth, width - hidden, hidden), dtype=jnp.float32)
+        self.k = k
+        self.n_events, self.depth, self.hidden = d, depth, hidden
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden), self.w_in, self.w_out
+
+
+class HurdleHead(_EnsembleHead):
+    """Probability of an exact zero plus a positive severity. Output ``(batch, member, 3)``.
+
+    The three outputs are the zero logit and the severity's two parameters,
+    read by ``ashlar.distributions.hurdle_distribution``. ``severity`` is
+    ``lognormal`` (default) or ``gamma``. ``start`` is the initial bias; the
+    estimator sets it from the training target, so the fit starts at the
+    observed share of zeros and the spread of the positive values.
+    """
+
+    severity: str = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, severity="lognormal", start=(0.0, 0.0, 0.0), **kwargs):
+        from ashlar.distributions import HURDLE_SEVERITIES
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"hurdle head received unknown arguments {sorted(kwargs)}.")
+        if n_events != 1:
+            raise ShapeError("a hurdle head models one target column.")
+        if severity not in HURDLE_SEVERITIES:
+            raise ShapeError(f"hurdle severity must be one of {HURDLE_SEVERITIES}; received {severity!r}.")
+        weight = 0.01 * jax.random.normal(key, (k, d_in, 3), dtype=jnp.float32)
+        bias = jnp.broadcast_to(jnp.asarray(start, dtype=jnp.float32), (k, 3))
+        self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
+        self.k = k
+        self.severity = severity
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
