@@ -2,6 +2,22 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Added
+
+- **One distribution object for every head.** `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` in the units of `y` for every task that has a likelihood: the distribution heads, `normal`, the count heads, and, as a `Categorical`, classification, ordinal, and tree models. It has explicit `batch_shape` and `event_shape`, `log_prob`, `sample`, `mean`, `variance`, and for one target column `cdf` and `quantile`. It is an Equinox module, so it passes through `jax.jit`, `jax.vmap`, and `jax.grad`, and the draws of the normal, Student-t, and flow heads are reparameterized. `dist[rows]` slices it like an array. [docs/distributions.md](docs/distributions.md) has the detail.
+- `ASRForecaster.predict_dist` and `ASRHistoryForecaster.predict_dist` return the same objects, one marginal per horizon step.
+
+### Changed
+
+- `sample`, `log_prob`, `predict_quantiles`, `predict_interval`, and `calibrate` now read `predict_dist`, so they agree by construction.
+- `predict_quantiles` and `predict_interval` are exact instead of read from 1,000 draws: closed form for the gaussian, flow, and histogram heads, and bisection on the CDF of the member mixture otherwise. They no longer depend on `n_samples` or `seed`, which are kept for custom distributions without a quantile.
+- `calibrate` computes each held-out row's PIT from the CDF instead of ranking it among draws, randomized over the jump for a count head.
+- `predict_uncertainty` reads each member's variance in closed form instead of from draws; `n_samples` and `seed` are unused.
+- `predict_dist` on a `normal` model returns the new `Mixture` (or a `Normal` for `policy="mean_parameters"`) instead of `NormalMixture` and `MeanParameterNormal`. Those two classes still import. Its `mean()` and `variance()` are now `(rows,)` for one target column, not `(rows, 1)`.
+- `log_prob` and `sample` work on classifiers too: a log probability of the observed label, and drawn labels.
+
 ## 0.0.2 — 2026-10-30
 
 ### Added

@@ -54,7 +54,6 @@ from ashlar.objectives import (
 )
 from ashlar.calibrate import (
     check_coverage,
-    draw_interval,
     cqr_calibration,
     cqr_margin,
     interval_levels,
@@ -62,8 +61,18 @@ from ashlar.calibrate import (
     pit_values,
     recalibrated_levels,
 )
-from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, log_density, point_values, sample_values
-from ashlar.predict import distribution_from_normal_raw, mean_logits, mean_probabilities, split_normal_parameters
+from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, point_values
+from ashlar.distributions import (
+    AffineTransformed,
+    Categorical,
+    Independent,
+    Mixture,
+    Normal,
+    QuantileLevels,
+    head_distribution,
+    randomized_pit,
+)
+from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
@@ -161,12 +170,33 @@ def _member_points(task, raw):
     return point_values(task, decoded).reshape(batch, members)
 
 
-def _dist_from_raw(task, policy, raw, dist_fn):
-    if task == "normal":
-        return distribution_from_normal_raw(raw, policy)
-    if dist_fn is None:
-        raise AshlarError("predict_dist requires a normal task or a custom dist_fn.")
-    return dist_fn(raw)
+def _events(dist):
+    """A normal over ``(batch, event)``: univariate for one event, ``Independent`` for several."""
+    if dist.batch_shape[-1] == 1:
+        return dist[:, 0]
+    return Independent(dist)
+
+
+_QUANTILE = None
+_PIT = None
+
+
+def _jit_quantile():
+    global _QUANTILE
+    if _QUANTILE is None:
+        import equinox as eqx
+
+        _QUANTILE = eqx.filter_jit(lambda dist, q: dist.quantile(q))
+    return _QUANTILE
+
+
+def _jit_pit():
+    global _PIT
+    if _PIT is None:
+        import equinox as eqx
+
+        _PIT = eqx.filter_jit(randomized_pit)
+    return _PIT
 
 
 class ASRModel(BaseEstimator):
@@ -1347,48 +1377,143 @@ class ASRModel(BaseEstimator):
             return 0.0, 1.0
         return float(self.target_mean_), float(self.target_std_)
 
+    def predict_dist(self, X, policy: str | None = None):
+        """The predictive distribution of every row, in the units of ``y``.
+
+        One object for every head, an ``ashlar.distributions.Distribution``
+        with ``batch_shape == (rows,)``: ``log_prob``, ``sample``, ``mean``,
+        ``variance``, and, for one target column, ``cdf`` and ``quantile``.
+        It is a JAX pytree, so it passes through ``jax.jit``, ``jax.vmap``,
+        and ``jax.grad``. ``sample``, ``log_prob``, ``predict_quantiles``,
+        ``predict_interval``, and ``calibrate`` all read it.
+
+        - A distribution head is the equal-weight ``Mixture`` of its members,
+          put back in the units of ``y`` by an ``AffineTransformed`` when the
+          target was standardized.
+        - ``normal``: the member mixture, or with ``policy="mean_parameters"``
+          one normal whose location and scale are the member means.
+        - ``classification``, ``ordinal``, and ``tree``: a ``Categorical`` over
+          ``classes_`` (the leaves, for a tree), its values class indices.
+        - ``custom``: whatever ``dist_fn(raw)`` returns.
+        """
+        return self._dist_from_raw(self._raw_from_frame(X), policy)
+
+    def _dist_from_raw(self, raw, policy: str | None = None):
+        task = self.task
+        policy = self._policy() if policy is None else policy
+        if task == "custom":
+            if self.dist_fn is None:
+                raise AshlarError("predict_dist on a custom task requires dist_fn(raw) -> distribution.")
+            return self.dist_fn(raw)
+        if task == "regression":
+            raise AshlarError(
+                "the regression task predicts a point and has no distribution. Use a distribution task such as "
+                "task='gaussian' or task='mixture'."
+            )
+        if task in _CLASSIFIER_TASKS:
+            if task == "classification" and policy == "mean_logits":
+                return Categorical(logits=jnp.mean(raw, axis=1))
+            probabilities = _point_from_raw(task, policy, raw, self.point_fn)
+            if task == "tree":
+                probabilities = probabilities[:, list(self.tree_.leaves)]
+            return Categorical(probs=probabilities)
+        if task == "normal":
+            loc, scale = split_normal_parameters(raw)
+            if policy == "mean_parameters":
+                loc, scale = jnp.mean(loc, axis=1), jnp.mean(scale, axis=1)
+                return _events(Normal(loc, scale))
+            if policy != "mixture":
+                raise AshlarError("normal prediction policy must be 'mixture' or 'mean_parameters'.")
+            if loc.shape[-1] == 1:
+                return Mixture(Normal(loc[..., 0], scale[..., 0]))
+            return Mixture(Independent(Normal(loc, scale)))
+        if task == "quantile":
+            levels = head_distribution(task, raw).values.mean(axis=1)
+            base = QuantileLevels(values=levels, levels=tuple(QUANTILE_LEVELS))
+        else:
+            base = Mixture(head_distribution(task, raw))
+        if self.target_mean_ is None:
+            return base
+        return AffineTransformed(base, self.target_mean_, self.target_std_)
+
+    def _dist_chunks(self, X):
+        """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory."""
+        dist = self.predict_dist(X)
+        rows = int(dist.batch_shape[0])
+        for start in range(0, rows, 4096):
+            yield start, dist[start : start + 4096]
+
     def sample(self, X, n: int = 100, seed: int = 0):
-        """``n`` draws per row from the predictive distribution, shape ``(n, rows)``, on the scale of ``y``.
+        """``n`` draws per row from ``predict_dist(X)``, shape ``(n, rows)``, in the units of ``y``.
 
         Each draw picks one member uniformly, then draws from that member's
-        distribution, so the draws follow the equal-weight member mixture.
+        distribution, so the draws follow the equal-weight member mixture. A
+        classifier returns labels from ``classes_``.
         """
-        self._require_distribution("sample", density=True)
-        raw = np.asarray(self.predict_raw(X))
-        mean, std = self._target_affine()
+        self._require_fitted()
+        if self.task == "quantile":
+            raise AshlarError("the quantile head has three levels, not a density, so it has no sample.")
         key = jax.random.PRNGKey(int(seed))
         pieces = []
-        for start in range(0, raw.shape[0], 4096):
-            key, member_key, draw_key = jax.random.split(key, 3)
-            block = jnp.asarray(raw[start : start + 4096])
-            rows, members, width = block.shape
-            choice = jax.random.randint(member_key, (int(n), rows), 0, members)
-            picked = jnp.take_along_axis(block[None], choice[..., None, None], axis=2)[:, :, 0, :]
-            decoded = decode(self.task, picked.reshape(int(n) * rows, width), 1)
-            draws = sample_values(self.task, decoded, draw_key, 1).reshape(int(n), rows)
-            pieces.append(np.asarray(draws, dtype=np.float64))
-        return np.concatenate(pieces, axis=1) * std + mean
+        for _start, dist in self._dist_chunks(X):
+            key, draw_key = jax.random.split(key)
+            pieces.append(np.asarray(dist.sample(draw_key, (int(n),))))
+        draws = np.concatenate(pieces, axis=1)
+        if self.task in _CLASSIFIER_TASKS:
+            return np.asarray(self.classes_)[draws]
+        return draws.astype(np.float64)
 
     def log_prob(self, X, y):
-        """Log density of ``y`` under the equal-weight member mixture, per row, on the scale of ``y``."""
-        self._require_distribution("log_prob", density=True)
-        raw = jnp.asarray(self.predict_raw(X))
-        mean, std = self._target_affine()
-        z = (np.asarray(target_array(y), dtype=np.float64).reshape(-1) - mean) / std
-        decoded, batch, members = _decode_members(self.task, raw)
-        values = jnp.repeat(jnp.asarray(z, dtype=raw.dtype), members)[:, None]
-        per_member = log_density(self.task, decoded, values).reshape(batch, members)
-        mixed = jax.nn.logsumexp(per_member, axis=1) - jnp.log(float(members))
-        return np.asarray(mixed, dtype=np.float64) - np.log(std)
+        """Log density (log mass for counts and classes) of ``y`` under ``predict_dist(X)``, per row, in the units of ``y``."""
+        self._require_fitted()
+        if self.task == "quantile":
+            raise AshlarError("the quantile head has three levels, not a density, so it has no log_prob.")
+        dist = self.predict_dist(X)
+        if self.task == "tree":
+            nodes = self.tree_.encode(_label_list(target_array(y)))
+            raw = self._raw_from_frame(X)
+            marginal = np.asarray(_point_from_raw(self.task, self._policy(), raw, self.point_fn), dtype=np.float64)
+            return np.log(np.clip(marginal[np.arange(len(nodes)), nodes], 1e-300, None))
+        if self.task in _LABELED_TASKS:
+            labels = _ordinal_label_vector(target_array(y)) if self.task == "ordinal" else np.asarray(target_array(y))
+            value = jnp.asarray(_encode_known_labels(labels.reshape(-1), np.asarray(self.classes_)))
+        else:
+            value = jnp.asarray(np.asarray(target_array(y), dtype=np.float32).reshape(dist.batch_shape + dist.event_shape))
+        return np.asarray(dist.log_prob(value), dtype=np.float64)
+
+    def _univariate_dist(self, name: str):
+        self._require_fitted()
+        if self.task not in {"normal", *DISTRIBUTION_TASKS} and not (self.task == "custom" and self.dist_fn is not None):
+            raise AshlarError(f"{name} needs a distribution task: {', '.join(DISTRIBUTION_TASKS)}.")
+        if self.task == "normal" and int(self.n_events_) != 1:
+            raise AshlarError(f"{name} reads one target column; this model has {self.n_events_}.")
+
+    def _quantiles(self, X, levels, n_samples: int, seed: int) -> np.ndarray:
+        """Quantiles of ``predict_dist(X)``, shape ``(rows, len(levels))``. Exact where the family has a quantile."""
+        q = jnp.asarray(levels, dtype=jnp.float32)[:, None]
+        pieces = []
+        for _start, dist in self._dist_chunks(X):
+            try:
+                pieces.append(np.asarray(_jit_quantile()(dist, q), dtype=np.float64).T)
+            except NotImplementedError:
+                draws = np.asarray(dist.sample(jax.random.PRNGKey(int(seed)), (int(n_samples),)), dtype=np.float64)
+                method = "inverted_cdf" if dist.support == "nonnegative_integer" else "linear"
+                pieces.append(np.quantile(draws, levels, axis=0, method=method).T)
+        return np.concatenate(pieces, axis=0)
 
     def predict_quantiles(
         self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None
     ):
-        """Quantiles per row, shape ``(rows, len(levels))``, on the scale of ``y``.
+        """Quantiles per row, shape ``(rows, len(levels))``, in the units of ``y``.
 
-        A density head reads them from ``n_samples`` draws of the member
-        mixture. The quantile head has its three trained levels, 0.1, 0.5, and
-        0.9, averaged across members, and no others.
+        A density head reads them from ``predict_dist(X).quantile``: closed
+        form for the gaussian, flow, and histogram heads, and bisection on the
+        member mixture's CDF otherwise, exact to float precision. A count
+        head's quantile is the smallest whole number whose CDF reaches the
+        level. ``n_samples`` and ``seed`` are only used for a custom
+        distribution without a quantile, which is then read from draws. The
+        quantile head has its three trained levels, 0.1, 0.5, and 0.9,
+        averaged across members, and no others.
 
         After ``calibrate``, each level is first mapped to the nominal level
         that held that fraction of the calibration rows, and the quantile
@@ -1396,7 +1521,7 @@ class ASRModel(BaseEstimator):
         ``calibrated=False`` reads the raw head; ``None`` uses the calibration
         when there is one.
         """
-        self._require_distribution("predict_quantiles")
+        self._univariate_dist("predict_quantiles")
         levels = tuple(float(level) for level in np.atleast_1d(levels))
         calibration = self._calibration(calibrated)
         mean, std = self._target_affine()
@@ -1410,22 +1535,18 @@ class ASRModel(BaseEstimator):
             return values
         if calibration is not None:
             levels = recalibrated_levels(calibration, levels)
-        draws = self.sample(X, n=n_samples, seed=seed)
-        method = "inverted_cdf" if self.task in COUNT_HEADS else "linear"
-        return np.quantile(draws, levels, axis=0, method=method).T
+        return self._quantiles(X, levels, n_samples, seed)
 
     def predict_interval(self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None):
-        """Central interval per row, shape ``(rows, 2)``, on the scale of ``y``.
+        """Central interval per row, shape ``(rows, 2)``, in the units of ``y``.
 
         Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
-        quantiles of the head, read as order statistics of the draws so that a
-        value whose PIT lies between the two levels is always inside. After
-        ``calibrate`` it is the split-conformal
-        interval: on rows exchangeable with the calibration rows it holds at
-        least ``coverage`` of them. The quantile head gives only its 80%
-        interval, calibrated or not.
+        quantiles of ``predict_dist(X)``. After ``calibrate`` it is the
+        split-conformal interval: on rows exchangeable with the calibration
+        rows it holds at least ``coverage`` of them. The quantile head gives
+        only its 80% interval, calibrated or not.
         """
-        self._require_distribution("predict_interval")
+        self._univariate_dist("predict_interval")
         coverage = check_coverage(coverage)
         calibration = self._calibration(calibrated)
         if self.task == "quantile":
@@ -1438,19 +1559,21 @@ class ASRModel(BaseEstimator):
             levels = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
         else:
             levels = interval_levels(calibration, coverage)
-        return draw_interval(self.sample(X, n=n_samples, seed=seed), *levels)
+        return self._quantiles(X, levels, n_samples, seed)
 
     def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0):
         """Split-conformal calibration on held-out rows. Returns ``self``.
 
         Pass rows the model was not fitted on. A density head stores each
-        row's PIT, read from ``n_samples`` draws. The quantile head stores how
-        far each ``y`` falls outside its 80% interval. Afterwards
-        ``predict_interval`` and ``predict_quantiles`` use the calibration, it
-        is saved with the model, and ``fit`` clears it. See
-        ``ashlar.calibrate`` for the method.
+        row's probability integral transform, ``predict_dist(X).cdf(y)``,
+        spread uniformly over the jump at ``y`` for a count head. The quantile
+        head stores how far each ``y`` falls outside its 80% interval.
+        Afterwards ``predict_interval`` and ``predict_quantiles`` use the
+        calibration, it is saved with the model, and ``fit`` clears it. See
+        ``ashlar.calibrate`` for the method. ``n_samples`` is only used for a
+        custom distribution without a CDF, whose PIT is then read from draws.
         """
-        self._require_distribution("calibrate")
+        self._univariate_dist("calibrate")
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if not np.isfinite(target).all():
             raise AshlarError("calibration targets must be finite.")
@@ -1461,10 +1584,21 @@ class ASRModel(BaseEstimator):
                 raise ShapeError(f"X has {values.shape[0]} rows and y has {target.shape[0]}.")
             self.calibration_ = cqr_calibration(values[:, 0], values[:, 2], target)
             return self
-        draws = self.sample(X, n=n_samples, seed=seed)
-        if draws.shape[1] != target.shape[0]:
-            raise ShapeError(f"X has {draws.shape[1]} rows and y has {target.shape[0]}.")
-        self.calibration_ = pit_calibration(pit_values(draws, target, seed=seed))
+        dist = self.predict_dist(X)
+        if int(dist.batch_shape[0]) != target.shape[0]:
+            raise ShapeError(f"X has {int(dist.batch_shape[0])} rows and y has {target.shape[0]}.")
+        try:
+            key = jax.random.PRNGKey(int(seed))
+            pit = []
+            for start, chunk in self._dist_chunks(X):
+                key, pit_key = jax.random.split(key)
+                value = jnp.asarray(target[start : start + 4096], dtype=jnp.float32)
+                pit.append(np.asarray(_jit_pit()(chunk, value, pit_key), dtype=np.float64))
+            pit = np.concatenate(pit)
+        except NotImplementedError:
+            draws = self.sample(X, n=n_samples, seed=seed)
+            pit = pit_values(draws, target, seed=seed)
+        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
         return self
 
     def _calibration(self, calibrated: bool | None):
@@ -1493,8 +1627,9 @@ class ASRModel(BaseEstimator):
 
         - ``epistemic``: spread of the members' point predictions.
         - ``aleatoric``: root mean of each member's predictive variance, read
-          from ``n_samples`` draws. A distribution task only; the point
-          tasks have no noise model, so it is absent.
+          from the member distributions in closed form. A distribution task
+          only; the point tasks have no noise model, so it is absent.
+          ``n_samples`` and ``seed`` are kept for compatibility and unused.
         - ``total``: the two combined, by the law of total variance.
 
         For classes (``classification`` and ``ordinal``), each value is an
@@ -1502,6 +1637,7 @@ class ASRModel(BaseEstimator):
         ``aleatoric`` the mean entropy of each member, and ``epistemic`` their
         difference, the mutual information between the label and the member.
         """
+        del n_samples, seed
         self._require_fitted()
         raw = jnp.asarray(self.predict_raw(X))
         if self.task in _LABELED_TASKS:
@@ -1523,29 +1659,13 @@ class ASRModel(BaseEstimator):
         epistemic = members.std(axis=1) * std
         if self.task == "regression" or self.task == "quantile":
             return {"epistemic": epistemic, "total": epistemic}
-        aleatoric = np.sqrt(self._member_variance(raw, int(n_samples), int(seed))) * std
+        variance = np.asarray(head_distribution(self.task, raw).variance(), dtype=np.float64).mean(axis=1)
+        aleatoric = np.sqrt(variance) * std
         return {
             "epistemic": epistemic,
             "aleatoric": aleatoric,
             "total": np.sqrt(np.square(epistemic) + np.square(aleatoric)),
         }
-
-    def _member_variance(self, raw, n_samples: int, seed: int) -> np.ndarray:
-        """Mean over members of each member's predictive variance, standardized, ``(rows,)``."""
-        if n_samples < 2:
-            raise AshlarError("predict_uncertainty needs at least 2 samples per member.")
-        key = jax.random.PRNGKey(seed)
-        pieces = []
-        for start in range(0, raw.shape[0], 4096):
-            key, draw_key = jax.random.split(key)
-            decoded, batch, members = _decode_members(self.task, raw[start : start + 4096])
-            draws = np.asarray(sample_values(self.task, decoded, draw_key, n_samples), dtype=np.float64)
-            pieces.append(draws.reshape(n_samples, batch, members).var(axis=0, ddof=1).mean(axis=1))
-        return np.concatenate(pieces)
-
-    def predict_dist(self, X, policy: str | None = None):
-        raw = self._raw_from_frame(X)
-        return _dist_from_raw(self.task, self._policy() if policy is None else policy, raw, self.dist_fn)
 
     def predict_raw(self, X):
         """Head output with the member axis preserved."""

@@ -122,8 +122,9 @@ def test_save_reload_and_resume(tmp_path):
     first = model.predict(x)
     mixture = model.predict_dist(x[:2])
     averaged = model.predict_dist(x[:2], policy="mean_parameters")
-    assert mixture.loc.shape[1] == 1  # residual MLP has one member
-    assert averaged.loc.ndim == 2
+    assert mixture.components.batch_shape == (2, 1)  # residual MLP has one member
+    assert averaged.batch_shape == (2,)
+    assert np.allclose(mixture.mean(), first[:2], atol=1e-5)
     restored = type(model).load(model.save(tmp_path / "model"))
     assert np.allclose(first, restored.predict(x), atol=1e-6)
     restored.fit(x, y, resume=True)
