@@ -50,6 +50,7 @@ from ashlar.distributional import (
     point_values,
     sample_values,
 )
+from ashlar.distributions import AffineTransformed, head_distribution
 from ashlar.errors import AshlarError, ShapeError
 from ashlar.io import load_leaves, save_leaves
 
@@ -245,6 +246,14 @@ def _forecast_objective_jit(model: ForecastNet, windows: jax.Array, target: jax.
     return _forecast_objective(model, windows, target)
 
 
+def _forecast_dist(head: str, flat, horizon: int, mean: float, std: float, single: bool):
+    base = head_distribution(head, flat, horizon)
+    if horizon == 1:
+        base = jax.tree.map(lambda leaf: leaf[:, None, ...], base)
+    dist = AffineTransformed(base, mean, std)
+    return dist[0] if single else dist
+
+
 def _as_key(key):
     if isinstance(key, (int, np.integer)):
         return jax.random.PRNGKey(int(key))
@@ -395,6 +404,25 @@ class ASRForecaster:
         if single:
             return restored[0]
         return restored
+
+    def predict_dist(self, history):
+        """The forecast distribution, in the units of the series.
+
+        An ``ashlar.distributions.Distribution`` with batch shape
+        ``(windows, horizon)``, or ``(horizon,)`` for one history: each step
+        is its own marginal, and nothing is claimed about how the steps move
+        together. The ``mse`` head has no distribution; the quantile head
+        answers ``quantile`` at its three levels only.
+        """
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before predict_dist.")
+        if self.head == "mse":
+            raise AshlarError("the mse head predicts a point and has no distribution.")
+        windows, single = self._standardized_windows(history)
+        flat = jnp.concatenate(
+            [_apply(self.model_, jnp.asarray(windows[start : start + 512])) for start in range(0, len(windows), 512)]
+        )
+        return _forecast_dist(self.head, flat, self.horizon, self.mean_, self.std_, single)
 
     def gaussian(self, history):
         """Gaussian location and scale on the original scale."""
@@ -1017,6 +1045,26 @@ class ASRHistoryForecaster:
         if single:
             return restored[0]
         return restored
+
+    def predict_dist(self, history, origins=None):
+        """The forecast distribution, in the units of the series.
+
+        An ``ashlar.distributions.Distribution`` with batch shape
+        ``(windows, horizon)``, or ``(horizon,)`` for one history: each step
+        is its own marginal, and nothing is claimed about how the steps move
+        together. The ``mse`` head has no distribution; the quantile head
+        answers ``quantile`` at its three levels only.
+        """
+        if not hasattr(self, "model_"):
+            raise AshlarError("fit the forecaster before predict_dist.")
+        if self.head == "mse":
+            raise AshlarError("the mse head predicts a point and has no distribution.")
+        scaled, origins, capacity, single = self._prepare_origins(history, origins)
+        pieces = []
+        for start in range(0, len(origins), 128):
+            packed = _pack_history(scaled, origins[start : start + 128], self.lookback, capacity)
+            pieces.append(_history_apply(self.model_, *[jnp.asarray(part) for part in packed]))
+        return _forecast_dist(self.head, jnp.concatenate(pieces), self.horizon, self.mean_, self.std_, single)
 
     def gaussian(self, history, origins=None):
         """Gaussian location and scale on the original scale."""
