@@ -65,8 +65,11 @@ Scored on the test days against the true demand:
 - NLL of the true log demand of all four products together.
 - The share of days whose total demand over the four products is at or
   below the predicted 90% quantile of the total, from 1,000 joint draws.
-- The Brier score of the predicted probability that two or more of the
-  day's shelves empty, at that day's stock.
+- The predicted probability that every shelf empties, all four products
+  selling out at that day's stock: its Brier score, and the share of days
+  it predicts against the share on which it happened. The products'
+  marginal fits can each be right while this is wrong, since it depends
+  on how the four move together.
 
     pip install -e ".[dev]" lightgbm xgboost matplotlib    # the demand stage reads benchmark_readme.py
     JAX_PLATFORMS=cpu python examples/benchmark_observed.py                 # demand and totals
@@ -470,27 +473,28 @@ def _joint_record(log_density, draws, log_demand, log_stock):
     total = np.exp(log_demand).sum(axis=1)
     predicted_total = np.exp(draws).sum(axis=2)
     q90 = np.quantile(predicted_total, 0.9, axis=0)
-    empty = np.mean((draws >= log_stock[None]).sum(axis=2) >= 2, axis=0)
-    happened = (log_demand >= log_stock).sum(axis=1) >= 2
+    empty = np.mean((draws >= log_stock[None]).all(axis=2), axis=0)
+    happened = (log_demand >= log_stock).all(axis=1)
     return {
         "nll": float(-np.mean(log_density)),
         "total_q90": float(np.mean(total <= q90)),
-        "two_empty_brier": float(np.mean(np.square(empty - happened))),
-        "two_empty_predicted": float(np.mean(empty)),
+        "all_empty_brier": float(np.mean(np.square(empty - happened))),
+        "all_empty_predicted": float(np.mean(empty)),
     }
 
 
 def joint() -> None:
     scores = {(head, fit): [] for head in JOINT_HEADS for fit in JOINT_FITS}
     scores[PER_PRODUCT] = []
+    every = []
     for seed in SEEDS:
         frame, log_demand, log_stock, log_sales, sold_out, rush = shelf_days(seed)
         train, test = np.arange(SHELF_TRAIN), np.arange(SHELF_TRAIN, SHELF_ROWS)
         x_train, x_test = frame.iloc[train], frame.iloc[test]
-        happened = float(np.mean((sold_out[test]).sum(axis=1) >= 2))
+        every.append(float(np.mean(sold_out[test].all(axis=1))))
         print(
             f"seed {seed}: {sold_out.mean():.1%} of product-days sold out, {np.mean(sold_out.any(axis=1)):.1%} of days "
-            f"had one, two or more on {happened:.1%} of test days; rush on {rush.mean():.1%}",
+            f"had one, every shelf emptied on {every[-1]:.1%} of test days; rush on {rush.mean():.1%}",
             flush=True,
         )
         for head in JOINT_HEADS:
@@ -518,13 +522,16 @@ def joint() -> None:
         print(f"  {PER_PRODUCT[0]:22s} {PER_PRODUCT[1]:20s}", {key: round(value, 4) for key, value in record.items()}, flush=True)
 
     print(f"\n{len(SEEDS)} seeds, mean ± standard deviation, scored against the true demand")
-    print("| Head | Trained on | Joint NLL ↓ | Total below its 90% quantile | Two or more empty: Brier ↓ | predicted share | Seconds |")
+    print(
+        "| Head | Trained on | Joint NLL ↓ | Total below its 90% quantile | Every shelf empty: Brier ↓ "
+        f"| predicted share (it happened on {np.mean(every):.1%}) | Seconds |"
+    )
     print("|---|---|---:|---:|---:|---:|---:|")
     for (head, fit), rows in scores.items():
         cells = []
-        for key in ("nll", "total_q90", "two_empty_brier", "two_empty_predicted", "seconds"):
+        for key in ("nll", "total_q90", "all_empty_brier", "all_empty_predicted", "seconds"):
             values = np.asarray([row[key] for row in rows])
-            if key in ("total_q90", "two_empty_predicted"):
+            if key in ("total_q90", "all_empty_predicted"):
                 cells.append(f"{values.mean():.1%} ± {values.std(ddof=1):.1%}")
             elif key == "seconds":
                 cells.append(f"{values.mean():.0f}")
@@ -592,8 +599,8 @@ def joint_figure() -> None:
     promo = x_test["promo"].to_numpy() > 0
     conditions = (("ordinary days", ~promo), ("promotion days", promo))
     share = float(np.mean(sold_out))
-    together = float(np.mean(sold_out.sum(axis=1) >= 2))
-    print(f"held-out product-days sold out {share:.4f}, days with two or more {together:.4f}", flush=True)
+    together = float(np.mean(sold_out.all(axis=1)))
+    print(f"held-out product-days sold out {share:.4f}, days every shelf emptied {together:.4f}", flush=True)
 
     width, height = 18.2, 8.9
     fig = plt.figure(figsize=(width, height), facecolor=style.WHITE)
@@ -601,7 +608,7 @@ def joint_figure() -> None:
              color=style.INK, ha="left", va="top")
     for offset, line in (
         (0.925, (f"Simulated demand for four products at 20 stores, which jumps for all four on a rush day. "
-                 f"{share:.0%} of product-days sold out, two or more products on {together:.0%} of days.")),
+                 f"{share:.0%} of product-days sold out, and every shelf emptied on {together:.0%} of days.")),
         (0.885, ("Bars: the true total demand of the four over the held-out days. Lines: the recorded sales, then "
                  "each fit's predicted total. Only the last fit saw demand.")),
     ):
