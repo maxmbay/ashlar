@@ -326,3 +326,54 @@ def make_hurdle_objective(severity: str):
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
 
     return objective
+
+
+def member_distribution(task: str, raw, severity: str = "lognormal"):
+    """Each member's distribution for every row, batch ``(rows, members)``, on the head's own scale.
+
+    The distribution heads and ``hurdle`` read their flat projection; ``normal``
+    reads its one event's location and scale.
+    """
+    from ashlar.distributions import Normal, head_distribution, hurdle_distribution
+    from ashlar.predict import split_normal_parameters
+
+    if task == "normal":
+        loc, scale = split_normal_parameters(raw)
+        if loc.shape[-1] != 1:
+            raise ShapeError(f"an observed label is one target column; the normal head has {loc.shape[-1]}.")
+        return Normal(loc[..., 0], scale[..., 0])
+    if raw.ndim != 3:
+        raise ShapeError(f"{task} head output must be (batch, member, width); received {raw.shape}.")
+    if task == "hurdle":
+        return hurdle_distribution(raw, severity)
+    return head_distribution(task, raw)
+
+
+def make_observed_objective(task: str, *, severity: str = "lognormal", truncated: bool = False, noisy: bool = False):
+    """Mean member negative log-likelihood of what was observed, weighted over rows.
+
+    ``y`` is the ``(batch, 6)`` array of ``ashlar.observed.fields`` on the
+    head's own scale: standardized for a scaled task, raw for a count, the
+    hurdle, and ``normal``. An exact row scores its density, a coarse row the
+    probability of its interval; ``truncated`` divides by the probability of
+    each row's truncation range and ``noisy`` widens each row by its noise.
+    Both are fixed when the objective is built, so labels without them pay
+    nothing. Members are averaged, not mixed, as in the other objectives.
+    """
+    from ashlar.observed import log_likelihood
+
+    def objective(raw, y, sample_weight):
+        dist = member_distribution(task, raw, severity)
+        y = jnp.asarray(y, dtype=jnp.float32)
+        column = [y[:, index][:, None] for index in range(5)]
+        losses = -log_likelihood(
+            dist,
+            column[0],
+            column[1],
+            column[2] if truncated else None,
+            column[3] if truncated else None,
+            column[4] if noisy else None,
+        )
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
