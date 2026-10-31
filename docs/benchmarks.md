@@ -443,7 +443,7 @@ The hurdle answers "will this trip be tipped at all" best, with a Brier score 15
 
 ## Labels that say what was observed
 
-From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py). Two simulations, so the true values are known and every fit is scored against them. Five seeds, 0 to 4, mean ± standard deviation across seeds. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments. [docs/observed.md](observed.md) describes the labels.
+From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py). Three simulations, so the true values are known and every fit is scored against them. Five seeds, 0 to 4, mean ± standard deviation across seeds. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments. [docs/observed.md](observed.md) describes the labels.
 
 ### Demand when shelves sell out
 
@@ -489,6 +489,35 @@ The sales of 50 stores, with 20,000 store-days per seed: 14,000 to train, 2,000 
 - **From totals alone, the Poisson head comes within 0.005 nats of the oracle.** It learns each day's rate from sums it never sees broken down.
 - **The gaussian learns each day's mean, and the spread only partly.** Its mean error is 0.25 against the oracle's 0.10, and it places the volatile days' spread nearly right (1.41), but it puts 0.81 on calm days whose spread is 0.5. A sum's variance blends seven days' variances, so from 1,500 sums the split between them is harder to learn than the means. Its 80% intervals hold 83%.
 - **Spreading a total evenly teaches every day its week's average**, which is wrong for each of them: an NLL of 4.3, means off by 2.8, and an interval that holds 39%.
+
+### Several products that sell out together
+
+Four products at 20 stores, with 12,000 store-days per seed: 8,000 to train and 4,000 to test. On the log scale, each product's demand is the store's level plus the product's own, a weekday cycle, a promotion on a quarter of days, and the temperature, to which each product reacts differently, plus a normal shock common to all four (sd 0.25) and one of each product's own (sd 0.2). On a rush day, 10% of ordinary days and 35% of promotion days, all four products' demand is 80% higher. The stock is each product's usual demand, without the rush or the shocks, times a safety factor between 1.2 and 1.6 and a little noise. The features are the store, the weekday, the promotion, and the temperature, so no model sees a rush coming. 26% of product-days sell out, and every shelf empties on 10% to 12% of test days, about half of the rush days.
+
+Each joint head is fitted three ways: on the true log demand (the oracle), on log sales as if they were demand, and on `observed.censored(log_sales, sold_out)`, a label with a cell per product. The baseline handles the censoring without a joint model: a censored `mixture` head per product, the products then independent.
+
+- **Joint NLL** is of the true log demand of all four products, per day. For the per-product fits it is the sum of their four log densities.
+- **Total below its 90% quantile** is the share of test days whose total demand over the four products is at or below the 90% quantile of the predicted total, from 1,000 joint draws.
+- **Every shelf empty** is the predicted probability, from the same draws, that every product's demand reaches that day's stock: its Brier score, and the mean prediction, against the 11.1% of days on which it happened.
+
+| Head | Trained on | Joint NLL ↓ | Total below its 90% quantile | Every shelf empty: Brier ↓ | Predicted share of days | Seconds |
+|---|---|---:|---:|---:|---:|---:|
+| `multivariate_gaussian` | true demand (oracle) | 0.498 ± 0.022 | 89.3% ± 1.6% | 0.096 ± 0.003 | 10.6% ± 1.7% | 6 |
+| `multivariate_gaussian` | sales as demand | 0.809 ± 0.036 | 76.4% ± 1.2% | 0.105 ± 0.005 | 2.6% ± 0.2% | 6 |
+| `multivariate_gaussian` | censored | **0.511 ± 0.033** | 87.9% ± 1.2% | 0.096 ± 0.004 | 9.1% ± 1.1% | 12 |
+| `multivariate_mixture` | true demand (oracle) | 0.496 ± 0.020 | 89.5% ± 1.0% | 0.096 ± 0.003 | 10.6% ± 0.8% | 6 |
+| `multivariate_mixture` | sales as demand | 2.261 ± 0.303 | 74.0% ± 1.0% | 0.109 ± 0.005 | 0.8% ± 0.2% | 7 |
+| `multivariate_mixture` | censored | 0.523 ± 0.021 | **90.8% ± 1.2%** | 0.096 ± 0.003 | **11.4% ± 1.3%** | 36 |
+| `multivariate_flow` | true demand (oracle) | 0.527 ± 0.019 | 89.7% ± 1.1% | 0.096 ± 0.004 | 10.5% ± 0.7% | 11 |
+| `multivariate_flow` | sales as demand | 2.775 ± 0.379 | 74.3% ± 1.1% | 0.108 ± 0.005 | 1.2% ± 0.1% | 13 |
+| `multivariate_flow` | censored | 0.613 ± 0.040 | 92.2% ± 1.6% | 0.096 ± 0.003 | 12.1% ± 1.8% | 48 |
+| `mixture`, one per product | censored | 1.874 ± 0.043 | 86.3% ± 2.0% | 0.109 ± 0.005 | 0.7% ± 0.1% | 21 |
+
+- **The censored joint fits nearly match the oracle.** The joint normal is 0.013 nats behind its own oracle and the mixture 0.027. Both score the chance that every shelf empties as well as the oracle does, a Brier score of 0.096, and expect it on 9.1% and 11.4% of days, against the 11.1% on which it happened.
+- **Fitting sales as demand misses the busy days.** The total's 90% quantile covers 74% to 76% of days, and the chance that every shelf empties falls to 1% to 3% of days, because a fit to capped sales never sees demand above the stock.
+- **Censoring product by product gets each product right but not the four together.** The per-product mixtures are 1.36 nats behind the censored joint normal, their quantile of the total covers 86% of days, and they expect every shelf to empty on 0.7% of days: four independent products seldom run out at once, and these four rush together.
+- **The joint normal is enough here.** The mixture's likelihood is no better, since on the log scale an 80% lift one day in six is a small departure from a normal, though its quantile of the total and its chance that every shelf empties are the closest to the truth. The flow learns the least from censored cells, 0.09 nats behind its own oracle, with a quantile of the total that covers 92%.
+- **A censored joint fit takes two to six times as long as one on exact values**, 12 to 48 seconds against 6 to 11, because each training row integrates over its sold-out products at 32 points.
 
 ## Joint demand across locations
 
