@@ -69,6 +69,7 @@ def test_node_log_probabilities_are_products_of_branches():
         np.testing.assert_allclose(p[..., kids].sum(-1), p[..., node], rtol=1e-5)
 
 
+@pytest.mark.slow
 def test_partial_label_loss_is_the_internal_node_log_probability():
     tree = OutcomeTree(SPEC)
     logits = jax.random.normal(jax.random.PRNGKey(1), (2, 1, tree.n_edges))
@@ -113,6 +114,7 @@ def test_fit_predict_conditionals_and_partial_labels():
     assert 0.0 <= model.score(X, y) <= 1.0
 
 
+@pytest.mark.slow
 def test_tree_save_load_round_trip(tmp_path):
     X, y = _data(300)
     model = _small(max_epochs=2).fit(X, y)

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.rounds import (
@@ -78,6 +79,7 @@ def test_linear_leaf_learns_a_sign_interaction():
     assert model.n_stages_ >= 1
 
 
+@pytest.mark.slow
 def test_learned_neighborhood_separates_two_blobs():
     rng = np.random.default_rng(2)
     left = rng.normal(loc=-2.0, size=(250, 4))

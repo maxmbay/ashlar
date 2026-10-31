@@ -18,6 +18,7 @@ def _gap(n=1200, seed=0):
     return X, y
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("task", ["regression", "gaussian", "mixture", "quantile", "student_t"])
 def test_uncertainty_has_one_value_per_row_and_adds_up(task):
     X, y = _gap()
@@ -33,6 +34,7 @@ def test_uncertainty_has_one_value_per_row_and_adds_up(task):
         assert np.allclose(np.square(parts["total"]), np.square(parts["epistemic"]) + np.square(parts["aleatoric"]))
 
 
+@pytest.mark.slow
 def test_members_disagree_more_far_from_the_data():
     X, y = _gap()
     model = ASRRegressor(task="gaussian", max_epochs=30, **TABM).fit(X, y)
@@ -49,6 +51,7 @@ def test_single_member_backbone_has_no_disagreement():
     assert np.allclose(parts["epistemic"], 0.0)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cls", [ASRClassifier, ASROrdinalClassifier])
 def test_class_uncertainty_is_mutual_information(cls):
     X, y = _gap()
@@ -59,6 +62,7 @@ def test_class_uncertainty_is_mutual_information(cls):
     assert np.all(parts["epistemic"] >= 0)
 
 
+@pytest.mark.slow
 def test_tree_tasks_are_refused():
     from ashlar import ASROutcomeTree
 
@@ -70,6 +74,7 @@ def test_tree_tasks_are_refused():
         model.predict_uncertainty(X)
 
 
+@pytest.mark.slow
 def test_count_heads_report_both_parts():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(800, 2)).astype(np.float32)

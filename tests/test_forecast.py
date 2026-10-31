@@ -54,6 +54,7 @@ def test_forecast_windows_do_not_include_their_target():
     assert inputs[train].max() < val_start
 
 
+@pytest.mark.slow
 def test_forecast_loss_is_differentiable():
     net = _init_forecast(jax.random.PRNGKey(0), 16, 4)
     windows = jnp.asarray(np.random.default_rng(0).normal(size=(6, 16)), dtype=jnp.float32)
@@ -66,6 +67,7 @@ def test_forecast_loss_is_differentiable():
     assert abs(float(loss) - float(jnp.mean(jnp.square(pred - target)))) < 1e-5
 
 
+@pytest.mark.slow
 def test_forecast_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
@@ -101,6 +103,7 @@ def test_full_history_prefix_contains_every_earlier_observation():
     assert int(within.sum()) == 132
 
 
+@pytest.mark.slow
 def test_full_history_loss_uses_the_distant_past():
     net = _init_history(jax.random.PRNGKey(0), 16, 4)
     origin = np.array([80])
@@ -142,6 +145,7 @@ def test_full_history_uses_the_same_origins_as_the_window():
     assert origin + 12 <= val_start
 
 
+@pytest.mark.slow
 def test_full_history_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
@@ -164,6 +168,7 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
         raise AssertionError("a short series was accepted")
 
 
+@pytest.mark.slow
 def test_forecasters_save_and_load_without_pickle(tmp_path):
     series = np.sin(np.arange(260) / 5.0) + 0.1 * np.random.default_rng(0).normal(size=260)
     for cls in (ASRForecaster, ASRHistoryForecaster):
@@ -186,6 +191,7 @@ def test_forecaster_save_requires_fit(tmp_path):
         ASRForecaster().save(tmp_path / "unfitted")
 
 
+@pytest.mark.slow
 def test_flow_models_saved_before_the_shift_and_scale_still_load(tmp_path):
     """A 0.0.3 flow save holds only the spline and no layout marker; it loads and predicts as it did."""
     import json

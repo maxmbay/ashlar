@@ -39,6 +39,7 @@ def test_objective_is_the_member_mean_joint_negative_log_density():
     assert np.isclose(make_joint_objective(3)(raw, y, jnp.ones(6)), expected, rtol=1e-6)
 
 
+@pytest.mark.slow
 def test_fit_learns_dependence_and_reports_in_target_units(tmp_path):
     x, y = _shared_shock()
     train, test = slice(0, 2000), slice(2000, None)

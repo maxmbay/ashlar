@@ -79,6 +79,7 @@ def test_estimator_fits_predicts_and_round_trips(task, kwargs, tmp_path):
     assert np.allclose(model.log_prob(X, y), restored.log_prob(X, y), atol=1e-4)
 
 
+@pytest.mark.slow
 def test_negative_binomial_beats_poisson_on_overdispersed_counts():
     X, y = _counts(3000)
     scores = {}
@@ -112,6 +113,7 @@ def test_forecaster_takes_the_student_t_head(tmp_path):
     assert np.allclose(model.log_prob(series[-44:-4], future), restored.log_prob(series[-44:-4], future))
 
 
+@pytest.mark.slow
 def test_count_heads_calibrate_with_whole_number_intervals():
     X, y = _counts(3500)
     model = ASRRegressor(task="negative_binomial", max_epochs=8).fit(X[:1500], y[:1500])

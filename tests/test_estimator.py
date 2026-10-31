@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import jax.numpy as jnp
 
@@ -64,6 +65,7 @@ def test_incompatible_head_is_rejected():
     raise AssertionError("logits head was accepted for a normal task")
 
 
+@pytest.mark.slow
 def test_weighted_outlier_changes_the_fit():
     rng = np.random.default_rng(0)
     x = rng.normal(size=(24, 1)).astype(np.float32)
@@ -131,6 +133,7 @@ def test_save_reload_and_resume(tmp_path):
     assert restored.history_["train_loss"]
 
 
+@pytest.mark.slow
 def test_classification_policies_and_explicit_none_weight():
     rng = np.random.default_rng(1)
     x = rng.normal(size=(30, 2)).astype(np.float32)
@@ -144,6 +147,7 @@ def test_classification_policies_and_explicit_none_weight():
     assert set(np.unique(labels)).issubset({0, 1})
 
 
+@pytest.mark.slow
 def test_gradient_flows_through_standardization():
     import jax
 
@@ -175,6 +179,7 @@ def test_default_recipe_is_the_no_argument_estimator():
     assert DEFAULT_SEARCH["space"]["weight_decay"] == [1e-4, 1e-3]
 
 
+@pytest.mark.slow
 def test_search_is_off_unless_requested_and_true_picks_a_listed_rate():
     rng = np.random.default_rng(0)
     x = rng.normal(size=(24, 1)).astype(np.float32)
@@ -197,6 +202,7 @@ def test_search_is_off_unless_requested_and_true_picks_a_listed_rate():
     assert plain_again.core_.feature_dropout == 0.0
 
 
+@pytest.mark.slow
 def test_learned_embedding_and_set_encoder_accept_unseen_and_empty():
     rng = np.random.default_rng(2)
     n = 20
@@ -229,6 +235,7 @@ def test_learned_embedding_and_set_encoder_accept_unseen_and_empty():
     assert widths == []
 
 
+@pytest.mark.slow
 def test_transformer_backbone_fits_a_feature_set():
     rng = np.random.default_rng(3)
     x = rng.normal(size=(16, 2)).astype(np.float32)
@@ -274,6 +281,7 @@ def test_classifier_recipe_predicts_binary_and_multiclass_labels():
     assert np.allclose(multi_probabilities.sum(axis=1), 1.0, atol=1e-5)
 
 
+@pytest.mark.slow
 def test_classification_search_scores_weighted_accuracy():
     rng = np.random.default_rng(5)
     x = rng.normal(size=(32, 2)).astype(np.float32)
@@ -292,6 +300,7 @@ def test_classification_search_scores_weighted_accuracy():
     assert "val_score" not in plain.history_
 
 
+@pytest.mark.slow
 def test_classification_embeddings_transformer_and_set():
     rng = np.random.default_rng(6)
     n = 24
@@ -325,6 +334,7 @@ def test_class_weight_and_sample_weight_multiply_once():
     assert abs(once - twice) > 1e-6
 
 
+@pytest.mark.slow
 def test_quantile_scaling_matches_sklearn_and_standard_stays_zscore():
     from sklearn.preprocessing import QuantileTransformer
 
@@ -384,6 +394,7 @@ def test_quantile_tabr_knot_count_skips_the_zscore():
     assert np.max(np.abs(mapped - zscore)) > 0.2
 
 
+@pytest.mark.slow
 def test_regression_labels_are_standardized_unless_another_task_or_an_old_file(tmp_path):
     import json
 
@@ -492,6 +503,7 @@ def test_classification_tabm_shares_batches_and_skips_the_label_scale():
     assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
 
 
+@pytest.mark.slow
 def test_unshared_member_targets_and_a_small_tabm_fit():
     from ashlar.objectives import regression_objective
     from ashlar.recipes import tabm
@@ -550,6 +562,7 @@ def test_surface_learning_rate_shrinks_when_data_is_small_or_steep():
     assert DEFAULT_RECIPE["learning_rate"] == 2e-3
 
 
+@pytest.mark.slow
 def test_surface_schedule_sets_an_adamw_rate_from_the_batch(tmp_path):
     model = _regression(
         max_epochs=2,
@@ -611,6 +624,7 @@ def test_softmax_ordinal_head_can_peak_on_one_class():
     raise AssertionError("a logits head was accepted for an ordinal task")
 
 
+@pytest.mark.slow
 def test_empirical_bayes_cuts_match_the_prior_and_do_not_move():
     import equinox as eqx
     import jax
@@ -637,6 +651,7 @@ def test_empirical_bayes_cuts_match_the_prior_and_do_not_move():
     assert float(jnp.sum(jnp.abs(plain_grads.cut_raw))) > 0.0
 
 
+@pytest.mark.slow
 def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
     rng = np.random.default_rng(0)
     measure = rng.normal(size=80).astype(np.float32)
@@ -726,6 +741,7 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
     raise AssertionError("string labels were accepted for an ordinal task")
 
 
+@pytest.mark.slow
 def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp_path):
     assert DEFAULT_BOTTLENECK_WIDTH == 32
     assert ASRModel().bottleneck is None
@@ -839,6 +855,7 @@ def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
     assert np.allclose(score, np.asarray(restored.predict_score(x), dtype=np.float64), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tmp_path):
     import equinox as eqx
     import jax
@@ -919,6 +936,7 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
     assert np.allclose(model.predict_score(x), restored.predict_score(x), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_rare_class_stays_in_training_and_the_rest_is_stratified():
     import pytest
     from sklearn.model_selection import train_test_split
@@ -956,6 +974,7 @@ def test_rare_class_stays_in_training_and_the_rest_is_stratified():
     assert ASRModel().task == "regression"
 
 
+@pytest.mark.slow
 def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_path):
     import jax
     import pytest
@@ -1004,6 +1023,7 @@ def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_pat
     assert np.allclose(score, np.asarray(restored.predict_score(x[:4]), dtype=np.float64), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_robust_scale_and_default_categorical_embeddings(tmp_path):
     import jax
     import pytest

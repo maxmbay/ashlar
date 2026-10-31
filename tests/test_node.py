@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.node import DEPTH, LEARNING_RATE, TREE_COUNT, ASRObliviousEnsemble, ObliviousLayer, entmax15
@@ -52,6 +53,7 @@ def test_split_parameters_receive_a_gradient():
     assert float(jnp.linalg.norm(gradient)) > 0
 
 
+@pytest.mark.slow
 def test_depth_six_ensemble_learns_a_conjunction():
     rng = np.random.default_rng(0)
     rows = rng.normal(size=(800, 4))
