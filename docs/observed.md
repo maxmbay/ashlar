@@ -81,9 +81,9 @@ From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py): 1,50
 
 | Head | Trained on | NLL of the true day ↓ | Error of the daily mean ↓ | 80% interval holds |
 |---|---|---:|---:|---:|
-| `gaussian` | the days themselves (the oracle) | 1.30 | 0.10 | 79.6% |
-| `gaussian` | `observed.total(weekly, week)` | 1.43 | 0.25 | 83.4% |
-| `gaussian` | each total spread evenly over its days | 4.30 | 2.84 | 38.9% |
+| `gaussian` | the days themselves (the oracle) | 1.304 | 0.10 | 79.6% |
+| `gaussian` | `observed.total(weekly, week)` | 1.429 | 0.25 | 83.4% |
+| `gaussian` | each total spread evenly over its days | 4.295 | 2.84 | 38.9% |
 | `poisson` | the days themselves (the oracle) | 1.591 | 0.14 | 91.8% |
 | `poisson` | `observed.total(weekly, week)` | 1.596 | 0.22 | 91.7% |
 | `poisson` | each total spread evenly over its days | 2.010 | 1.50 | 88.1% |
