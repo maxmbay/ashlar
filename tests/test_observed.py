@@ -282,6 +282,7 @@ def _sold_out(n=3000, seed=0):
     return x, demand, np.minimum(demand, stock), sold_out
 
 
+@pytest.mark.slow
 def test_a_censored_fit_recovers_demand_that_the_usual_fit_misses():
     x, demand, sales, sold_out = _sold_out()
     train, test = slice(0, 2400), slice(2400, None)
@@ -317,6 +318,7 @@ def test_an_exact_label_trains_like_plain_values():
     assert np.allclose(plain.log_prob(x[:50], y[:50]), exact.log_prob(x[:50], observed.exact(y[:50])), atol=1e-4)
 
 
+@pytest.mark.slow
 def test_truncated_and_noisy_labels_recover_the_value_behind_them():
     rng = np.random.default_rng(2)
     n = 4000
@@ -474,6 +476,7 @@ def _weekly(n_weeks=1000, days=7, seed=9):
     return x, y, week, mean, spread
 
 
+@pytest.mark.slow
 def test_daily_distributions_are_learned_from_weekly_totals():
     x, y, week, mean, spread = _weekly()
     weekly = np.bincount(week, weights=y)[week]

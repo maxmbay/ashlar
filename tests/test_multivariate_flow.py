@@ -92,6 +92,7 @@ def _curved(n=3000, seed=0):
     return x, (y * np.array([1.0, 20.0]) + np.array([5.0, -40.0])).astype(np.float32)
 
 
+@pytest.mark.slow
 def test_fit_beats_the_joint_normal_on_curved_dependence(tmp_path):
     x, y = _curved()
     train, test = slice(0, 2500), slice(2500, None)
@@ -100,6 +101,11 @@ def test_fit_beats_the_joint_normal_on_curved_dependence(tmp_path):
     # The normal sees no correlation to model; the flow sees the curve.
     assert flow.log_prob(x[test], y[test]).mean() > normal.log_prob(x[test], y[test]).mean() + 0.3
 
+
+def test_the_flow_task_predicts_samples_and_saves(tmp_path):
+    x, y = _curved()
+    train, test = slice(0, 600), slice(2500, None)
+    flow = ASRRegressor(task="multivariate_flow", max_epochs=2, random_state=0).fit(x[train], y[train])
     dist = flow.predict_dist(x[test])
     assert isinstance(dist, AffineTransformed) and dist.batch_shape == (500,) and dist.event_shape == (2,)
     assert flow.predict(x[test]).shape == (500, 2)

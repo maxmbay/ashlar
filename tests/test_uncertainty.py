@@ -33,6 +33,7 @@ def test_uncertainty_has_one_value_per_row_and_adds_up(task):
         assert np.allclose(np.square(parts["total"]), np.square(parts["epistemic"]) + np.square(parts["aleatoric"]))
 
 
+@pytest.mark.slow
 def test_members_disagree_more_far_from_the_data():
     X, y = _gap()
     model = ASRRegressor(task="gaussian", max_epochs=30, **TABM).fit(X, y)

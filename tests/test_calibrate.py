@@ -51,6 +51,7 @@ def test_overconfident_pit_widens_the_interval():
     assert recalibrated_levels(calibration, [0.5])[0] == pytest.approx(0.5, abs=0.05)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("task", ["gaussian", "mixture", "histogram"])
 def test_calibrated_interval_covers_on_new_rows(task, tmp_path):
     X, y = _heteroscedastic(900, 0)

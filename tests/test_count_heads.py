@@ -79,6 +79,7 @@ def test_estimator_fits_predicts_and_round_trips(task, kwargs, tmp_path):
     assert np.allclose(model.log_prob(X, y), restored.log_prob(X, y), atol=1e-4)
 
 
+@pytest.mark.slow
 def test_negative_binomial_beats_poisson_on_overdispersed_counts():
     X, y = _counts(3000)
     scores = {}

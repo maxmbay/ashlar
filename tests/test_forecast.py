@@ -66,6 +66,7 @@ def test_forecast_loss_is_differentiable():
     assert abs(float(loss) - float(jnp.mean(jnp.square(pred - target)))) < 1e-5
 
 
+@pytest.mark.slow
 def test_forecast_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
@@ -142,6 +143,7 @@ def test_full_history_uses_the_same_origins_as_the_window():
     assert origin + 12 <= val_start
 
 
+@pytest.mark.slow
 def test_full_history_learns_a_sine_and_rejects_a_short_series():
     time = np.arange(900, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)

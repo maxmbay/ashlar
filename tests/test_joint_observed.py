@@ -261,6 +261,7 @@ def _shelves(n, seed):
     return x, demand, np.minimum(demand, stock), sold_out
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("task", ["multivariate_gaussian", "multivariate_mixture", "multivariate_flow"])
 def test_a_censored_joint_fit_recovers_the_demand_behind_the_sales(task):
     x, demand, sales, sold_out = _shelves(1600, seed=5)

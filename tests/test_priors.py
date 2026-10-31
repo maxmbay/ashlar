@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 
 from ashlar import DEFAULT_RECIPE, ASRRegressor
 from ashlar.errors import AshlarError
@@ -56,6 +57,7 @@ def test_residual_default_stays_a_regressor():
     assert DEFAULT_RECIPE["categorical_embedding_dim"] == 8
 
 
+@pytest.mark.slow
 def test_priors_learn_a_conjunction():
     train_x, train_y = _conjunction(900, 0)
     fresh_x, fresh_y = _conjunction(300, 1)
@@ -118,6 +120,7 @@ def test_gradient_penalty_handles_more_than_two_classes():
     assert abs(float(loss) - float(likelihood + penalty)) < 1e-5
 
 
+@pytest.mark.slow
 def test_gradient_penalty_learns_category_embeddings():
     color = np.array(["red", "blue", None, "red", "blue"], dtype=object)
     roles = ("categorical",)
