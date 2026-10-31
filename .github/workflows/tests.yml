@@ -52,15 +52,15 @@ jobs:
           restore-keys: |
             jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-
             jax-${{ runner.os }}-
-      - name: Choose the tier
-        id: tier
+      - name: Run the tests
+        env:
+          FAST: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.full) }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ inputs.full }}" = "false" ]; then
-            echo "args=-m 'not slow'" >> "$GITHUB_OUTPUT"
+          if [ "$FAST" = "true" ]; then
+            pytest -n auto --durations=15 -m "not slow"
           else
-            echo "args=" >> "$GITHUB_OUTPUT"
+            pytest -n auto --durations=15
           fi
-      - run: eval pytest -n auto --durations=15 ${{ steps.tier.outputs.args }}
       - name: Keep the compilation cache small
         if: always()
         run: |
