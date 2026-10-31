@@ -39,6 +39,8 @@ from equinox import Module, field, nn
 from ashlar._compat import renamed
 from ashlar._version import __version__
 from ashlar.distributional import (
+    FLOW_LAYOUT,
+    bare_spline_width,
     check_output_head,
     decode,
     distributional_loss,
@@ -662,6 +664,7 @@ def _save_forecaster(forecaster, path) -> str:
         "estimator": type(forecaster).__name__,
         "params": {name: getattr(forecaster, name) for name in _FORECAST_PARAMS},
         "fitted": {name: getattr(forecaster, name) for name in _FORECAST_FITTED if hasattr(forecaster, name)},
+        "flow_layout": FLOW_LAYOUT,
     }
     (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
     save_leaves(directory / "model.eqx", forecaster.model_)
@@ -678,6 +681,12 @@ def _load_forecaster(cls, path, init):
     for name, value in payload["fitted"].items():
         setattr(forecaster, name, value)
     template = init(jax.random.PRNGKey(0), forecaster.lookback, forecaster.horizon, forecaster.head)
+    if forecaster.head == "flow" and payload.get("flow_layout") != FLOW_LAYOUT:
+        # Saved before the flow head's per-row shift and scale: the bare spline, read with shift 0 and scale 1.
+        width = bare_spline_width(template.out_weight.shape[-1], forecaster.horizon)
+        template = eqx.tree_at(
+            lambda model: (model.out_weight, model.out_bias), template, (template.out_weight[:, :width], template.out_bias[:width])
+        )
     forecaster.model_ = load_leaves(directory / "model.eqx", template)
     return forecaster
 

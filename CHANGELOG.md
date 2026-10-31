@@ -2,6 +2,12 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Fixed
+
+- **The `flow` head gives each row its own spread and tails.** It was a spline on a fixed range with identity tails, so the spread past that range, and so every far quantile and tail probability, was the same for every row: on a lognormal target whose spread more than doubles across rows, it put 0.13% of every row's mass above a high threshold, where the truth is 1.8% on average and 4.4% in the riskiest tenth of rows. The head now ends in a shift and a scale per row, `y = shift + scale * spline(z)`, and gives 1.8% and 4.3%. Its output is two values wider per step. Models and forecasters saved with the old head load and predict as they did.
+
 ## 0.0.3 — 2026-10-31
 
 ### Added

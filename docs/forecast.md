@@ -48,7 +48,7 @@ The mixture figure is that density on a grid, for a series of independent draws 
 
 ## Flow
 
-`head="flow"` is one rational-quadratic spline per horizon step, with linear tails, pushed forward from a standard normal. The loss is the negative of the exact change-of-variables log-density. `predict` is the median, the image of zero. `sample(history, key, n)` is one forward draw per sample. `log_prob` is the density.
+`head="flow"` is one rational-quadratic spline per horizon step, with linear tails, pushed forward from a standard normal and then shifted and scaled, so each step of each window has its own spread and tails. The loss is the negative of the exact change-of-variables log-density. `predict` is the median, the image of zero. `sample(history, key, n)` is one forward draw per sample. `log_prob` is the density.
 
 ## Histogram
 

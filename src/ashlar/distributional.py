@@ -13,9 +13,12 @@ summary for absolute error:
   weights are a softmax, and the loss is the mixture negative log-density.
   The point is the weighted mean.
 - ``flow``: one rational-quadratic spline per horizon step, with linear tails,
-  pushed forward from a standard normal. The loss is the exact change-of-
-  variables log-density. A draw is one forward pass. The point is the median,
-  the image of zero.
+  pushed forward from a standard normal, then shifted and scaled per row:
+  ``y = shift + scale * spline(z)``. The spline sets the shape inside
+  ``[-3, 3]`` and the shift and scale where that lies, so each row has its
+  own spread and its own tails. The loss is the exact change-of-variables
+  log-density. A draw is one forward pass. The point is the median, the
+  image of zero.
 - ``histogram``: softmax over fixed bins on the standardized axis, plus a
   small squared error of the probability-weighted bin center. The point is
   that center.
@@ -54,6 +57,12 @@ FLOW_BINS = 8
 FLOW_BOUND = 3.0
 FLOW_MIN_BIN = 1e-3
 FLOW_MIN_DERIVATIVE = 1e-3
+# Floor of the flow head's per-row scale, as in the joint flow's columns.
+FLOW_MIN_SCALE = 1e-3
+# ``softplus(raw + this) + FLOW_MIN_SCALE`` is 1 at ``raw = 0``, so a new head starts at the unit scale.
+FLOW_SCALE_OFFSET = math.log(math.expm1(1.0 - FLOW_MIN_SCALE))
+# Saved with a model whose flow head ends in a shift and a scale. A save without it holds the bare spline.
+FLOW_LAYOUT = "spline_shift_scale"
 HISTOGRAM_BINS = 16
 HISTOGRAM_LIMIT = 4.0
 HISTOGRAM_LOCATION_WEIGHT = 0.1
@@ -90,8 +99,43 @@ def flow_parameter_count() -> int:
 
     Bin widths, bin heights, and one interior derivative per bin. The two
     boundary derivatives stay fixed at 1 so the linear tails meet the spline.
+    The joint flow's columns use this spline and add their own shift and scale.
     """
     return 3 * FLOW_BINS - 1
+
+
+def flow_output_count() -> int:
+    """Parameters per horizon step of the ``flow`` head: the spline's, then a shift and a raw scale.
+
+    A projection of only ``flow_parameter_count()`` per step, as saved before
+    the shift and scale existed, still reads as a spline with shift 0 and
+    scale 1.
+    """
+    return flow_parameter_count() + 2
+
+
+def bare_spline_width(width: int, horizon: int) -> int:
+    """The width a ``flow`` projection of ``width`` had before the per-row shift and scale."""
+    if int(width) != int(horizon) * flow_output_count():
+        raise ShapeError(f"a flow projection over {int(horizon)} steps has width {int(horizon) * flow_output_count()}; received {width}.")
+    return int(horizon) * flow_parameter_count()
+
+
+def flow_affine(raw):
+    """Split flow parameters ``(..., P)`` into the spline, the shift, and the scale.
+
+    ``P`` is ``flow_output_count()``, or ``flow_parameter_count()`` for a bare
+    spline, whose shift is 0 and scale 1.
+    """
+    raw = jnp.asarray(raw)
+    count = flow_parameter_count()
+    if raw.shape[-1] == count:
+        return raw, jnp.zeros(raw.shape[:-1], dtype=raw.dtype), jnp.ones(raw.shape[:-1], dtype=raw.dtype)
+    if raw.shape[-1] != count + 2:
+        raise ShapeError(f"flow parameters end in {count} or {count + 2} values; received {raw.shape}.")
+    offset = jnp.asarray(FLOW_SCALE_OFFSET, dtype=raw.dtype)
+    scale = jax.nn.softplus(raw[..., count + 1] + offset) + jnp.asarray(FLOW_MIN_SCALE, dtype=raw.dtype)
+    return raw[..., :count], raw[..., count], scale
 
 
 def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS, zero_inflated: bool = False) -> int:
@@ -116,7 +160,7 @@ def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS, zero_infla
     if head == "mixture":
         return int(horizon) * MIXTURE_COMPONENTS * 3
     if head == "flow":
-        return int(horizon) * flow_parameter_count()
+        return int(horizon) * flow_output_count()
     if head == "student_t":
         return int(horizon) * 3
     if head in COUNT_HEADS:
@@ -224,6 +268,9 @@ def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
         head in COUNT_HEADS and flat.ndim == 2 and flat.shape[-1] == int(horizon) * (_COUNT_WIDTH[head] + 1)
     )
     width = output_width(head, horizon, HISTOGRAM_BINS if bins is None else bins, zero_inflated)
+    if head == "flow" and flat.ndim == 2 and flat.shape[-1] == int(horizon) * flow_parameter_count():
+        # A flow head saved before the per-row shift and scale: the bare spline.
+        width = flat.shape[-1]
     if flat.ndim != 2 or flat.shape[-1] != width:
         raise ShapeError(
             f"{head} projection must have shape (batch, {width}); received {flat.shape}."
@@ -242,7 +289,7 @@ def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
         raw = flat.reshape(batch, int(horizon), MIXTURE_COMPONENTS, 3)
         return raw[..., 0], positive_scale(raw[..., 1]), jax.nn.softmax(raw[..., 2], axis=-1)
     if head == "flow":
-        return flat.reshape(batch, int(horizon), flow_parameter_count())
+        return flat.reshape(batch, int(horizon), width // int(horizon))
     if head == "student_t":
         raw = flat.reshape(batch, int(horizon), 3)
         df = jax.nn.softplus(raw[..., 2]) + jnp.asarray(STUDENT_T_MIN_DF, dtype=raw.dtype)
@@ -501,9 +548,10 @@ def _same_shape(left, right, name: str) -> None:
 
 
 def _flow_shape(raw, value) -> None:
-    if raw.ndim != value.ndim + 1 or raw.shape[:-1] != value.shape or raw.shape[-1] != flow_parameter_count():
+    widths = (flow_output_count(), flow_parameter_count())
+    if raw.ndim != value.ndim + 1 or raw.shape[:-1] != value.shape or raw.shape[-1] not in widths:
         raise ShapeError(
-            f"flow parameters must have shape {value.shape} + ({flow_parameter_count()},); received {raw.shape}."
+            f"flow parameters must have shape {value.shape} + ({flow_output_count()},); received {raw.shape}."
         )
 
 
@@ -658,14 +706,21 @@ def _flow_map(raw, inputs, inverse: bool):
 
 
 def flow_forward(raw, base) -> jax.Array:
-    """Push a standard-normal sample through the conditional spline."""
-    outputs, _logdet = _flow_map(raw, base, inverse=False)
-    return outputs
+    """Push a standard-normal sample through the conditional spline, then its shift and scale.
+
+    ``raw`` ends in ``flow_output_count()`` values, or in
+    ``flow_parameter_count()`` for the bare spline.
+    """
+    spline, shift, scale = flow_affine(raw)
+    outputs, _logdet = _flow_map(spline, base, inverse=False)
+    return shift + scale * outputs
 
 
 def flow_inverse(raw, value):
     """Map a standardized observation to the base noise and ``log|dz/dy|``."""
-    return _flow_map(raw, value, inverse=True)
+    spline, shift, scale = flow_affine(raw)
+    base, logdet = _flow_map(spline, (value - shift) / scale, inverse=True)
+    return base, logdet - jnp.log(scale)
 
 
 def flow_log_density(raw, value) -> jax.Array:

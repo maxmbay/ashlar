@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from ashlar import ASRForecaster, ASRModel, ASRRegressor
-from ashlar.distributional import decode, flow_parameter_count, log_density
+from ashlar.distributional import decode, flow_output_count, flow_parameter_count, log_density
 from ashlar.distributions import (
     AffineTransformed,
     Categorical,
@@ -36,7 +36,8 @@ def _continuous():
         "normal": Normal(jnp.array([0.0, 1.0, -2.0]), jnp.array([1.0, 0.5, 2.0])),
         "student_t": StudentT(jnp.array([0.0, 1.0, -2.0]), jnp.array([1.0, 0.5, 2.0]), jnp.array([3.0, 5.0, 2.5])),
         "mixture": Mixture(Normal(jax.random.normal(keys[0], (3, 4)) * 2, jnp.full((3, 4), 0.7)), jax.random.normal(keys[1], (3, 4))),
-        "flow": Flow(jax.random.normal(keys[2], (3, flow_parameter_count()))),
+        "flow": Flow(jax.random.normal(keys[2], (3, flow_output_count()))),
+        "flow_bare_spline": Flow(jax.random.normal(keys[5], (3, flow_parameter_count()))),
         "histogram": Histogram(jax.random.normal(keys[3], (3, 16))),
         "affine": AffineTransformed(Mixture(Flow(jax.random.normal(keys[4], (3, 5, flow_parameter_count())))), 10.0, 3.0),
     }
@@ -152,7 +153,7 @@ def test_distributions_are_pytrees_for_jit_vmap_grad_and_indexing():
 
 
 def test_head_distribution_matches_the_training_density():
-    for kind, width in [("gaussian", 2), ("mixture", 15), ("flow", flow_parameter_count()), ("histogram", 16), ("student_t", 3)]:
+    for kind, width in [("gaussian", 2), ("mixture", 15), ("flow", flow_output_count()), ("flow", flow_parameter_count()), ("histogram", 16), ("student_t", 3)]:
         flat = jax.random.normal(KEY, (6, width))
         value = jax.random.normal(jax.random.PRNGKey(2), (6,))
         expected = log_density(kind, decode(kind, flat, 1), value[:, None])[:, 0]

@@ -73,7 +73,7 @@ from ashlar.calibrate import (
     pit_values,
     recalibrated_levels,
 )
-from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, point_values
+from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
 from ashlar.distributions import (
     AffineTransformed,
     Categorical,
@@ -1869,6 +1869,7 @@ class ASRModel(BaseEstimator):
             "schema": self.encoder_.to_json(),
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
+            "flow_layout": FLOW_LAYOUT,
         }
         (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
         save_leaves(directory / "core.eqx", self.core_)
@@ -1929,6 +1930,8 @@ class ASRModel(BaseEstimator):
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
+        if payload.get("flow_layout") != FLOW_LAYOUT:
+            template = _bare_spline_flow_head(template)
         estimator.encoder_ = encoder
         estimator.embedded_columns_ = [column.name for column in encoder.embedding_columns]
         estimator.numeric_transform_ = load_leaves(directory / "numeric.eqx", encoder.numeric_transform)
@@ -1971,6 +1974,25 @@ class ASRModel(BaseEstimator):
     def _require_fitted(self):
         if not getattr(self, "is_fitted_", False):
             raise AshlarError("this estimator is not fitted.")
+
+
+def _bare_spline_flow_head(core):
+    """Shape a built-in flow head like one saved before its per-row shift and scale.
+
+    Such a save holds only the spline's parameters; the head then reads them
+    with shift 0 and scale 1, as it was trained.
+    """
+    import equinox as eqx
+
+    head = getattr(core, "head", None)
+    if not isinstance(head, DistributionHead) or head.kind != "flow":
+        return core
+    width = bare_spline_width(head.output.weight.shape[-1], 1)
+    return eqx.tree_at(
+        lambda tree: (tree.head.output.weight, tree.head.output.bias),
+        core,
+        (head.output.weight[..., :width], head.output.bias[..., :width]),
+    )
 
 
 def _task_signature(defaults: dict, positional: tuple[str, ...]) -> inspect.Signature:

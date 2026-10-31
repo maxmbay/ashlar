@@ -542,13 +542,17 @@ class LowRankMultivariateNormal(Distribution):
 
 
 class Flow(Distribution):
-    """The ``flow`` head: a rational-quadratic spline pushed forward from a standard normal.
+    """The ``flow`` head: a standard normal pushed through a rational-quadratic spline, then shifted and scaled.
 
-    ``params`` is ``batch_shape + (parameters,)``, the unconstrained spline of
-    ``ashlar.distributional``. The spline is monotone, so the quantile at
-    ``q`` is the spline at the normal quantile of ``q``. Mean and variance
-    are exact normal integrals on the identity tails plus a
-    512-point midpoint rule inside the spline's range.
+    ``y = shift + scale * spline(z)``. ``params`` is ``batch_shape +
+    (parameters,)``: the unconstrained spline of ``ashlar.distributional``,
+    then the shift and the raw scale, one of each per row, so every row has
+    its own spread and its own tails. A bare spline (``flow_parameter_count()``
+    values, the layout saved before the shift and scale) has shift 0 and
+    scale 1. The map is monotone, so the quantile at ``q`` is the map at the
+    normal quantile of ``q``. Mean and variance are exact normal integrals
+    on the linear tails plus a 512-point midpoint rule inside the spline's
+    range.
     """
 
     params: jax.Array
@@ -593,27 +597,32 @@ class Flow(Distribution):
 
     def _moments(self):
         """First two moments. The spline is the identity outside ``[-bound, bound]``,
-        so the tails are closed-form normal integrals; the inside is a midpoint rule."""
-        from ashlar.distributional import FLOW_BOUND
+        so the tails are closed-form normal integrals; the inside is a midpoint rule.
+        The shift and scale then move them."""
+        from ashlar.distributional import FLOW_BOUND, flow_affine, flow_forward
 
+        spline, shift, scale = flow_affine(self.params)
         bound = float(FLOW_BOUND)
         width = 2.0 * bound / QUADRATURE_NODES
         nodes = -bound + width * (jnp.arange(QUADRATURE_NODES, dtype=self.params.dtype) + 0.5)
         weights = width * jnp.exp(-0.5 * jnp.square(nodes)) / math.sqrt(2 * math.pi)
-        values = self._forward(nodes.reshape((-1,) + (1,) * len(self.batch_shape)))
+        grid = jnp.broadcast_to(
+            nodes.reshape((-1,) + (1,) * len(self.batch_shape)), (QUADRATURE_NODES,) + tuple(self.batch_shape)
+        )
+        values = flow_forward(jnp.broadcast_to(spline, grid.shape + spline.shape[-1:]), grid)
         weights = weights.reshape((-1,) + (1,) * len(self.batch_shape))
         density = math.exp(-0.5 * bound * bound) / math.sqrt(2 * math.pi)
         tail_mass = 0.5 * math.erfc(bound / math.sqrt(2.0))
         first = jnp.sum(weights * values, axis=0)
         second = jnp.sum(weights * jnp.square(values), axis=0) + 2.0 * (bound * density + tail_mass)
-        return first, second
+        spread = jnp.maximum(second - jnp.square(first), 0.0)
+        return shift + scale * first, jnp.square(scale) * spread
 
     def mean(self):
         return self._moments()[0]
 
     def variance(self):
-        first, second = self._moments()
-        return jnp.maximum(second - jnp.square(first), 0.0)
+        return self._moments()[1]
 
 
 class Histogram(Distribution):
