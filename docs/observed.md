@@ -60,8 +60,9 @@ Intervals are closed at both ends, which is what a count needs: a sold-out stock
 | exact, interval, censored, survival, rounded, truncated | `gaussian`, `mixture`, `flow`, `histogram`, `student_t`, `poisson`, `negative_binomial` (zero-inflated or not), `hurdle`, `normal` with one column |
 | noisy | `gaussian`, `mixture`, `normal`, where a normal plus normal noise stays in closed form |
 | group totals | `gaussian`, `normal`, `poisson` without zero inflation, where a sum of independent rows stays in closed form |
+| a cell per column, each exact, interval, censored, survival without entry, or rounded | `multivariate_gaussian`, `multivariate_mixture`, `multivariate_flow` (with one block, the default, when any cell is coarse) |
 
-The `quantile` head has no density and the joint heads model several columns, so neither takes an observed label, and neither do the classifiers. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
+The `quantile` head has no density, so it takes no observed label, and neither do the classifiers. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
 
 The `histogram` head has no mass past its edges at ±4 standard deviations, so it reads a bound out there at the middle of its end bin, as its `log_prob` reads a value out there in the end bin. If many bounds fall that far out, use the `mixture` or the `flow`. The `hurdle` head's zero is an exact atom, so `interval(0, 5)` includes it and `interval(0.01, 5)` does not.
 
@@ -69,7 +70,8 @@ The `histogram` head has no mass past its edges at ±4 standard deviations, so i
 
 - `model.log_prob(X, label)` is one log-likelihood per row, and `model.score(X, label)` their mean, so `cross_val_score` and `GridSearchCV` compare fits on censored data by likelihood. With group totals, `score` is the mean per observation and `log_prob` refuses, since a total is one observation of several rows.
 - `model.calibrate(X, label)` accepts exact, interval, and censored rows. A coarse row's probability integral transform is drawn uniformly between `P(Y < lower)` and `P(Y <= upper)`, the same rule `calibrate` already uses for counts. It is uniform when censoring is independent of the value given the features, so calibration on sold-out days is honest under the same assumption as the fit. Truncated, noisy, and grouped labels are refused, since their PIT is not uniform.
-- `observed.log_likelihood(dist, lower, upper, ...)` and `observed.randomized_pit(dist, lower, upper, key)` take any `ashlar.distributions.Distribution`, so they also work in a custom objective. With `task="custom"`, the training `y` the objective receives is the `(rows, 6)` array of `observed.fields(label)`.
+- `observed.log_likelihood(dist, lower, upper, ...)` and `observed.randomized_pit(dist, lower, upper, key)` take any `ashlar.distributions.Distribution`, so they also work in a custom objective. With `task="custom"`, the training `y` the objective receives is the `(rows, 6)` array of `observed.fields(label)`, or `(rows, columns, 6)` for a joint label.
+- A joint model's `log_prob(X, label)` and `score(X, label)` take a joint label; `calibrate` refuses a joint model, as it does for plain joint targets.
 
 ## Daily values from weekly totals
 

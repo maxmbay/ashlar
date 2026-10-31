@@ -171,6 +171,21 @@ class Distribution(Module):
         """The distribution of ``Y + e`` for independent ``e ~ Normal(0, scale)``."""
         raise NotImplementedError(f"{type(self).__name__} has no closed form with added normal noise.")
 
+    def log_box(self, lower, upper, points=None):
+        """For a joint outcome, the log-likelihood of every column lying in its closed interval ``[lower, upper]``.
+
+        ``lower`` and ``upper`` broadcast against ``batch_shape + event_shape``.
+        A column with ``lower == upper`` is an exact value and contributes its
+        density; any other column contributes the probability of its interval,
+        with ``-inf`` or ``inf`` for an open side. So a row whose columns are
+        each exact, censored, or in an interval scores ``p(exact columns) *
+        P(coarse columns in their intervals | exact columns)``. A family that
+        has to integrate over its coarse columns does so at the quasi-random
+        ``points``, shaped ``(count, columns)`` in ``(0, 1)``;
+        ``box_points(BOX_POINTS, d)`` by default.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no box likelihood.")
+
     def quantile(self, q):
         if self.event_shape:
             raise NotImplementedError("a joint outcome has no single quantile; use marginals().quantile(q).")
@@ -494,6 +509,11 @@ class Mixture(Distribution):
         weight = jnp.exp(self.logits)
         return jnp.sum(weight * low, axis=-1), jnp.sum(weight * high, axis=-1)
 
+    def log_box(self, lower, upper, points=None):
+        """Each component's box likelihood, mixed by its weight."""
+        lower, upper = _bounds(lower, upper)
+        return self._log_mix(self.components.log_box(self._expand(lower), self._expand(upper), points))
+
     def convolve_normal(self, scale):
         return Mixture(self.components.convolve_normal(self._expand(scale)), self.logits)
 
@@ -644,6 +664,15 @@ class AffineTransformed(Distribution):
         lower, upper = _bounds(lower, upper)
         return self.base.cdf_interval(self._inner(lower), self._inner(upper))
 
+    def log_box(self, lower, upper, points=None):
+        """The base's box likelihood at the standardized bounds, less the log scale of every exact column."""
+        if len(self.event_shape) != 1:
+            raise NotImplementedError("a box likelihood is for a joint outcome over one event axis.")
+        lower, upper = _bounds(lower, upper)
+        exact = (lower == upper) & jnp.isfinite(lower)
+        inner = self.base.log_box(self._inner(lower), self._inner(upper), points)
+        return inner - jnp.sum(jnp.where(exact, jnp.log(self.scale), 0.0), axis=-1)
+
     def convolve_normal(self, scale):
         return AffineTransformed(self.base.convolve_normal(jnp.asarray(scale, dtype=jnp.float32) / self.scale), self.loc, self.scale)
 
@@ -696,6 +725,15 @@ class Independent(Distribution):
     def log_prob(self, value):
         return jnp.sum(self.base.log_prob(value), axis=-1)
 
+    def log_box(self, lower, upper, points=None):
+        """Each column's own likelihood, summed: independent columns need no integral."""
+        del points
+        lower, upper = _bounds(lower, upper)
+        exact = lower == upper
+        point = self.base.log_prob(jnp.where(exact, lower, 0.0))
+        coarse = self.base.log_interval(jnp.where(exact, -jnp.inf, lower), jnp.where(exact, jnp.inf, upper))
+        return jnp.sum(jnp.where(exact, point, coarse), axis=-1)
+
     def sample(self, key, sample_shape=()):
         return self.base.sample(key, sample_shape)
 
@@ -714,6 +752,109 @@ class Independent(Distribution):
 
     def _index(self, index):
         return Independent(self.base._index(index))
+
+
+# Quasi-random points per row for a box likelihood that integrates: scoring and ``log_box`` by default.
+BOX_POINTS = 256
+# Past this many standard deviations a truncated draw's CDF underflows in float32, so it sits at the near end.
+_DRAW_LIMIT = 10.0
+
+
+def _primes(count: int) -> list[int]:
+    found: list[int] = []
+    candidate = 2
+    while len(found) < count:
+        if all(candidate % prime for prime in found if prime * prime <= candidate):
+            found.append(candidate)
+        candidate += 1
+    return found
+
+
+def box_points(count: int, dim: int) -> jax.Array:
+    """``count`` quasi-random points in ``(0, 1)^dim``: the Halton sequence, centred.
+
+    Coordinate ``j`` is the radical inverse in the ``j``-th prime base ``b``,
+    moved up by half its finest complete cell, ``1 / (2 b^m)`` with ``b^m <=
+    count``, modulo 1, so that the first coordinate of ``2^m`` points is the
+    midpoint rule. A box likelihood that integrates over a row's coarse columns
+    averages over these, one coordinate per coarse column in the order it
+    visits them. The same points serve every row, which keeps a training
+    objective deterministic.
+    """
+    count, dim = int(count), int(dim)
+    if count < 1 or dim < 1:
+        raise ShapeError(f"box points need a positive count and dimension; received {count} and {dim}.")
+    import numpy as np
+
+    points = np.empty((count, dim), dtype=np.float64)
+    for axis, base in enumerate(_primes(dim)):
+        cell = 1.0
+        while cell * base <= count:
+            cell *= base
+        for row in range(count):
+            index, fraction, value = row, 1.0 / base, 0.0
+            while index:
+                index, digit = divmod(index, base)
+                value += digit * fraction
+                fraction /= base
+            points[row, axis] = (value + 0.5 / cell) % 1.0
+    return jnp.asarray(points, dtype=jnp.float32)
+
+
+def _check_box_points(points, d: int):
+    points = box_points(BOX_POINTS, d) if points is None else jnp.asarray(points, dtype=jnp.float32)
+    if points.ndim != 2 or points.shape[1] < d:
+        raise ShapeError(f"box points must be (count, {d}) or wider; received {points.shape}.")
+    return points
+
+
+def _standard_log_interval(alpha, beta):
+    """``log P(alpha <= Z <= beta)`` for a standard normal ``Z``, accurate in either tail."""
+    return Normal(0.0, 1.0).log_interval(alpha, beta)
+
+
+def _truncated_standard_normal(alpha, beta, log_mass, u):
+    """The ``u`` quantile of a standard normal truncated to ``[alpha, beta]``, with its implicit gradient.
+
+    ``log_mass`` is ``log P(alpha <= Z <= beta)``. An interval above zero is
+    reflected below it first, so the CDF at its near end is not close to 1,
+    and the inverse CDF works from ``log P(Z < near end)``. The value comes
+    from ``ndtri``; the gradient is that of ``Φ(draw) = Φ(alpha) + u (Φ(beta)
+    - Φ(alpha))``, which stays finite where ``ndtri``'s own would not. An
+    interval more than ten standard deviations out puts the draw at its
+    near end.
+    """
+    flip = alpha > 0
+    low = jnp.where(flip, -beta, alpha)
+    high = jnp.where(flip, -alpha, beta)
+    has_low = jnp.isfinite(low)
+    log_below = jnp.where(has_low, log_ndtr(jnp.where(has_low, low, 0.0)), -jnp.inf)
+    log_target = jnp.logaddexp(log_below, jnp.log(u) + log_mass)
+    far = high < -_DRAW_LIMIT
+    target = jnp.clip(jnp.exp(jnp.where(far, _LOG_HALF, log_target)), _TINY, 1.0 - 1e-7)
+    value = jax.lax.stop_gradient(jnp.clip(ndtri(target), low, high))
+    log_density = -0.5 * (math.log(2 * math.pi) + jnp.square(value))
+    slope = jax.lax.stop_gradient(jnp.exp(jnp.minimum(log_target - log_density, 30.0)))
+    moved = value + slope * (log_target - jax.lax.stop_gradient(log_target))
+    draw = jnp.where(far, jnp.where(jnp.isfinite(high), high, 0.0), moved)
+    return jnp.where(flip, -draw, draw)
+
+
+def _box_order(exact, marginal_log_mass):
+    """Exact columns first, then the coarse ones from the least likely: the order a box likelihood visits them.
+
+    Visiting the exact columns first makes their part exact. Among coarse
+    columns, the least likely first is Genz's (1992) ordering, which puts
+    the most of the probability in the terms computed without draws.
+    """
+    key = jax.lax.stop_gradient(jnp.where(exact, -jnp.inf, marginal_log_mass))
+    return jnp.argsort(key, axis=-1, stable=True)
+
+
+def _coarse_points(points, exact):
+    """Each column's uniform at every point, ``(count,) + exact.shape``: coarse column ``j`` reads coordinate ``j``."""
+    index = jnp.clip(jnp.cumsum(~exact, axis=-1) - 1, 0, points.shape[1] - 1)
+    return points[:, index]
 
 
 class LowRankMultivariateNormal(Distribution):
@@ -799,6 +940,59 @@ class LowRankMultivariateNormal(Distribution):
 
     def marginals(self):
         return Normal(self.loc, jnp.sqrt(self.variance()))
+
+    def log_box(self, lower, upper, points=None):
+        """The GHK simulator (Geweke, Hajivassiliou, Keane), run on the ``rank`` shared factors.
+
+        Given the factors the columns are independent, so each column is one
+        Kalman update of the factors' normal posterior, ``O(rank²)``, with a
+        variance that never falls below the column's own ``D``. Columns are
+        visited exact first, which is the exact marginal density of the exact
+        columns, then the coarse ones from the least likely. The first coarse
+        column's probability is exact given the exact ones; each later one is
+        averaged over truncated draws of the columns before it, one per point.
+        So a row with at most one coarse column is closed form, and a row with
+        several is a quasi-Monte Carlo estimate whose log sits slightly low,
+        by about half its relative variance.
+        """
+        d, rank = self.loc.shape[-1], self.rank
+        lower, upper = _bounds(lower, upper)
+        batch = jnp.broadcast_shapes(lower.shape[:-1], upper.shape[:-1], self.batch_shape)
+        lower, upper, loc, diag = (jnp.broadcast_to(part, batch + (d,)) for part in (lower, upper, self.loc, self.cov_diag))
+        factor = jnp.broadcast_to(self.cov_factor, batch + (d, rank))
+        points = _check_box_points(points, d)
+        exact = (lower == upper) & jnp.isfinite(lower)
+        spread = jnp.sqrt(diag + jnp.sum(jnp.square(factor), axis=-1))
+        marginal = Normal(loc, spread).log_interval(jnp.where(exact, -jnp.inf, lower), jnp.where(exact, jnp.inf, upper))
+        order = _box_order(exact, marginal)
+        lower, upper, loc, diag, exact = (jnp.take_along_axis(part, order, axis=-1) for part in (lower, upper, loc, diag, exact))
+        factor = jnp.take_along_axis(factor, order[..., None], axis=-2)
+        uniform = _coarse_points(points, exact)
+        count = points.shape[0]
+        mean = jnp.zeros((count,) + batch + (rank,), dtype=jnp.float32)
+        cov = jnp.broadcast_to(jnp.eye(rank, dtype=jnp.float32), batch + (rank, rank))
+        total = jnp.zeros((count,) + batch, dtype=jnp.float32)
+        for step in range(d):
+            weight = factor[..., step, :]
+            projected = jnp.einsum("...rs,...s->...r", cov, weight)
+            variance = diag[..., step] + jnp.maximum(jnp.sum(weight * projected, axis=-1), 0.0)
+            sd = jnp.sqrt(variance)
+            centre = loc[..., step] + jnp.einsum("n...r,...r->n...", mean, weight)
+            is_exact = exact[..., step]
+            low, high = lower[..., step], upper[..., step]
+            # An exact column: its density given the columns before it.
+            z = (jnp.where(is_exact, low, 0.0) - centre) / sd
+            point = -0.5 * (math.log(2 * math.pi) + jnp.square(z)) - jnp.log(sd)
+            # A coarse one: the probability of its interval, then a draw inside it for the columns after it.
+            alpha = _finite_standardized(jnp.where(is_exact, -jnp.inf, low), centre, sd)
+            beta = _finite_standardized(jnp.where(is_exact, jnp.inf, high), centre, sd)
+            log_mass = _standard_log_interval(alpha, beta)
+            draw = _truncated_standard_normal(alpha, beta, log_mass, uniform[..., step])
+            total = total + jnp.where(is_exact, point, log_mass)
+            gain = projected / variance[..., None]
+            mean = mean + (sd * jnp.where(is_exact, z, draw))[..., None] * gain
+            cov = cov - variance[..., None, None] * gain[..., :, None] * gain[..., None, :]
+        return jax.nn.logsumexp(total, axis=0) - math.log(count)
 
 
 class Flow(Distribution):
@@ -1345,6 +1539,28 @@ def joint_normal_distribution(flat, n_events: int) -> LowRankMultivariateNormal:
     return LowRankMultivariateNormal(loc, factor, jnp.square(std))
 
 
+def joint_mixture_distribution(flat, n_events: int, components: int) -> Mixture:
+    """The ``multivariate_mixture`` head's mixture of joint normals from its flat projection ``batch + (width,)``.
+
+    The width is ``components * (1 + n_events * (2 + rank))``: the component
+    logits, then each component's locations, raw scales, and covariance
+    factor, laid out as in ``joint_normal_distribution``. The result is a
+    ``Mixture`` whose components are ``LowRankMultivariateNormal`` with batch
+    ``batch + (components,)``.
+    """
+    flat = jnp.asarray(flat)
+    count, d = int(components), int(n_events)
+    width = int(flat.shape[-1])
+    per = (width - count) // count if count > 0 else 0
+    if count < 1 or (width - count) % count or per < 2 * d or (per - 2 * d) % d:
+        raise ShapeError(
+            f"a mixture of {count} joint normals over {d} columns needs a width of {count} * (1 + {d} * (2 + rank)); "
+            f"received {width}."
+        )
+    blocks = flat[..., count:].reshape(flat.shape[:-1] + (count, per))
+    return Mixture(joint_normal_distribution(blocks, d), flat[..., :count])
+
+
 
 MOMENT_DRAWS = 1024
 _MOMENT_CHUNK = 64
@@ -1544,6 +1760,75 @@ class AutoregressiveFlow(Distribution):
     def log_prob(self, value):
         base, logdet = self.inverse(value)
         return jnp.sum(-0.5 * (math.log(2 * math.pi) + jnp.square(base)), axis=-1) + logdet
+
+    def _column_conditioner(self, column: int, inputs):
+        """One column's spline parameters, shift, and scale in the first block, from the inputs before it.
+
+        The same numbers as ``_conditioner(0, ...)[..., column]``, with only
+        that column's slice of the output layer computed.
+        """
+        from ashlar.distributional import flow_parameter_count
+
+        d, hidden, spline = self.n_events, self.hidden, flow_parameter_count()
+        mask_in, mask_out = autoregressive_masks(d, hidden)
+        part = self.context[..., : autoregressive_context_width(d, hidden)]
+        units = jnp.tanh(jnp.einsum("...kd,khd->...kh", inputs, self.w_in[:, 0] * mask_in) + part[..., :hidden])
+        rows = slice(column * (spline + 2), (column + 1) * (spline + 2))
+        w_out = self.w_out[:, 0, rows] * mask_out[column]
+        out = jnp.einsum("...kh,koh->...ko", units, w_out) + part[..., hidden:][..., rows]
+        scale = jax.nn.softplus(out[..., spline + 1] + _SOFTPLUS_ONE) + 1e-3
+        return out[..., :spline], out[..., spline], scale
+
+    def log_box(self, lower, upper, points=None):
+        """The GHK simulator in the flow's own column order. One block only (``depth=1``).
+
+        An exact column scores its density given the columns before it. A
+        coarse column scores the probability of its interval under its
+        conditional, the interval pulled back through the column's spline to
+        the base normal, and then draws a value inside it (a truncated normal
+        pushed through the spline) for the columns after it, one draw per
+        point. So a row whose only coarse column is the last is closed form;
+        otherwise it is a quasi-Monte Carlo estimate. With more than one block
+        a column depends on columns after it, so there is no such order.
+        """
+        from ashlar.distributional import flow_forward, flow_inverse
+
+        if self.depth != 1:
+            raise NotImplementedError(
+                "a flow's box likelihood needs one autoregressive block (depth=1); "
+                "with more, a column depends on the columns after it."
+            )
+        d = self.n_events
+        lower, upper = _bounds(lower, upper)
+        batch = jnp.broadcast_shapes(lower.shape[:-1], upper.shape[:-1], self.batch_shape)
+        lower, upper = jnp.broadcast_to(lower, batch + (d,)), jnp.broadcast_to(upper, batch + (d,))
+        points = _check_box_points(points, d)
+        exact = (lower == upper) & jnp.isfinite(lower)
+        uniform = _coarse_points(points, exact)
+        count = points.shape[0]
+
+        def pulled_back(splines, shift, scale, bound):
+            finite = jnp.isfinite(bound)
+            base, _logdet = flow_inverse(splines, (jnp.where(finite, bound, 0.0) - shift) / scale)
+            return jnp.where(finite, base, bound)
+
+        values = jnp.zeros((count,) + batch + (d,), dtype=jnp.float32)
+        total = jnp.zeros((count,) + batch, dtype=jnp.float32)
+        for column in range(d):
+            splines, shift, scale = self._column_conditioner(column, values)
+            is_exact = exact[..., column]
+            low, high = lower[..., column], upper[..., column]
+            seen = jnp.where(is_exact, low, 0.0)
+            base, logdet = flow_inverse(splines, (seen - shift) / scale)
+            point = -0.5 * (math.log(2 * math.pi) + jnp.square(base)) + logdet - jnp.log(scale)
+            alpha = pulled_back(splines, shift, scale, jnp.where(is_exact, -jnp.inf, low))
+            beta = pulled_back(splines, shift, scale, jnp.where(is_exact, jnp.inf, high))
+            log_mass = _standard_log_interval(alpha, beta)
+            draw = _truncated_standard_normal(alpha, beta, log_mass, uniform[..., column])
+            drawn = shift + scale * flow_forward(splines, draw)
+            total = total + jnp.where(is_exact, point, log_mass)
+            values = values.at[..., column].set(jnp.where(is_exact, seen, drawn))
+        return jax.nn.logsumexp(total, axis=0) - math.log(count)
 
     def sample(self, key, sample_shape=()):
         shape = tuple(sample_shape) + self.batch_shape + self.event_shape

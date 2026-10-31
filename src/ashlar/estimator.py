@@ -29,6 +29,7 @@ from ashlar.heads import (
     HurdleHead,
     LogitsHead,
     MultivariateFlowHead,
+    MultivariateMixtureHead,
     MultivariateNormalHead,
     NormalHead,
     OrdinalHead,
@@ -58,7 +59,9 @@ from ashlar.objectives import (
     normal_objective,
     make_distribution_objective,
     make_hurdle_objective,
+    joint_member_distribution,
     make_joint_objective,
+    make_joint_observed_objective,
     make_observed_objective,
     make_ordinal_expectation_objective,
     make_total_objective,
@@ -81,6 +84,7 @@ from ashlar.calibrate import (
 from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
 from ashlar import observed
 from ashlar.distributions import (
+    BOX_POINTS,
     AffineTransformed,
     Categorical,
     Independent,
@@ -89,8 +93,6 @@ from ashlar.distributions import (
     QuantileLevels,
     head_distribution,
     hurdle_distribution,
-    joint_flow_distribution,
-    joint_normal_distribution,
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
@@ -115,6 +117,7 @@ _HEADS = {
     "softmax": SoftmaxHead,
     "distribution": DistributionHead,
     "multivariate_normal": MultivariateNormalHead,
+    "multivariate_mixture": MultivariateMixtureHead,
     "multivariate_flow": MultivariateFlowHead,
     "hurdle": HurdleHead,
     "tree": TreeHead,
@@ -134,13 +137,17 @@ _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
 DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
-JOINT_TASKS = ("multivariate_gaussian", "multivariate_flow")
+JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow")
 _SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
+_TASK_HEAD["multivariate_mixture"] = "multivariate_mixture"
 _TASK_HEAD["multivariate_flow"] = "multivariate_flow"
+_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow"}
 # Rows per block when reading a flow's draws, which take one network pass per column.
 _FLOW_CHUNK_ROWS = 128
+# Points × rows × members × columns × components per block when scoring a joint label.
+_BOX_CHUNK_CELLS = 1 << 22
 
 
 def _raw_count(raw) -> int:
@@ -270,6 +277,18 @@ def _jit_observed_log_likelihood(truncated: bool, noisy: bool):
 
         _OBSERVED_LOG_LIKELIHOOD[key] = eqx.filter_jit(score)
     return _OBSERVED_LOG_LIKELIHOOD[key]
+
+
+_JOINT_LOG_BOX = None
+
+
+def _jit_joint_log_box():
+    global _JOINT_LOG_BOX
+    if _JOINT_LOG_BOX is None:
+        import equinox as eqx
+
+        _JOINT_LOG_BOX = eqx.filter_jit(lambda dist, lower, upper, points: dist.log_box(lower, upper, points))
+    return _JOINT_LOG_BOX
 
 
 def _jit_observed_pit():
@@ -490,7 +509,7 @@ class ASRModel(BaseEstimator):
         }:
             raise AshlarError(
                 "task must be 'regression', 'classification', 'ordinal', 'normal', 'tree', 'custom', "
-                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', 'multivariate_gaussian', or 'multivariate_flow'."
+                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', or a joint task ({', '.join(JOINT_TASKS)})."
             )
         if (self.task == "tree") != (self.tree is not None):
             raise AshlarError("task='tree' needs a tree= outcome spec, and tree= only applies to task='tree'.")
@@ -684,6 +703,13 @@ class ASRModel(BaseEstimator):
             return
         labels = [label] if val_label is None else [label, val_label]
         task = self.task
+        if task in JOINT_TASKS:
+            self._check_joint_observed(labels)
+            return
+        if any(np.ndim(part) != 1 for part in labels) and task != "custom":
+            raise AshlarError(
+                f"a label with a cell per column is for a joint task ({', '.join(JOINT_TASKS)}); the {task} task reads one column."
+            )
         if task not in OBSERVED_TASKS and task != "custom":
             raise AshlarError(
                 f"an ashlar.observed label needs a head with a CDF; the {task} task has none. "
@@ -721,6 +747,27 @@ class ASRModel(BaseEstimator):
             "noisy": any(observed.is_noisy(part) for part in labels),
             "totals": totals,
         }
+
+    def _check_joint_observed(self, labels):
+        """Refuse a label a joint head cannot score: one cell per row and column, exact or an interval."""
+        for part in labels:
+            if np.ndim(part) != 2:
+                raise AshlarError(
+                    "a joint task takes a label with a cell per target column, shape (rows, columns); "
+                    "build one with observed.stack, or pass a table to observed.censored or observed.interval."
+                )
+        columns = {int(np.shape(part)[1]) for part in labels}
+        if len(columns) > 1:
+            raise ShapeError(f"the training and validation labels have different columns: {sorted(columns)}.")
+        if self.n_events is not None and int(self.n_events) not in columns:
+            raise ShapeError(f"n_events={self.n_events} does not match a label with {columns.pop()} columns.")
+        coarse = any(not observed.is_exact(part).all() for part in labels)
+        if coarse and self.task == "multivariate_flow" and int((self.head_kwargs or {}).get("depth", 1)) != 1:
+            raise AshlarError(
+                "the joint flow trains on coarse cells with one autoregressive block, head_kwargs={'depth': 1}; "
+                "with more, a column depends on the columns after it."
+            )
+        self._observed_spec = {"truncated": False, "noisy": False, "totals": False, "joint": True, "coarse": coarse}
 
     def _observing(self) -> bool:
         return getattr(self, "_observed_spec", None) is not None
@@ -1131,6 +1178,13 @@ class ASRModel(BaseEstimator):
             return self.objective
         if self._observing():
             spec = self._observed_spec
+            if spec.get("joint"):
+                family, components = _JOINT_FAMILY[self.task], self._mixture_components()
+                if spec.get("coarse"):
+                    return make_joint_observed_objective(n_events, family, components=components)
+                # Every cell exact: the joint density of the values themselves, the first field.
+                density = make_joint_objective(n_events, family, components=components)
+                return lambda raw, y, sample_weight: density(raw, y[..., 0], sample_weight)
             if spec.get("totals"):
                 return make_total_objective(self.task, truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy")))
             return make_observed_objective(
@@ -1141,7 +1195,7 @@ class ASRModel(BaseEstimator):
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
         if self.task in JOINT_TASKS:
-            return make_joint_objective(n_events, "flow" if self.task == "multivariate_flow" else "normal")
+            return make_joint_objective(n_events, _JOINT_FAMILY[self.task], components=self._mixture_components())
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
@@ -1201,6 +1255,15 @@ class ASRModel(BaseEstimator):
 
     def _severity(self) -> str:
         return str((self.head_kwargs or {}).get("severity", "lognormal"))
+
+    def _mixture_components(self) -> int | None:
+        """The joint mixture's component count, as its head reads it; ``None`` for the other tasks."""
+        if self.task != "multivariate_mixture":
+            return None
+        from ashlar.distributional import MIXTURE_COMPONENTS
+
+        value = (self.head_kwargs or {}).get("components")
+        return MIXTURE_COMPONENTS if value is None else int(value)
 
     def _bottleneck_width(self) -> int | None:
         value = self.bottleneck
@@ -1321,6 +1384,18 @@ class ASRModel(BaseEstimator):
             self.target_mean_ = None
             self.target_std_ = None
             return y
+        if observed.is_observed(y) and np.ndim(y) == 2:
+            # A joint label's scale, column by column, from each cell's representative value.
+            values = observed.representative(y)
+            known = np.isfinite(values)
+            count = known.sum(axis=0)
+            filled = np.where(known, values, 0.0)
+            mean = np.where(count > 0, filled.sum(axis=0) / np.maximum(count, 1), 0.0)
+            spread = np.where(known, np.square(values - mean), 0.0).sum(axis=0) / np.maximum(count, 1)
+            std = np.where(count > 1, np.sqrt(spread), 1.0)
+            self.target_mean_ = np.asarray(mean, dtype=np.float64)
+            self.target_std_ = np.where(std >= 1e-6, std, 1.0).astype(np.float64)
+            return self._apply_target_scale(y)
         if observed.is_observed(y):
             # The scale of a coarse label: each observation's representative value.
             values = observed.representative(y)
@@ -1342,7 +1417,7 @@ class ASRModel(BaseEstimator):
         if not self.standardize_target or self.target_mean_ is None:
             return y
         if observed.is_observed(y):
-            return observed.affine(y, float(self.target_mean_), float(self.target_std_) + 1e-30)
+            return observed.affine(y, np.asarray(self.target_mean_, dtype=np.float64), np.asarray(self.target_std_, dtype=np.float64) + 1e-30)
         array = np.asarray(y, dtype=np.float64)
         return (array - np.asarray(self.target_mean_, dtype=np.float64)) / (
             np.asarray(self.target_std_, dtype=np.float64) + 1e-30
@@ -1515,6 +1590,9 @@ class ASRModel(BaseEstimator):
                     for start in range(0, _raw_count(raw), _FLOW_CHUNK_ROWS)
                 ]
             )
+        elif self.task == "multivariate_mixture":
+            # Each member's mixture mean, averaged: the mean of the joint mixture.
+            point = np.asarray(self._joint_components(raw).mean().mean(axis=1))
         elif self.task in JOINT_TASKS:
             # The mean of the member locations: the mean of the joint mixture.
             point = np.asarray(jnp.mean(raw[..., : int(self.n_events_)], axis=1))
@@ -1723,9 +1801,7 @@ class ASRModel(BaseEstimator):
 
     def _joint_components(self, raw):
         """Each member's joint distribution on the standardized target, batch ``(rows, members)``."""
-        if self.task == "multivariate_flow":
-            return joint_flow_distribution(raw, int(self.n_events_))
-        return joint_normal_distribution(raw, int(self.n_events_))
+        return joint_member_distribution(_JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components())
 
     def _dist_chunks(self, X):
         """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory.
@@ -1825,7 +1901,9 @@ class ASRModel(BaseEstimator):
     def _observed_log_prob(self, X, label):
         self._univariate_dist("log_prob of an observed label")
         if self.task in JOINT_TASKS:
-            raise AshlarError("an ashlar.observed label is one target column; a joint model has several.")
+            return self._joint_observed_log_prob(X, label)
+        if np.ndim(label) != 1:
+            raise AshlarError(f"a label with a cell per column is for a joint task; this model is {self.task}.")
         if observed.has_groups(label):
             raise AshlarError(
                 "log_prob is one number per row, and a group total is one observation of several rows. "
@@ -1843,6 +1921,40 @@ class ASRModel(BaseEstimator):
         if values.shape[0] != len(label):
             raise ShapeError(f"X has {values.shape[0]} rows and y has {len(label)}.")
         return values
+
+    def _joint_observed_log_prob(self, X, label, points: int = BOX_POINTS):
+        """``log_box`` of a joint label under ``predict_dist(X)``, per row, in the units of ``y``.
+
+        Rows with more than one coarse cell are integrated at ``points``
+        quasi-random points, in blocks small enough to keep the draws in memory.
+        """
+        from ashlar.distributions import box_points
+
+        d = int(self.n_events_)
+        if np.ndim(label) != 2 or np.shape(label)[1] != d:
+            raise AshlarError(
+                f"this joint model has {d} columns; its label needs a cell per row and column, shape (rows, {d}), "
+                f"and received shape {np.shape(label)}."
+            )
+        observed.check(label)
+        if observed.is_exact(label).all():
+            return self.log_prob(X, np.asarray(label["lower"], dtype=np.float64))
+        part = observed.fields(label)
+        grid = box_points(int(points), d)
+        # A flow's step holds its masked network's hidden units for every point, about eight times a column's cells.
+        width = int(points) * int(self.core_.head.k) * d * (self._mixture_components() or 1)
+        width *= 8 if self.task == "multivariate_flow" else 1
+        size = max(8, min(4096, _BOX_CHUNK_CELLS // width))
+        dist = self.predict_dist(X)
+        rows = int(dist.batch_shape[0])
+        if rows != len(label):
+            raise ShapeError(f"X has {rows} rows and y has {len(label)}.")
+        score = _jit_joint_log_box()
+        pieces = []
+        for start in range(0, rows, size):
+            cells = jnp.asarray(part[start : start + size], dtype=jnp.float32)
+            pieces.append(np.asarray(score(dist[start : start + size], cells[..., 0], cells[..., 1], grid), dtype=np.float64))
+        return np.concatenate(pieces) if pieces else np.zeros(0)
 
     def _univariate_dist(self, name: str):
         self._require_fitted()

@@ -29,7 +29,13 @@ dist.cdf_interval(a, b)                          # (P(y < a), P(y <= b)), where 
 dist.convolve_normal(s)                          # y plus normal noise of sd s: normal, mixture, affine
 ```
 
-They are what [`ashlar.observed`](observed.md) trains and scores censored, interval, truncated, and noisy labels with.
+They are what [`ashlar.observed`](observed.md) trains and scores censored, interval, truncated, and noisy labels with. A joint distribution gives the same for a row whose columns are each exact or in an interval:
+
+```python
+dist.log_box(lower, upper)       # log p(exact columns) + log P(the other columns in their intervals | them)
+```
+
+A column with `lower == upper` is exact. The joint normal and the mixture are closed form when a row has at most one coarse column, and the flow when its only coarse column is the last; otherwise `log_box` integrates at `box_points(256, columns)`, quasi-random points, with the GHK simulator. [Joint labels](observed.md#several-products-that-sell-out-together) has the detail.
 
 ## Shapes
 
@@ -54,6 +60,7 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 | `quantile` | `QuantileLevels` | only its three trained levels; no density, CDF, or draws |
 | `hurdle` | `Hurdle`: a probability of exactly zero and a `LogNormal` or `Gamma` amount | 0 up to the zero share, the severity's quantile above it |
 | `multivariate_gaussian` | `LowRankMultivariateNormal` over the target columns | per column, through `marginals()` |
+| `multivariate_mixture` | `Mixture` of five `LowRankMultivariateNormal`s over the target columns | per column, bisection on each marginal mixture's CDF |
 | `multivariate_flow` | `AutoregressiveFlow` over the target columns | per column, from draws (`marginals()` is an `Empirical`) |
 | `normal` | `Mixture` of `Normal`s; `policy="mean_parameters"` gives one `Normal` | closed form, or bisection for the mixture |
 | `classification`, `ordinal`, tree | `Categorical` over `classes_` (the leaves, for a tree); values are class indices | none |
@@ -87,7 +94,9 @@ Independent(dist.marginals())             # the same sites with the dependence d
 
 ## Dependence that is not a correlation
 
-A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_flow"` takes the same `y` and predicts a conditional masked autoregressive flow: `p(y | x) = p(y₁ | x) p(y₂ | y₁, x) ⋯`, where each column's conditional is a standard normal pushed through a monotone spline, shifted and scaled. A masked network reads the columns before each one and the row's context from the trunk, and sets that column's knots, shift, and scale. So the whole shape of a column, not only its mean, can change with the columns before it: one load that spikes when another is high, a cost that grows more uncertain with the duration, a dependence that is strong in the tails and absent in the middle.
+A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_mixture"` takes the same `y` and predicts a mixture of joint normals, five by default (`head_kwargs={"components": 5, "rank": 2}`), each with its own weight, location, and low-rank covariance for every row. It fits dependence that comes in regimes, such as a rush day when every column jumps together and an ordinary day when they barely move, which a single normal averages into one correlation. Its `log_prob` is exact, a draw picks a component and then draws from it, and its marginals are mixtures of normals with exact quantiles.
+
+For dependence that is curved or skewed rather than a few regimes, `task="multivariate_flow"` takes the same `y` and predicts a conditional masked autoregressive flow: `p(y | x) = p(y₁ | x) p(y₂ | y₁, x) ⋯`, where each column's conditional is a standard normal pushed through a monotone spline, shifted and scaled. A masked network reads the columns before each one and the row's context from the trunk, and sets that column's knots, shift, and scale. So the whole shape of a column, not only its mean, can change with the columns before it: one load that spikes when another is high, a cost that grows more uncertain with the duration, a dependence that is strong in the tails and absent in the middle.
 
 ```python
 model = ASRRegressor(task="multivariate_flow").fit(X, Y)

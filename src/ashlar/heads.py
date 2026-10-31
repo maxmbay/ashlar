@@ -303,6 +303,61 @@ class MultivariateNormalHead(_EnsembleHead):
         return self.output(hidden)
 
 
+class MultivariateMixtureHead(_EnsembleHead):
+    """Mixture of joint normals over ``n_events`` target columns. Output ``(batch, member, width)``.
+
+    ``width = components * (1 + event * (2 + rank))``, read by
+    ``ashlar.distributions.joint_mixture_distribution``: per row and member,
+    ``components`` logits, then each component's locations, raw scales, and
+    ``event × rank`` covariance factor in the layout of
+    ``MultivariateNormalHead``. ``components`` is 5 by default and ``rank``
+    2, at most the number of columns. Several components let the joint put
+    its mass on separate branches, such as a day when every product spikes
+    together and a day when none does, each with its own correlation. The
+    projection starts small, the weights equal, and the components at fixed
+    random locations on the standardized target, so they start apart.
+    """
+
+    n_events: int = field(static=True)
+    rank: int = field(static=True)
+    components: int = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, components=None, rank=None, **kwargs):
+        from ashlar.distributional import MIXTURE_COMPONENTS
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"multivariate mixture head received unknown arguments {sorted(kwargs)}.")
+        if n_events < 1:
+            raise ShapeError("n_events must be positive.")
+        d = int(n_events)
+        count = MIXTURE_COMPONENTS if components is None else int(components)
+        if count < 1:
+            raise ShapeError(f"components must be at least 1; received {components}.")
+        rank = min(2, d) if rank is None else int(rank)
+        if not 0 <= rank <= d:
+            raise ShapeError(f"rank must be between 0 and the number of target columns, {d}; received {rank}.")
+        weight_key, loc_key, factor_key = jax.random.split(key, 3)
+        per = d * (2 + rank)
+        locations = jax.random.normal(loc_key, (count, d), dtype=jnp.float32)
+        factor_bias = 0.1 * jax.random.normal(factor_key, (count, d * rank), dtype=jnp.float32)
+        blocks = jnp.concatenate([locations, jnp.zeros((count, d), dtype=jnp.float32), factor_bias], axis=-1)
+        bias = jnp.concatenate([jnp.zeros((count,), dtype=jnp.float32), blocks.reshape(-1)])
+        self.output = LinearEnsemble(
+            weight=0.01 * jax.random.normal(weight_key, (k, d_in, count * (1 + per)), dtype=jnp.float32),
+            bias=jnp.broadcast_to(bias, (k, count * (1 + per))),
+        )
+        self.k = k
+        self.n_events = d
+        self.rank = rank
+        self.components = count
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
+
+
 class MultivariateFlowHead(_EnsembleHead):
     """Conditional masked autoregressive flow over ``n_events`` target columns.
 
