@@ -28,6 +28,7 @@ from ashlar.heads import (
     DistributionHead,
     HurdleHead,
     LogitsHead,
+    MultivariateFlowHead,
     MultivariateNormalHead,
     NormalHead,
     OrdinalHead,
@@ -82,6 +83,7 @@ from ashlar.distributions import (
     QuantileLevels,
     head_distribution,
     hurdle_distribution,
+    joint_flow_distribution,
     joint_normal_distribution,
     randomized_pit,
 )
@@ -107,6 +109,7 @@ _HEADS = {
     "softmax": SoftmaxHead,
     "distribution": DistributionHead,
     "multivariate_normal": MultivariateNormalHead,
+    "multivariate_flow": MultivariateFlowHead,
     "hurdle": HurdleHead,
     "tree": TreeHead,
 }
@@ -125,10 +128,24 @@ _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
 DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
-JOINT_TASKS = ("multivariate_gaussian",)
+JOINT_TASKS = ("multivariate_gaussian", "multivariate_flow")
 _SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
+_TASK_HEAD["multivariate_flow"] = "multivariate_flow"
+# Rows per block when reading a flow's draws, which take one network pass per column.
+_FLOW_CHUNK_ROWS = 128
+
+
+def _raw_count(raw) -> int:
+    """Rows of a head output: an array, or a flow's ``(context, weights...)``."""
+    return int((raw[0] if isinstance(raw, tuple) else raw).shape[0])
+
+
+def _raw_rows(raw, start: int, size: int):
+    if isinstance(raw, tuple):
+        return (raw[0][start : start + size], *raw[1:])
+    return raw[start : start + size]
 # An exact zero or a positive severity, on the raw target.
 HURDLE_TASKS = ("hurdle",)
 _TASK_HEAD["hurdle"] = "hurdle"
@@ -235,6 +252,10 @@ class ASRModel(BaseEstimator):
         ``multivariate_gaussian`` takes ``y`` with one column per outcome and
         predicts their joint normal, with a covariance of learned rank
         (``head_kwargs={"rank": 2}`` by default) that changes from row to row.
+        ``multivariate_flow`` takes the same ``y`` and predicts a conditional
+        normalizing flow over the columns (``head_kwargs={"depth": 2}``
+        blocks of per-column splines and triangular mixing), so the joint can
+        be skewed and its dependence nonlinear.
         ``hurdle`` predicts an exact zero with one probability and a positive
         amount from a ``lognormal`` (default) or ``gamma`` severity,
         ``head_kwargs={"severity": "gamma"}``, on the raw target.
@@ -425,7 +446,7 @@ class ASRModel(BaseEstimator):
         }:
             raise AshlarError(
                 "task must be 'regression', 'classification', 'ordinal', 'normal', 'tree', 'custom', "
-                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', or 'multivariate_gaussian'."
+                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', 'multivariate_gaussian', or 'multivariate_flow'."
             )
         if (self.task == "tree") != (self.tree is not None):
             raise AshlarError("task='tree' needs a tree= outcome spec, and tree= only applies to task='tree'.")
@@ -959,7 +980,7 @@ class ASRModel(BaseEstimator):
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
         if self.task in JOINT_TASKS:
-            return make_joint_objective(n_events)
+            return make_joint_objective(n_events, "flow" if self.task == "multivariate_flow" else "normal")
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
@@ -1292,12 +1313,23 @@ class ASRModel(BaseEstimator):
             forward(self.core_, *(array[start : start + EVAL_CHUNK_ROWS] for array in inputs))
             for start in range(0, n_rows, EVAL_CHUNK_ROWS)
         ]
+        if isinstance(pieces[0], tuple):
+            # A flow head: per-row context, then weights every row shares.
+            return (jnp.concatenate([piece[0] for piece in pieces], axis=0), *pieces[0][1:])
         return jnp.concatenate(pieces, axis=0)
 
     def predict(self, X):
         raw = self._raw_from_frame(X)
         if self.task in HURDLE_TASKS:
             point = np.asarray(hurdle_distribution(raw, self._severity()).mean().mean(axis=1))
+        elif self.task == "multivariate_flow":
+            # Monte Carlo means of each member's flow, averaged: the mean of the joint mixture.
+            point = np.concatenate(
+                [
+                    np.asarray(self._joint_components(_raw_rows(raw, start, _FLOW_CHUNK_ROWS)).mean().mean(axis=1))
+                    for start in range(0, _raw_count(raw), _FLOW_CHUNK_ROWS)
+                ]
+            )
         elif self.task in JOINT_TASKS:
             # The mean of the member locations: the mean of the joint mixture.
             point = np.asarray(jnp.mean(raw[..., : int(self.n_events_)], axis=1))
@@ -1479,7 +1511,7 @@ class ASRModel(BaseEstimator):
         if task in HURDLE_TASKS:
             return Mixture(hurdle_distribution(raw, self._severity()))
         if task in JOINT_TASKS:
-            base = Mixture(joint_normal_distribution(raw, int(self.n_events_)))
+            base = Mixture(self._joint_components(raw))
         elif task == "quantile":
             levels = head_distribution(task, raw).values.mean(axis=1)
             base = QuantileLevels(values=levels, levels=tuple(QUANTILE_LEVELS))
@@ -1489,12 +1521,22 @@ class ASRModel(BaseEstimator):
             return base
         return AffineTransformed(base, self.target_mean_, self.target_std_)
 
+    def _joint_components(self, raw):
+        """Each member's joint distribution on the standardized target, batch ``(rows, members)``."""
+        if self.task == "multivariate_flow":
+            return joint_flow_distribution(raw, int(self.n_events_))
+        return joint_normal_distribution(raw, int(self.n_events_))
+
     def _dist_chunks(self, X):
-        """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory."""
+        """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory.
+
+        A flow's blocks are smaller, because every draw carries its member's spline parameters.
+        """
         dist = self.predict_dist(X)
         rows = int(dist.batch_shape[0])
-        for start in range(0, rows, 4096):
-            yield start, dist[start : start + 4096]
+        size = _FLOW_CHUNK_ROWS if self.task == "multivariate_flow" else 4096
+        for start in range(0, rows, size):
+            yield start, dist[start : start + size]
 
     def sample(self, X, n: int = 100, seed: int = 0):
         """``n`` draws per row from ``predict_dist(X)``, shape ``(n, rows)``, in the units of ``y``.
@@ -1547,10 +1589,17 @@ class ASRModel(BaseEstimator):
         """Quantiles of ``predict_dist(X)``, shape ``(rows, len(levels))``. Exact where the family has a quantile.
 
         A joint outcome gives the quantiles of each column's marginal, ``(rows, columns, len(levels))``.
+        A flow's marginals have no closed form, so they are read from ``n_samples`` joint draws.
         """
         q = jnp.asarray(levels, dtype=jnp.float32)[:, None]
         pieces = []
+        key = jax.random.PRNGKey(int(seed))
         for _start, dist in self._dist_chunks(X):
+            if self.task == "multivariate_flow":
+                key, draw_key = jax.random.split(key)
+                draws = np.asarray(dist.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                pieces.append(np.moveaxis(np.quantile(draws, levels, axis=0), 0, -1))
+                continue
             if dist.event_shape:
                 marginal = dist.marginals()
                 values = np.asarray(_jit_quantile()(marginal, q[..., None]), dtype=np.float64)
@@ -1704,7 +1753,8 @@ class ASRModel(BaseEstimator):
         """
         del n_samples, seed
         self._require_fitted()
-        raw = jnp.asarray(self.predict_raw(X))
+        raw = self.predict_raw(X)
+        raw = raw if isinstance(raw, tuple) else jnp.asarray(raw)
         if self.task in _LABELED_TASKS:
             probabilities = np.asarray(jax.nn.softmax(raw, axis=-1), dtype=np.float64)
             total = _entropy(probabilities.mean(axis=1))
@@ -1726,10 +1776,14 @@ class ASRModel(BaseEstimator):
                 "total": np.sqrt(np.square(epistemic) + np.square(aleatoric)),
             }
         elif self.task in JOINT_TASKS:
-            members = joint_normal_distribution(raw, int(self.n_events_))
             std = np.asarray(self.target_std_, dtype=np.float64)
-            epistemic = np.asarray(members.mean(), dtype=np.float64).std(axis=1) * std
-            aleatoric = np.sqrt(np.asarray(members.variance(), dtype=np.float64).mean(axis=1)) * std
+            means, variances = [], []
+            for start in range(0, _raw_count(raw), _FLOW_CHUNK_ROWS):
+                members = self._joint_components(_raw_rows(raw, start, _FLOW_CHUNK_ROWS))
+                means.append(np.asarray(members.mean(), dtype=np.float64))
+                variances.append(np.asarray(members.variance(), dtype=np.float64))
+            epistemic = np.concatenate(means).std(axis=1) * std
+            aleatoric = np.sqrt(np.concatenate(variances).mean(axis=1)) * std
             return {
                 "epistemic": epistemic,
                 "aleatoric": aleatoric,
@@ -1968,8 +2022,8 @@ class ASRRegressor(_TaskModel):
     prediction), ``normal``, a distribution head (``gaussian``, ``mixture``,
     ``flow``, ``histogram``, ``quantile``, ``student_t``), a count head
     (``poisson``, ``negative_binomial``), ``hurdle`` for an exact zero or a
-    positive amount, ``multivariate_gaussian`` for several target columns at
-    once, or ``custom``.
+    positive amount, ``multivariate_gaussian`` or ``multivariate_flow`` for
+    several target columns at once, or ``custom``.
     """
 
     _tasks = ("regression", "normal", "custom", *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS)

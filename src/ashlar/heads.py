@@ -303,6 +303,52 @@ class MultivariateNormalHead(_EnsembleHead):
         return self.output(hidden)
 
 
+class MultivariateFlowHead(_EnsembleHead):
+    """Conditional masked autoregressive flow over ``n_events`` target columns.
+
+    Output ``(context, w_in, w_out)``, read by
+    ``ashlar.distributions.AutoregressiveFlow``: a per-row context
+    ``(batch, member, depth * width)`` from the trunk, and masked network
+    weights shared by every row. ``hidden`` (64 by default) is the masked
+    network's width and ``depth`` (1 by default) the number of autoregressive
+    blocks, the column order reversed in every other one. The context starts
+    near zero, which is the standard normal on the standardized target.
+    """
+
+    w_in: jax.Array
+    w_out: jax.Array
+    n_events: int = field(static=True)
+    depth: int = field(static=True)
+    hidden: int = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, depth=1, hidden=64, **kwargs):
+        from ashlar.distributions import autoregressive_context_width
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"multivariate flow head received unknown arguments {sorted(kwargs)}.")
+        if n_events < 1:
+            raise ShapeError("n_events must be positive.")
+        if int(depth) < 1 or int(hidden) < 1:
+            raise ShapeError(f"depth and hidden must be at least 1; received {depth} and {hidden}.")
+        d, depth, hidden = int(n_events), int(depth), int(hidden)
+        width = autoregressive_context_width(d, hidden)
+        out_key, in_key, made_key = jax.random.split(key, 3)
+        self.output = LinearEnsemble(
+            weight=0.01 * jax.random.normal(out_key, (k, d_in, depth * width), dtype=jnp.float32),
+            bias=jnp.zeros((k, depth * width), dtype=jnp.float32),
+        )
+        self.w_in = jax.random.normal(in_key, (k, depth, hidden, d), dtype=jnp.float32) / max(d, 1) ** 0.5
+        self.w_out = 0.01 * jax.random.normal(made_key, (k, depth, width - hidden, hidden), dtype=jnp.float32)
+        self.k = k
+        self.n_events, self.depth, self.hidden = d, depth, hidden
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden), self.w_in, self.w_out
+
+
 class HurdleHead(_EnsembleHead):
     """Probability of an exact zero plus a positive severity. Output ``(batch, member, 3)``.
 

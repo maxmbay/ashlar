@@ -42,6 +42,7 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 | `quantile` | `QuantileLevels` | only its three trained levels; no density, CDF, or draws |
 | `hurdle` | `Hurdle`: a probability of exactly zero and a `LogNormal` or `Gamma` amount | 0 up to the zero share, the severity's quantile above it |
 | `multivariate_gaussian` | `LowRankMultivariateNormal` over the target columns | per column, through `marginals()` |
+| `multivariate_flow` | `AutoregressiveFlow` over the target columns | per column, from draws (`marginals()` is an `Empirical`) |
 | `normal` | `Mixture` of `Normal`s; `policy="mean_parameters"` gives one `Normal` | closed form, or bisection for the mixture |
 | `classification`, `ordinal`, tree | `Categorical` over `classes_` (the leaves, for a tree); values are class indices | none |
 
@@ -72,6 +73,21 @@ Independent(dist.marginals())             # the same sites with the dependence d
 
 `model.predict` is the mean of every column, `model.predict_quantiles` gives each column's marginal quantiles as `(rows, columns, levels)`, and `model.log_prob(X, Y)` is the joint log density. `rank=0` trains independent columns. A question about several columns at once, such as a total, a difference, or whether two things both happen, needs the joint draws, because the marginals alone do not determine it. [The joint demand benchmark](benchmarks.md#joint-demand-across-locations) shows how much that matters on real loads.
 
+## Dependence that is not a correlation
+
+A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_flow"` takes the same `y` and predicts a conditional masked autoregressive flow: `p(y | x) = p(y₁ | x) p(y₂ | y₁, x) ⋯`, where each column's conditional is a standard normal pushed through a monotone spline, shifted and scaled. A masked network reads the columns before each one and the row's context from the trunk, and sets that column's knots, shift, and scale. So the whole shape of a column, not only its mean, can change with the columns before it: one load that spikes when another is high, a cost that grows more uncertain with the duration, a dependence that is strong in the tails and absent in the middle.
+
+```python
+model = ASRRegressor(task="multivariate_flow").fit(X, Y)
+dist = model.predict_dist(X_new)          # batch (rows,), event (columns,)
+model.log_prob(X_new, Y_new)              # exact joint log density
+draws = dist.sample(jax.random.key(0), (4000,))
+```
+
+`head_kwargs={"hidden": 64, "depth": 1}` are the defaults: the masked network's width and the number of autoregressive blocks, the column order reversed in every other block. One block already gives every column a flexible conditional; a second lets the first column depend on the later ones too, so the column order matters less. The column order is the order of `Y`'s columns, so put the ones that drive the others first when you know them.
+
+The density is exact and costs one network pass. A draw takes one pass per column, so it is slower than the normal's. The mean, variance, and covariance have no closed form; `predict_dist(X).mean()` estimates them from 1,024 fixed draws, and `predict_quantiles` reads each column's quantiles from `n_samples` joint draws, so they depend on `n_samples` and `seed` here, unlike the other heads. On a curved dependence with no correlation at all, the second column the square of the first's noise, it beats `multivariate_gaussian` by 2.1 nats per held-out row in joint log density (−4.54 against −6.68, mean of three seeds with 2,500 training rows each; the data is in `tests/test_multivariate_flow.py`); on the electricity loads of [the joint demand benchmark](benchmarks.md#joint-demand-across-locations) the dependence is close to linear, and the gain is smaller.
+
 ## An exact zero and a positive amount
 
 `task="hurdle"` is for a target that is often exactly zero and otherwise positive: a tip, an insurance claim, a day's rain, an order. One output is the probability of zero; the other two describe the amount when it is not zero, a `lognormal` by default or a `gamma` with `head_kwargs={"severity": "gamma"}`. The target stays in its own units.
@@ -87,7 +103,7 @@ Its `log_prob` is a log probability at zero and a log density elsewhere, the usu
 
 ## JAX transforms
 
-A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, and `LowRankMultivariateNormal`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.
+A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, `LowRankMultivariateNormal`, and `AutoregressiveFlow`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.
 
 ```python
 import jax
