@@ -23,6 +23,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
 - [Hurdle head](#hurdle-head)
+- [Joint demand across locations](#joint-demand-across-locations)
 - [Member uncertainty](#member-uncertainty)
 
 ## How it was run
@@ -364,21 +365,21 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 ## Calibrated intervals
 
-From [`examples/benchmark_uncertainty.py`](../examples/benchmark_uncertainty.py), stage `calibration`. This script and its three sections ran on a 4-core Linux VM with 15 GB, CPU only, LightGBM 4.7.0 on one thread, not on the laptop above. Each table is split 60% train, 20% calibration, 20% test, three times (seeds 0, 1, 2). Ashlar is `ASRRegressor(task="mixture")` or `ASRRegressor(task="quantile")` with no other arguments, then `calibrate(X_cal, y_cal)`. LightGBM is two early-stopped quantile models at 0.1 and 0.9 on the same training rows, then the same conformal step on the same calibration rows (conformalized quantile regression). Each cell is the test coverage of a nominal 80% interval, mean over three splits, before → after.
+From [`examples/benchmark_uncertainty.py`](../examples/benchmark_uncertainty.py), stage `calibration`. This script and its three sections ran on a 4-core Linux VM with 15 GB, CPU only, LightGBM 4.7.0 on one thread, not on the laptop above. Each table is split 60% train, 20% calibration, 20% test, three times (seeds 0, 1, 2). Ashlar is `ASRRegressor(task="mixture")` or `ASRRegressor(task="quantile")` with no other arguments, then `calibrate(X_cal, y_cal)`. LightGBM is two early-stopped quantile models at 0.1 and 0.9 on the same training rows, then the same conformal step on the same calibration rows (conformalized quantile regression). Each cell is the test coverage of a nominal 80% interval, mean over three splits, before → after. The mixture's quantiles are read exactly from its CDF and calibrated from each calibration row's CDF value; until the unified distributions they came from 1,000 draws, and rerunning with exact quantiles moved the mixture column by at most 0.9 points.
 
 | Table | Rows | Ashlar `mixture` | Ashlar `quantile` | LightGBM quantiles |
 |---|---:|---:|---:|---:|
-| California housing | 20,640 | 75.9% → 80.7% | 77.3% → 80.4% | 68.9% → 79.4% |
-| Diamonds, price in $1,000 | 53,940 | 79.4% → 79.4% | 80.4% → 79.5% | 73.8% → 79.1% |
-| Bike rentals per hour | 17,379 | 76.8% → 79.7% | 77.5% → 79.0% | 65.3% → 79.3% |
-| Abalone, rings | 4,177 | 80.2% → 80.3% | 78.5% → 78.8% | 76.0% → 79.8% |
-| NYC taxi tips, $ | 6,383 | 88.6% → 79.9% | 80.8% → 80.1% | 84.4% → 84.4% |
+| California housing | 20,640 | 75.7% → 80.6% | 77.3% → 80.4% | 68.9% → 79.4% |
+| Diamonds, price in $1,000 | 53,940 | 79.2% → 79.4% | 80.4% → 79.5% | 73.8% → 79.1% |
+| Bike rentals per hour | 17,379 | 76.6% → 79.5% | 77.5% → 79.0% | 65.3% → 79.3% |
+| Abalone, rings | 4,177 | 80.1% → 80.1% | 78.5% → 78.8% | 76.0% → 79.8% |
+| NYC taxi tips, $ | 6,383 | 89.5% → 79.7% | 80.8% → 80.1% | 84.4% → 84.4% |
 
-Calibration moves every Ashlar interval to within a point of 80% and leaves an interval that was already right alone (diamonds, abalone). It also narrows one that was too wide: the taxi mixture covered 89% and calibration took it to 80%, from $3.98 to $3.72 wide on average. The 90% mixture interval behaves the same way, 86.9% → 89.9% on bike rentals and 87.3% → 90.6% on California.
+Calibration moves every Ashlar interval to within a point of 80% and leaves an interval that was already right alone (diamonds, abalone). It also narrows one that was too wide: the taxi mixture covered 90% and calibration took it to 80%, from $3.97 to $3.71 wide on average. The 90% mixture interval behaves the same way, 87.0% → 89.6% on bike rentals and 87.3% → 90.4% on California.
 
-Conformal calibration is not Ashlar's alone: the same step brings LightGBM's quantile models to 79–80% on four tables. The difference is width. After calibration the Ashlar mixture's 80% interval is narrower than LightGBM's on California (0.95 against 1.00, in $100k), diamonds (0.82 against 0.83), and bike rentals (74 against 87 rentals), and slightly wider on abalone (4.71 against 4.59 rings). On taxi tips CQR cannot move LightGBM: a third of tips are exactly $0, both quantile models put their 0.1 level there, so the conformal margin lands on a tie at zero and the trees keep their 84%.
+Conformal calibration is not Ashlar's alone: the same step brings LightGBM's quantile models to 79–80% on four tables. The difference is width. After calibration the Ashlar mixture's 80% interval is narrower than LightGBM's on California (0.94 against 1.00, in $100k), diamonds (0.81 against 0.83), and bike rentals (73 against 87 rentals), and slightly wider on abalone (4.67 against 4.59 rings). On taxi tips CQR cannot move LightGBM: a third of tips are exactly $0, both quantile models put their 0.1 level there, so the conformal margin lands on a tie at zero and the trees keep their 84%.
 
-A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated coverage of single splits ranges from 77.8% to 82.9%.
+A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated mixture covers between 77.6% and 82.2% on single splits.
 
 ## Count heads
 
@@ -436,6 +437,44 @@ From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi
 | `hurdle`, gamma | 0.867 ± 0.015 | **0.204 ± 0.003** | 93.2% | 4.00 |
 
 The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
+
+## Joint demand across locations
+
+From [`examples/joint_demand.py`](../examples/joint_demand.py). The question: when several outcomes move together, does a model of their dependence change the answer to a question about all of them, here P(total load > capacity)?
+
+**Data.** The hourly electricity load matrix of Lai et al. (321 Portuguese clients, 2012 to 2014), cut to the eight clients whose mean load is between 10,000 and 30,000 kW and that have under 1% zero hours, so no one client dominates the total. Each row is an hour; the target is the eight loads; the features are the calendar (hour, weekday, day of year, all cyclical) and each client's load 24 hours and a week earlier, so every forecast is a day ahead.
+
+**Protocol.** 25 rolling forecast origins, every 28 days from late January 2013 to the end of 2014. At each, every model is fitted on all hours before the origin (the last 15% as a temporal validation slice for early stopping) and scored on the 28 days after it, 672 hours, so 16,800 held-out hours in all and no test hour is used twice. Capacity is set the way an operator would: the 80th and 95th percentiles of the total over the 28 days before the origin. One fit per model and origin; every model is `ASRRegressor(task="multivariate_gaussian", cyclical=...)` with `max_epochs=60, patience=8`. Scores use 4,000 joint draws per hour. Mean ± standard error over the 25 origins.
+
+**Models.**
+
+- `joint`: the default rank-2 covariance, learned per row.
+- `joint marginals, independent`: the same fitted model with its covariance dropped (`Independent(dist.marginals())`), so every client's own forecast is identical to `joint` and only the dependence differs.
+- `independent heads`: `head_kwargs={"rank": 0}`, trained with no dependence at all.
+- `independent + static correlation`: that rank-0 model with one correlation matrix estimated from its standardized residuals on the validation slice, a Gaussian copula: the usual fix after the fact.
+
+| Score | `joint` | joint marginals, independent | independent heads | independent + static correlation |
+|---|---:|---:|---:|---:|
+| Joint NLL of the eight loads ↓ | **67.31 ± 0.29** | 67.41 ± 0.27 | 67.77 ± 0.33 | 67.89 ± 0.42 |
+| CRPS per client, kW ↓ | **683.6 ± 23** | **683.6 ± 23** | 687.1 ± 24 | 687.1 ± 24 |
+| CRPS of the total, kW ↓ | 2,970 ± 120 | 2,981 ± 130 | 2,954 ± 130 | **2,938 ± 120** |
+| Total inside its 80% interval | **81.2%** | 72.2% | 69.7% | 80.7% |
+| Width of that interval, kW | 13,650 | 10,390 | 9,950 | 12,970 |
+| Brier, total > 80th percentile ↓ | **0.0468** | 0.0472 | 0.0485 | 0.0471 |
+| Log loss, total > 80th percentile ↓ | 0.149 | 0.155 | 0.161 | **0.148** |
+| Brier, total > 95th percentile ↓ | 0.0284 | 0.0287 | 0.0287 | **0.0282** |
+| Log loss, total > 95th percentile ↓ | 0.095 | 0.098 | 0.097 | **0.091** |
+
+The standard errors of the event scores are about 0.006 for the Brier scores and 0.02 for the log losses, larger than every gap between columns. Over the 16,800 hours the total exceeded the 80th-percentile capacity 19.4% of the time and the 95th 8.3% of the time, more than the 5% its name suggests, because the 28 days ahead are not the 28 days behind.
+
+What holds up:
+
+- **Dependence matters for the total's uncertainty.** Errors at these clients move together, so they do not cancel in the sum. With the covariance dropped, the same marginals give an 80% interval for the total that holds 72% of hours; with it, 81%.
+- **It shows in the moderate exceedance probabilities.** Where the independent version says P(total > capacity) is 2% to 10%, the event happened 9.9% of the time (5.2% predicted); the joint model's 5.4% came true 6.4% of the time. Independent heads trained without any dependence are worse again: 14.1% observed for 5.2% predicted.
+- **A static correlation captures most of it on these loads.** The copula on independent heads covers 80.7% and ties or beats the joint model on every event score, within noise. The gain here comes from modelling dependence at all, not from letting it change with the hour. The joint head gets there in one model and one fit, with the best joint log density, but it does not beat the classical fix.
+- **Against its own marginals made independent, the joint model's edge per origin is a coin flip** on everything but coverage: it wins 11 to 13 of 25 origins on joint NLL, total CRPS, and each event score.
+
+![The 80% band for the total load of eight clients over the first three held-out days, joint against independent marginals, and the reliability of P(total > capacity) over all held-out hours.](images/joint-demand.png)
 
 ## Member uncertainty
 
