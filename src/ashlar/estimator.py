@@ -61,6 +61,10 @@ from ashlar.objectives import (
     make_joint_objective,
     make_observed_objective,
     make_ordinal_expectation_objective,
+    make_total_objective,
+    member_distribution,
+    sum_distribution,
+    TOTAL_TASKS,
     make_ordinal_histogram_objective,
     ordinal_objective,
     regression_objective,
@@ -93,7 +97,7 @@ from ashlar.predict import mean_logits, mean_probabilities, split_normal_paramet
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
-from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer
+from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer, pack_units
 from ashlar.weights import REDUCTION, class_weight_multiplier, validate_sample_weight
 
 _BACKBONES = {
@@ -158,6 +162,7 @@ DISTRIBUTION_GRADIENT_CLIP = 1.0
 OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", *COUNT_HEADS, "normal", "hurdle")
 # Those whose distribution plus normal noise stays in closed form.
 NOISY_TASKS = ("gaussian", "mixture", "normal")
+# Those whose sum over independent rows stays in closed form, for group totals: ``TOTAL_TASKS``.
 
 
 def _squeeze_univariate(point):
@@ -642,6 +647,8 @@ class ASRModel(BaseEstimator):
             names, columns, y_array, weights, validation, groups, validation_sample_weight
         )
         self._check_observed(y_array, None if val_pack is None else val_pack[1])
+        if self._totals():
+            train_idx, val_idx, val_pack = self._whole_groups(y_array, train_idx, val_idx, val_pack)
         trials = None
         try:
             if search not in (None, False):
@@ -689,8 +696,19 @@ class ASRModel(BaseEstimator):
                 f"a noisy label needs a head whose distribution plus normal noise has a closed form: "
                 f"{', '.join(NOISY_TASKS)}; the {task} head has none."
             )
-        if any(observed.has_groups(part) for part in labels) and task != "custom":
-            raise AshlarError("group totals are not supported for this task.")
+        totals = any(observed.has_groups(part) for part in labels)
+        if totals:
+            if task not in TOTAL_TASKS:
+                raise AshlarError(
+                    f"a group total needs a head whose sum over rows has a closed form: "
+                    f"{', '.join(TOTAL_TASKS)}; the {task} head has none."
+                )
+            if task == "poisson" and (self.head_kwargs or {}).get("zero_inflated"):
+                raise AshlarError("a sum of zero-inflated Poisson counts has no closed form; drop zero_inflated for group totals.")
+            if self.learning_rate_schedule == "surface":
+                raise AshlarError("group totals keep each group in one minibatch, which the surface schedule's probe does not; use another schedule.")
+            for part in labels:
+                observed.check_whole(part)
         for part in labels:
             bounds = np.concatenate([part[name] for name in ("lower", "upper", "truncate_lower", "truncate_upper")])
             finite = bounds[np.isfinite(bounds)]
@@ -701,10 +719,45 @@ class ASRModel(BaseEstimator):
         self._observed_spec = {
             "truncated": any(observed.is_truncated(part) for part in labels),
             "noisy": any(observed.is_noisy(part) for part in labels),
+            "totals": totals,
         }
 
     def _observing(self) -> bool:
         return getattr(self, "_observed_spec", None) is not None
+
+    def _totals(self) -> bool:
+        return self._observing() and bool(self._observed_spec.get("totals"))
+
+    def _whole_groups(self, y_array, train_idx, val_idx, val_pack):
+        """Keep each group total on one side of the validation split, with its rows adjacent.
+
+        An internal split moves a group that it cut to the side of the group's
+        first row, so a temporal split keeps time order. A grouped split must
+        already keep each total inside one of its groups.
+        """
+        label = observed.as_observed(y_array)
+        if val_pack is None and val_idx is not None and len(val_idx):
+            held = np.zeros(len(label), dtype=bool)
+            held[val_idx] = True
+            group = label["group"]
+            members = np.flatnonzero(group >= 0)
+            ids, lead, inverse = np.unique(group[members], return_index=True, return_inverse=True)
+            side = held[members[lead]][inverse]
+            if self.split == "group" and np.any(side != held[members]):
+                raise AshlarError("a group total spans two groups of the validation split; give its rows one split group.")
+            held[members] = side
+            train_idx, val_idx = np.flatnonzero(~held), np.flatnonzero(held)
+            if not len(train_idx) or not len(val_idx):
+                raise AshlarError("keeping each group total whole left one side of the validation split empty.")
+        train_idx = np.asarray(train_idx)[observed.contiguous_order(label[train_idx])]
+        if val_idx is not None and len(val_idx):
+            val_idx = np.asarray(val_idx)[observed.contiguous_order(label[val_idx])]
+        if val_pack is not None:
+            frame, y_val, w_val = val_pack
+            order = observed.contiguous_order(observed.as_observed(y_val))
+            val_names, val_columns = frame_columns(frame)
+            val_pack = (_take_rows(val_names, val_columns, order), observed.as_observed(y_val)[order], np.asarray(w_val)[order])
+        return train_idx, val_idx, val_pack
 
     def _partition(self, names, columns, y_array, weights, validation, groups, validation_sample_weight):
         n_rows = len(columns[0])
@@ -781,7 +834,7 @@ class ASRModel(BaseEstimator):
                 numeric_z=numeric_z,
             )
             opt_state = None
-        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
@@ -807,6 +860,7 @@ class ASRModel(BaseEstimator):
             category_index=encoded.category_index,
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
+            units=units,
         )
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
@@ -930,7 +984,7 @@ class ASRModel(BaseEstimator):
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
             numeric_z=numeric_z,
         )
-        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
@@ -964,6 +1018,7 @@ class ASRModel(BaseEstimator):
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
             score_fn=score_fn,
+            units=units,
         )
         if not history["val_loss"]:
             raise AshlarError("a search trial produced no validation loss.")
@@ -1021,6 +1076,13 @@ class ASRModel(BaseEstimator):
             return None, np.asarray(y_train, dtype=np.float32), w_train
         return None, _regression_target(y_train, self.n_events), w_train
 
+    def _train_targets(self, y_train_model, w_train):
+        """Device targets and weights, and for group totals the ``(first, size)`` of each observation."""
+        if self._totals():
+            return _total_targets(y_train_model, w_train)
+        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        return y_device, w_device, None
+
     def _output_sizes(self, y_train_model, classes):
         if self.task == "tree":
             return 1, self.tree_.n_nodes
@@ -1069,6 +1131,8 @@ class ASRModel(BaseEstimator):
             return self.objective
         if self._observing():
             spec = self._observed_spec
+            if spec.get("totals"):
+                return make_total_objective(self.task, truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy")))
             return make_observed_objective(
                 self.task, severity=self._severity(), truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy"))
             )
@@ -1314,6 +1378,8 @@ class ASRModel(BaseEstimator):
             nodes = self.tree_.encode(_label_list(y_val))
             w_val = np.where(nodes == 0, 0.0, np.asarray(w_val, dtype=np.float64))
             y_device, w_device = _device_targets(self.task, nodes, w_val)
+        elif self._totals():
+            y_device, w_device, units = _total_targets(self._apply_target_scale(observed.as_observed(y_val)), w_val)
         elif self._observing():
             y_device, w_device = _device_targets(self.task, self._apply_target_scale(observed.as_observed(y_val)), w_val)
         elif self.task == "custom":
@@ -1326,7 +1392,7 @@ class ASRModel(BaseEstimator):
             y_device, w_device = _device_targets(self.task, y_model, w_val)
         if float(jnp.sum(w_device)) <= 0.0:
             raise WeightError("validation weights sum to zero, so the early-stopping metric is undefined.")
-        return (
+        arrays = (
             numeric_z,
             categorical,
             encoded.category_index,
@@ -1335,6 +1401,9 @@ class ASRModel(BaseEstimator):
             y_device,
             w_device,
         )
+        if self._totals() and len(w_device) > EVAL_CHUNK_ROWS:
+            arrays = _chunk_units(arrays, units)
+        return arrays
 
     def _with_cyclical(self, X):
         """Replace each ``cyclical`` column by its ``_sin`` and ``_cos`` on a circle of that period.
@@ -1474,6 +1543,15 @@ class ASRModel(BaseEstimator):
         from sklearn.metrics import accuracy_score, r2_score
 
         if observed.is_observed(target_array(y)):
+            label = observed.as_observed(target_array(y))
+            if observed.has_groups(label):
+                # One value per observation; a group's weight is the mean of its rows'.
+                values, order, first, size = self._total_log_likelihood(X, label)
+                weights = None
+                if sample_weight is not None:
+                    row_weights = validate_sample_weight(sample_weight, len(label))
+                    weights = np.add.reduceat(row_weights[order], first) / size
+                return float(np.average(values, weights=weights))
             values = self.log_prob(X, y)
             weights = None if sample_weight is None else validate_sample_weight(sample_weight, len(values))
             return float(np.average(values, weights=weights))
@@ -1704,6 +1782,45 @@ class ASRModel(BaseEstimator):
         else:
             value = jnp.asarray(np.asarray(target_array(y), dtype=np.float32).reshape(dist.batch_shape + dist.event_shape))
         return np.asarray(dist.log_prob(value), dtype=np.float64)
+
+    def _total_log_likelihood(self, X, label):
+        """Log-likelihood of each observation of a label with group totals, in the units of ``y``.
+
+        Each member sums its own rows, as in training, and the members' sums
+        are mixed with equal weight. Returns the values, the row order that
+        makes groups adjacent, and each observation's ``(first, size)`` in it.
+        """
+        from jax.scipy.special import logsumexp
+
+        self._univariate_dist("score of a group total")
+        if self.task not in TOTAL_TASKS:
+            raise AshlarError(f"a group total needs one of {', '.join(TOTAL_TASKS)}; this model is {self.task}.")
+        if observed.is_noisy(label) and self.task not in NOISY_TASKS:
+            raise AshlarError(f"a noisy label needs one of {', '.join(NOISY_TASKS)}; this model is {self.task}.")
+        observed.check_whole(label)
+        order = observed.contiguous_order(label)
+        label = label[order]
+        first, size = observed.units(label)
+        raw = self._raw_from_frame(X)
+        if int(raw.shape[0]) != len(label):
+            raise AshlarError(f"X has {int(raw.shape[0])} rows and y has {len(label)}.")
+        dist = member_distribution(self.task, raw[jnp.asarray(order)])
+        if self.target_mean_ is not None:
+            dist = Normal(self.target_mean_ + self.target_std_ * dist.loc, self.target_std_ * dist.scale)
+        segment = jnp.asarray(np.repeat(np.arange(len(first)), size))
+        summed = sum_distribution(dist, segment, len(first), True)
+        rows = jnp.asarray(observed.fields(label)[first], dtype=jnp.float32)
+        truncated, noisy = observed.is_truncated(label), observed.is_noisy(label)
+        values = observed.log_likelihood(
+            summed,
+            rows[:, 0:1],
+            rows[:, 1:2],
+            rows[:, 2:3] if truncated else None,
+            rows[:, 3:4] if truncated else None,
+            rows[:, 4:5] if noisy else None,
+        )
+        values = logsumexp(values, axis=1) - np.log(values.shape[1])
+        return np.asarray(values, dtype=np.float64), order, first, size
 
     def _observed_log_prob(self, X, label):
         self._univariate_dist("log_prob of an observed label")
@@ -2433,6 +2550,38 @@ def _device_targets(task, y, weights):
     if task in _CLASSIFIER_TASKS:
         return jnp.asarray(y, dtype=jnp.int32), w
     return jnp.asarray(y, dtype=jnp.float32), w
+
+
+def _total_targets(label, weights):
+    """``(rows, 7)`` targets for ``make_total_objective``, each observation's weight on its first row, and its rows.
+
+    The seventh column flags the first row of each observation. A group's
+    weight is the mean of its rows' weights.
+    """
+    label = observed.as_observed(label)
+    first, size = observed.units(label)
+    weights = np.asarray(weights, dtype=np.float64)
+    start = np.zeros(len(label), dtype=np.float64)
+    start[first] = 1.0
+    unit_weight = np.zeros(len(label), dtype=np.float64)
+    if len(first):
+        unit_weight[first] = np.add.reduceat(weights, first) / size
+    y = np.concatenate([observed.fields(label), start[:, None]], axis=1)
+    return jnp.asarray(y, dtype=jnp.float32), jnp.asarray(unit_weight, dtype=jnp.float32), (first, size)
+
+
+def _chunk_units(arrays, units):
+    """Lay validation rows out so that no observation crosses an ``EVAL_CHUNK_ROWS`` boundary.
+
+    Padding rows repeat row 0 with no weight; the last chunk is left short.
+    """
+    first, size = units
+    index, keep = pack_units(first, size, np.arange(len(first)), EVAL_CHUNK_ROWS)
+    index, keep = index.reshape(-1), keep.reshape(-1)
+    end = int(np.flatnonzero(keep)[-1]) + 1
+    index, keep = jnp.asarray(index[:end]), jnp.asarray(keep[:end])
+    *features, y, w = (array[index] for array in arrays)
+    return (*features, y, jnp.where(keep, w, 0.0))
 
 
 def _label_list(y) -> list:

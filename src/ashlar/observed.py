@@ -40,8 +40,10 @@ that is only recorded when positive.
 
 The fields are ``lower`` and ``upper`` (equal for an exact value),
 ``truncate_lower`` and ``truncate_upper`` (``-inf`` and ``inf`` for none),
-``noise`` (0 for none), and ``group`` (``-1`` for a row that is its own
-observation).
+``noise`` (0 for none), ``group`` (``-1`` for a row that is its own
+observation), and ``group_size``, the rows the group's total covers, so a
+split that cuts a group is caught instead of scoring part of a sum against
+the whole total.
 
 The JAX functions ``log_likelihood`` and ``randomized_pit`` take any
 ``ashlar.distributions.Distribution``, so a custom objective can train on
@@ -66,6 +68,7 @@ DTYPE = np.dtype(
         ("truncate_upper", np.float64),
         ("noise", np.float64),
         ("group", np.int64),
+        ("group_size", np.int64),
     ]
 )
 
@@ -107,6 +110,7 @@ def _new(lower, upper) -> np.ndarray:
     label["truncate_upper"] = np.inf
     label["noise"] = 0.0
     label["group"] = -1
+    label["group_size"] = 1
     return check(label)
 
 
@@ -196,7 +200,10 @@ def grouped(label, group) -> np.ndarray:
     Every row of a group carries the same observation of the group's sum.
     A group id of ``-1`` leaves a row as its own observation. The
     ``gaussian``, ``normal``, and ``poisson`` heads support totals, because a
-    sum of their rows has a closed form.
+    sum of their rows has a closed form: the rows are independent given the
+    features, so a sum of normals is normal and a sum of Poisson counts is
+    Poisson. ``fit`` keeps each group in one minibatch and on one side of
+    its validation split, and a group's weight is the mean of its rows'.
     """
     label = as_observed(label).copy()
     try:
@@ -214,6 +221,7 @@ def grouped(label, group) -> np.ndarray:
     if (ids < -1).any():
         raise AshlarError("group ids must be -1 (no group) or non-negative.")
     label["group"] = ids
+    label["group_size"] = _rows_per_group(ids)
     return check(label)
 
 
@@ -223,8 +231,20 @@ def total(values, group) -> np.ndarray:
 
 
 def concatenate(labels) -> np.ndarray:
-    """Stack labels row-wise. Plain values are read as exact."""
-    return check(np.concatenate([as_observed(label) for label in labels]))
+    """Stack labels row-wise. Plain values are read as exact.
+
+    Group ids are renumbered so that groups from different labels stay apart.
+    """
+    parts = []
+    offset = 0
+    for label in labels:
+        part = as_observed(label).copy()
+        members = part["group"] >= 0
+        if members.any():
+            part["group"][members] += offset
+            offset = int(part["group"][members].max()) + 1
+        parts.append(part)
+    return check(np.concatenate(parts))
 
 
 def is_observed(y) -> bool:
@@ -241,6 +261,8 @@ def as_observed(y) -> np.ndarray:
             converted = np.empty(array.shape, dtype=DTYPE)
             for name in FIELDS:
                 converted[name] = array[name]
+            names = array.dtype.names
+            converted["group_size"] = array["group_size"] if "group_size" in names else _rows_per_group(array["group"])
             array = converted
         if array.ndim != 1:
             raise ShapeError(f"an observed label is one record per row; received shape {array.shape}.")
@@ -275,14 +297,45 @@ def check(label) -> np.ndarray:
     if (group < -1).any():
         raise AshlarError("group ids must be -1 (no group) or non-negative.")
     members = group >= 0
+    size = label["group_size"] if "group_size" in label.dtype.names else _rows_per_group(group)
+    if (size[~members] != 1).any() or (size < 1).any():
+        raise AshlarError("group_size is 1 for a row of its own and at least 1 in a group.")
     if members.any():
         ids, first = np.unique(group[members], return_index=True)
         rows = np.flatnonzero(members)
         lead = rows[first][np.searchsorted(ids, group[members])]
-        for name in FIELDS[:5]:
-            values = label[name]
+        for name in (*FIELDS[:5], "group_size"):
+            values = size if name == "group_size" else label[name]
             if not np.array_equal(values[members], values[lead]):
                 raise AshlarError(f"every row of a group carries the group's observation; {name} differs within a group.")
+        if (_rows_per_group(group)[members] > size[members]).any():
+            raise AshlarError("a group has more rows than its total covers; two groups share an id.")
+    return label
+
+
+def _rows_per_group(group) -> np.ndarray:
+    """Rows present in each row's group, 1 for a row of its own."""
+    group = np.asarray(group)
+    sizes = np.ones(len(group), dtype=np.int64)
+    members = group >= 0
+    if members.any():
+        _ids, inverse, counts = np.unique(group[members], return_inverse=True, return_counts=True)
+        sizes[members] = counts[inverse]
+    return sizes
+
+
+def check_whole(label) -> np.ndarray:
+    """Raise ``AshlarError`` unless every group has all the rows its total covers. Returns the label."""
+    label = as_observed(label)
+    present = _rows_per_group(label["group"])
+    cut = present < label["group_size"]
+    if cut.any():
+        row = int(np.flatnonzero(cut)[0])
+        raise AshlarError(
+            f"group {int(label['group'][row])} covers {int(label['group_size'][row])} rows and only {int(present[row])} are here, "
+            "so its total would be scored against part of its sum. Keep each group's rows together, "
+            "for example with GroupKFold on the group ids."
+        )
     return label
 
 
@@ -293,19 +346,45 @@ def fields(label) -> np.ndarray:
 
 
 def group_sizes(label) -> np.ndarray:
-    """Rows in each row's group, 1 for a row with no group."""
-    label = as_observed(label)
-    group = label["group"]
-    sizes = np.ones(len(label), dtype=np.int64)
-    members = group >= 0
-    if members.any():
-        ids, inverse, counts = np.unique(group[members], return_inverse=True, return_counts=True)
-        sizes[members] = counts[inverse]
-    return sizes
+    """Rows each row's group total covers, 1 for a row with no group."""
+    return np.asarray(as_observed(label)["group_size"], dtype=np.int64)
 
 
 def has_groups(label) -> bool:
     return bool((as_observed(label)["group"] >= 0).any())
+
+
+def contiguous_order(label) -> np.ndarray:
+    """A row order that puts the rows of each group next to each other.
+
+    Observations keep the order of their first row, and the rows of a group
+    keep their own order.
+    """
+    group = as_observed(label)["group"]
+    key = np.where(group >= 0, group, -1 - np.arange(len(group)))
+    _keys, first, inverse = np.unique(key, return_index=True, return_inverse=True)
+    rank = np.empty(len(first), dtype=np.int64)
+    rank[np.argsort(first, kind="stable")] = np.arange(len(first))
+    return np.argsort(rank[inverse], kind="stable")
+
+
+def units(label) -> tuple[np.ndarray, np.ndarray]:
+    """The first row and the row count of each observation: a group, or a row of its own.
+
+    The rows of each group must be adjacent, as ``contiguous_order`` leaves them.
+    """
+    group = as_observed(label)["group"]
+    n = len(group)
+    if n == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    starts = np.ones(n, dtype=bool)
+    starts[1:] = (group[1:] != group[:-1]) | (group[1:] < 0)
+    first = np.flatnonzero(starts)
+    ids = group[first]
+    ids = ids[ids >= 0]
+    if len(np.unique(ids)) != len(ids):
+        raise AshlarError("the rows of each group must be adjacent; order them with ashlar.observed.contiguous_order.")
+    return first.astype(np.int64), np.diff(np.append(first, n)).astype(np.int64)
 
 
 def is_truncated(label) -> bool:

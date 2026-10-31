@@ -377,3 +377,173 @@ def test_tasks_and_labels_that_cannot_be_scored_are_refused():
         model.calibrate(x, observed.truncated(sales, lower=0.0))
     with pytest.raises(AshlarError):
         model.log_prob(x, observed.total(np.full(200, 3.0), group=np.arange(200) // 2))
+
+
+# ---------------------------------------------------------------- group totals
+
+
+def test_packing_keeps_each_observation_whole_in_one_batch():
+    from ashlar.train import pack_units
+
+    rng = np.random.default_rng(7)
+    size = rng.integers(1, 8, size=300)
+    first = np.concatenate([[0], np.cumsum(size)[:-1]])
+    index, keep = pack_units(first, size, rng.permutation(300), 24)
+    assert sorted(index[keep].tolist()) == list(range(int(size.sum())))
+    for batch in range(index.shape[0]):
+        for start, count in zip(first, size):
+            rows = np.arange(start, start + count)
+            slots = np.flatnonzero(np.isin(index[batch], rows) & keep[batch])
+            # Whole or absent, and in consecutive slots in their own order.
+            assert len(slots) in (0, count)
+            if len(slots):
+                assert np.array_equal(index[batch][slots], rows) and np.all(np.diff(slots) == 1)
+    with pytest.raises(ValueError):
+        pack_units(first, size, np.arange(300), 5)
+
+
+def test_group_labels_record_their_size_and_catch_a_cut_group():
+    label = observed.total([9.0, 9.0, 9.0, 4.0, 5.0, 5.0], group=[3, 3, 3, -1, 8, 8])
+    assert np.array_equal(label["group_size"], [3, 3, 3, 1, 2, 2])
+    assert np.array_equal(observed.group_sizes(label[:2]), [3, 3])
+    observed.check_whole(label)
+    with pytest.raises(AshlarError, match="GroupKFold"):
+        observed.check_whole(label[:2])
+    # Stacking two labels keeps their groups apart, and sharing an id by hand is caught.
+    stacked = observed.concatenate([label, label])
+    assert len(np.unique(stacked["group"][stacked["group"] >= 0])) == 4
+    with pytest.raises(AshlarError):
+        observed.check(np.concatenate([label, label]))
+    # Rows of a group are brought together, keeping first-appearance order.
+    scattered = observed.total([5.0, 1.0, 5.0, 7.0, 7.0, 2.0], group=[0, -1, 0, 1, 1, -1])
+    order = observed.contiguous_order(scattered[[0, 1, 3, 2, 4, 5]])
+    assert np.array_equal(order, [0, 3, 1, 2, 4, 5])
+    first, size = observed.units(scattered[[0, 2, 1, 3, 4, 5]])
+    assert np.array_equal(first, [0, 2, 3, 5]) and np.array_equal(size, [2, 1, 2, 1])
+    with pytest.raises(AshlarError):
+        observed.units(scattered)
+
+
+def test_the_total_objective_scores_the_distribution_of_each_sum():
+    from ashlar.objectives import make_observed_objective, make_total_objective
+
+    rng = np.random.default_rng(8)
+    rows, members = 7, 3
+    raw = jnp.asarray(rng.normal(size=(rows, members, 2)), dtype=jnp.float32)
+    # Rows 0-2 are one total, row 3 is its own, rows 4-5 a censored total, row 6 padding with no weight.
+    label = observed.concatenate(
+        [
+            observed.total(np.full(3, 1.5), np.zeros(3)),
+            observed.exact([0.25]),
+            observed.grouped(observed.censored(np.full(2, 0.5), np.ones(2, dtype=bool)), np.zeros(2)),
+            observed.exact([9.0]),
+        ]
+    )
+    start = np.array([1, 0, 0, 1, 1, 0, 1], dtype=np.float32)
+    y = np.concatenate([observed.fields(label), start[:, None]], axis=1)
+    weight = np.array([2.0, 0, 0, 1.0, 1.0, 0, 0], dtype=np.float32)
+    from ashlar.distributions import head_distribution
+
+    dist = head_distribution("gaussian", raw)
+    loc, scale = np.asarray(dist.loc, dtype=np.float64), np.asarray(dist.scale, dtype=np.float64)
+    first_sum = stats.norm.logpdf(1.5, loc[:3].sum(0), np.sqrt((scale[:3] ** 2).sum(0)))
+    own = stats.norm.logpdf(0.25, loc[3], scale[3])
+    censored_sum = stats.norm.logsf(0.5, loc[4:6].sum(0), np.sqrt((scale[4:6] ** 2).sum(0)))
+    expected = -(2.0 * first_sum.mean() + own.mean() + censored_sum.mean()) / 4.0
+    got = float(make_total_objective("gaussian")(raw, jnp.asarray(y), jnp.asarray(weight)))
+    assert np.isclose(got, expected, rtol=1e-5)
+    grads = jax.grad(lambda r: make_total_objective("gaussian")(r, jnp.asarray(y), jnp.asarray(weight)))(raw)
+    assert np.isfinite(np.asarray(grads)).all() and np.allclose(np.asarray(grads)[6], 0.0)
+    # Rows of their own score what the row objective scores.
+    plain = observed.exact(rng.normal(size=rows))
+    y_plain = np.concatenate([observed.fields(plain), np.ones((rows, 1))], axis=1)
+    ones = jnp.ones(rows)
+    total = make_total_objective("gaussian")(raw, jnp.asarray(y_plain), ones)
+    row = make_observed_objective("gaussian")(raw, jnp.asarray(observed.fields(plain)), ones)
+    assert np.isclose(float(total), float(row), rtol=1e-6)
+
+
+def _weekly(n_weeks=1000, days=7, seed=9):
+    rng = np.random.default_rng(seed)
+    n = n_weeks * days
+    x = np.column_stack([rng.normal(size=n), rng.uniform(-1.0, 1.0, size=n)]).astype(np.float32)
+    mean = 10.0 + 3.0 * x[:, 0] + 2.0 * np.sin(3.0 * x[:, 1])
+    spread = 0.5 + 1.0 * (x[:, 1] > 0)
+    y = mean + spread * rng.normal(size=n)
+    week = np.repeat(np.arange(n_weeks), days)
+    return x, y, week, mean, spread
+
+
+def test_daily_distributions_are_learned_from_weekly_totals():
+    x, y, week, mean, spread = _weekly()
+    weekly = np.bincount(week, weights=y)[week]
+    model = ASRRegressor(task="gaussian", max_epochs=30, random_state=0).fit(x, observed.total(weekly, week))
+    naive = ASRRegressor(task="gaussian", max_epochs=30, random_state=0).fit(x, weekly / 7.0)
+    test = slice(0, 1400)
+    fitted = model.predict_dist(x[test])
+    assert np.sqrt(np.mean((np.asarray(fitted.mean()) - mean[test]) ** 2)) < 0.3
+    sd = np.asarray(fitted.stddev())
+    high = x[test, 1] > 0
+    assert sd[high].mean() - sd[~high].mean() > 0.3
+    assert abs(np.mean(sd**2) - np.mean(spread[test] ** 2)) < 0.25 * np.mean(spread[test] ** 2)
+    # Spreading each total evenly over its days teaches each day the week's average instead.
+    assert np.sqrt(np.mean((np.asarray(naive.predict_dist(x[test]).mean()) - mean[test]) ** 2)) > 2.0
+    assert np.mean(model.log_prob(x[test], y[test])) > np.mean(naive.log_prob(x[test], y[test])) + 2.0
+    # Poisson rows sum to a Poisson total.
+    rng = np.random.default_rng(10)
+    rate = np.exp(0.5 + 0.8 * np.clip(x[:, 0], -2.0, 2.0))
+    counts = rng.poisson(rate)
+    weekly_counts = np.bincount(week, weights=counts)[week]
+    poisson = ASRRegressor(task="poisson", max_epochs=30, random_state=0).fit(x, observed.total(weekly_counts, week))
+    assert np.mean(np.abs(np.log(poisson.predict(x[test]) / rate[test]))) < 0.15
+
+
+def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
+    x, y, week, _mean, _spread = _weekly(n_weeks=300, seed=11)
+    weekly = np.bincount(week, weights=y)[week]
+    totals = week % 2 == 0
+    label = observed.grouped(observed.exact(np.where(totals, weekly, y)), np.where(totals, week, -1))
+    rng = np.random.default_rng(12)
+    shuffled = rng.permutation(len(label))
+    model = ASRRegressor(task="normal", max_epochs=4, split="temporal", random_state=0).fit(x[shuffled], label[shuffled])
+    assert np.isfinite(model.history_["val_loss"]).all()
+    # score is the mean log-likelihood per observation: each member sums its rows, then members mix.
+    part = slice(0, 70)
+    from ashlar.predict import positive_scale
+
+    raw = np.asarray(model.predict_raw(x[part]), dtype=np.float64)
+    loc = raw[..., 0, 0]
+    scale = np.asarray(positive_scale(jnp.asarray(raw[..., 0, 1])), dtype=np.float64)
+    values = []
+    for start in range(0, 70, 7):
+        rows = slice(start, start + 7)
+        if totals[start]:
+            member = stats.norm.logpdf(weekly[start], loc[rows].sum(0), np.sqrt((scale[rows] ** 2).sum(0)))
+            values.append(np.logaddexp.reduce(member) - np.log(member.size))
+        else:
+            for row in range(start, start + 7):
+                member = stats.norm.logpdf(y[row], loc[row], scale[row])
+                values.append(np.logaddexp.reduce(member) - np.log(member.size))
+    assert np.isclose(model.score(x[part], label[part]), np.mean(values), rtol=1e-4)
+    with pytest.raises(AshlarError, match="GroupKFold"):
+        model.score(x[:3], label[:3])
+    with pytest.raises(AshlarError, match="GroupKFold"):
+        ASRRegressor(task="normal", max_epochs=1).fit(x[:3], label[:3])
+
+
+def test_totals_that_cannot_be_trained_are_refused():
+    x, y, week, _mean, _spread = _weekly(n_weeks=40, seed=13)
+    label = observed.total(np.bincount(week, weights=y)[week], week)
+    for kwargs in (
+        {"task": "mixture"},
+        {"task": "negative_binomial"},
+        {"task": "poisson", "head_kwargs": {"zero_inflated": True}},
+        {"task": "gaussian", "learning_rate_schedule": "surface"},
+    ):
+        with pytest.raises(AshlarError):
+            ASRRegressor(max_epochs=1, **kwargs).fit(x, observed.total(np.round(np.abs(label["lower"])), week))
+    with pytest.raises(AshlarError, match="split group"):
+        ASRRegressor(task="gaussian", max_epochs=1, split="group").fit(x, label, groups=np.arange(len(label)) % 3)
+    model = ASRRegressor(task="gaussian", max_epochs=1, random_state=0).fit(x, label)
+    with pytest.raises(AshlarError):
+        model.log_prob(x, label)
