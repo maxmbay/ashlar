@@ -60,8 +60,9 @@ Intervals are closed at both ends, which is what a count needs: a sold-out stock
 | exact, interval, censored, survival, rounded, truncated | `gaussian`, `mixture`, `flow`, `histogram`, `student_t`, `poisson`, `negative_binomial` (zero-inflated or not), `hurdle`, `normal` with one column |
 | noisy | `gaussian`, `mixture`, `normal`, where a normal plus normal noise stays in closed form |
 | group totals | `gaussian`, `normal`, `poisson` without zero inflation, where a sum of independent rows stays in closed form |
+| a cell per column, each exact, interval, censored, survival without entry, or rounded | `multivariate_gaussian`, `multivariate_mixture`, `multivariate_flow` (with one block, the default, when any cell is coarse) |
 
-The `quantile` head has no density and the joint heads model several columns, so neither takes an observed label, and neither do the classifiers. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
+The `quantile` head has no density, so it takes no observed label, and neither do the classifiers. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
 
 The `histogram` head has no mass past its edges at ±4 standard deviations, so it reads a bound out there at the middle of its end bin, as its `log_prob` reads a value out there in the end bin. If many bounds fall that far out, use the `mixture` or the `flow`. The `hurdle` head's zero is an exact atom, so `interval(0, 5)` includes it and `interval(0.01, 5)` does not.
 
@@ -69,7 +70,8 @@ The `histogram` head has no mass past its edges at ±4 standard deviations, so i
 
 - `model.log_prob(X, label)` is one log-likelihood per row, and `model.score(X, label)` their mean, so `cross_val_score` and `GridSearchCV` compare fits on censored data by likelihood. With group totals, `score` is the mean per observation and `log_prob` refuses, since a total is one observation of several rows.
 - `model.calibrate(X, label)` accepts exact, interval, and censored rows. A coarse row's probability integral transform is drawn uniformly between `P(Y < lower)` and `P(Y <= upper)`, the same rule `calibrate` already uses for counts. It is uniform when censoring is independent of the value given the features, so calibration on sold-out days is honest under the same assumption as the fit. Truncated, noisy, and grouped labels are refused, since their PIT is not uniform.
-- `observed.log_likelihood(dist, lower, upper, ...)` and `observed.randomized_pit(dist, lower, upper, key)` take any `ashlar.distributions.Distribution`, so they also work in a custom objective. With `task="custom"`, the training `y` the objective receives is the `(rows, 6)` array of `observed.fields(label)`.
+- `observed.log_likelihood(dist, lower, upper, ...)` and `observed.randomized_pit(dist, lower, upper, key)` take any `ashlar.distributions.Distribution`, so they also work in a custom objective. With `task="custom"`, the training `y` the objective receives is the `(rows, 6)` array of `observed.fields(label)`, or `(rows, columns, 6)` for a joint label.
+- A joint model's `log_prob(X, label)` and `score(X, label)` take a joint label; `calibrate` refuses a joint model, as it does for plain joint targets.
 
 ## Daily values from weekly totals
 
@@ -97,6 +99,44 @@ The Poisson head learns from the totals almost all that the days would have taug
 What totals can teach is limited by what varies between groups. If every week holds one Monday, one Tuesday, and so on, every weekly sum contains the same weekday pattern, so the sums cannot tell a busy Monday from a busy Tuesday. The head learns the effects of features that change from week to week, and nothing about a pattern that repeats inside every group. The spread is harder to place than the mean, since a sum's variance blends its rows' variances.
 
 `fit` keeps each group whole: in one minibatch, with at least two of the largest groups per batch, and on one side of an internal validation split (a temporal split puts a cut group on the side of its first row; a grouped split must already keep each total inside one of its groups). A group's weight is the mean of its rows' weights. Each label records the number of rows its total covers, so a split that cuts a group, such as a shuffled `KFold`, raises instead of scoring part of a sum against the whole total; split with `GroupKFold` on the group ids.
+
+## Several products that sell out together
+
+The joint heads, `multivariate_gaussian`, `multivariate_mixture`, and `multivariate_flow`, take a label with a cell per target column, shape `(rows, columns)`. Pass a table to `exact`, `interval`, `censored`, `survival` without `entry`, or `rounded`, or put one-column labels of those kinds side by side with `observed.stack`:
+
+```python
+import jax
+from ashlar import ASRRegressor, observed
+
+y = observed.censored(log_sales, sold_out)     # (days, products): where a shelf emptied, demand >= sales
+model = ASRRegressor(task="multivariate_mixture").fit(X, y)
+
+draws = model.predict_dist(X_new).sample(jax.random.key(0), (1000,))   # joint draws of demand
+model.log_prob(X_test, y_test)                 # one joint log-likelihood per day
+
+y = observed.stack([observed.exact(price), observed.rounded(volume, 10)])   # a different kind per column
+```
+
+A row's likelihood is the joint density of its exact cells times the probability, given them, that every coarse cell lies in its range. With one coarse cell, that is the interval probability of a conditional normal, or of a mixture of them, so it is closed form. With several, it is the probability of a box under a correlated distribution, which has no closed form, and `log_box` estimates it with the GHK simulator ([Genz 1992](https://doi.org/10.1080/10618600.1992.10477010)). It visits the coarse columns one at a time, multiplies the probability of each one's range given the columns before it, and draws a value inside that range to condition the next. The draws come from fixed quasi-random points, 32 per row in training and 256 when scoring, so the likelihood is smooth in the parameters and the same on every call. On a joint normal with two coarse columns of three, it is within 0.002 of SciPy's log probability at 256 points, and within 0.01 at 32.
+
+The joint normal runs the simulator as a Kalman update of its low-rank factor, so a point costs `columns × rank²`. It visits the exact columns first and then the coarse ones from the least likely, which leaves the least to the draws. The mixture runs it in each component. The flow runs it in its own column order, through each column's spline, so a coarse cell needs its one block (`depth=1`, the default); a deeper flow trains on joint labels whose cells are all exact. Truncation, noise, and group totals stay one-column, and `calibrate` refuses a joint model.
+
+From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py): four products at 20 stores, simulated so the true demand is known. Their log demand shares the store, the weekday, a promotion, and the temperature, plus a shock common to all four. On a rush day, one day in ten and one promotion day in three, all four jump by 80% at once, and the stock, set from the usual demand, does not see it coming. A quarter of product-days sell out, and every shelf empties on 11% of days, half of the rush days. Five seeds, each with 8,000 days to train on and 4,000 to score against the true demand:
+
+| Head | Trained on | Joint NLL ↓ | Total below its 90% quantile | Every shelf empty, predicted (true 11.1%) |
+|---|---|---:|---:|---:|
+| `multivariate_gaussian` | log demand (the oracle) | 0.498 | 89.3% | 10.6% |
+| `multivariate_gaussian` | `observed.censored(log_sales, sold_out)` | **0.511** | 87.9% | 9.1% |
+| `multivariate_gaussian` | log sales, as if they were demand | 0.809 | 76.4% | 2.6% |
+| `multivariate_mixture` | `observed.censored(log_sales, sold_out)` | 0.523 | **90.8%** | **11.4%** |
+| `multivariate_flow` | `observed.censored(log_sales, sold_out)` | 0.613 | 92.2% | 12.1% |
+| `mixture`, one per product | each product's column, censored | 1.874 | 86.3% | 0.7% |
+
+The joint fits on censored sales come close to the oracle: 0.013 nats behind it for the joint normal and 0.027 for the mixture, each against its own oracle, and they expect every shelf to empty on 9% to 12% of days, where it happened on 11%. Fitted to sales as if they were demand, the joint normal's 90% quantile of the four products' total covers the true total on 76% of days, and it expects every shelf to empty on 3% of days. Censored mixtures fitted one product at a time learn each product's demand but not that the four move together: their joint NLL is 1.36 nats worse than the joint normal's, their quantile of the total covers 86%, and they expect every shelf to empty on 0.7% of days, because four independent products seldom run out at once. The mixture's likelihood is no better than the joint normal's, since on the log scale an 80% lift one day in six is a small departure from a normal, but its quantile of the total and its chance that every shelf empties are the closest to the truth. The flow learns the least from censored cells here: 0.09 nats behind its own oracle, and wider than it needs to be. [docs/benchmarks.md](benchmarks.md#several-products-that-sell-out-together) has every head, the spread across seeds, and the times.
+
+![The total demand of four products on ordinary and promotion days: recorded sales, and the fits to sales, to censored sales product by product, to censored sales of all four together, and to the true demand.](images/joint-sold-out.png)
+
+The figure is seed 0, with the joint mixture. On promotion days, when a rush is three and a half times as likely, the fit to sales covers the true total with its 90% quantile on 64% of days, the per-product fits on 79%, the joint censored fit on 86%, and the oracle on 87%. `python examples/benchmark_observed.py joint_figure` draws it.
 
 ## Limits
 

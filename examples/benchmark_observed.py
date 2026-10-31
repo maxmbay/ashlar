@@ -1,6 +1,6 @@
-"""Training on what was observed: sold-out sales, and weekly totals of daily values.
+"""Training on what was observed: sold-out sales, weekly totals of daily values, and products that sell out together.
 
-Two simulations, so the true values are known and every fit is scored
+Three simulations, so the true values are known and every fit is scored
 against them. Seeds 0 to 4, mean ± standard deviation.
 
 **Demand from sales when shelves sell out.** A sold-out day records sales
@@ -43,9 +43,40 @@ days: NLL of the true daily value, the error of the predicted mean against
 the true mean, the predicted standard deviation on calm and on volatile
 days, and the 80% interval.
 
-    JAX_PLATFORMS=cpu python examples/benchmark_observed.py           # both
-    JAX_PLATFORMS=cpu python examples/benchmark_observed.py totals    # one
-    JAX_PLATFORMS=cpu python examples/benchmark_observed.py figure    # docs/images/sold-out-demand.png
+**Several products that sell out together.** Four products at 20 stores,
+on the log scale. Each day's demand shares the store's level, the weekday,
+a store-wide promotion, and the temperature (each product reacts to it
+differently), plus a shock common to all four and one of each product's
+own. On a rush day, 10% of days and 35% of promotion days, every product's
+demand jumps by 80% at once. The planner stocks each product at its usual
+demand times a safety factor from 1.2 to 1.6, not knowing whether the day
+will rush, so shelves empty together: about a quarter of product-days sell
+out, most of them on rush days. 12,000 days per seed, 8,000 to train and
+4,000 to test.
+
+Each joint head (``multivariate_gaussian``, ``multivariate_mixture``,
+``multivariate_flow``) is fitted on the log of the true demand (the oracle),
+on the log of sales as if they were demand, and on
+``observed.censored(log_sales, sold_out)``, a table with a cell per product.
+The baseline is the usual way to handle censoring without a joint model: a
+censored ``mixture`` head per product, its products then independent.
+Scored on the test days against the true demand:
+
+- NLL of the true log demand of all four products together.
+- The share of days whose total demand over the four products is at or
+  below the predicted 90% quantile of the total, from 1,000 joint draws.
+- The predicted probability that every shelf empties, all four products
+  selling out at that day's stock: its Brier score, and the share of days
+  it predicts against the share on which it happened. The products'
+  marginal fits can each be right while this is wrong, since it depends
+  on how the four move together.
+
+    pip install -e ".[dev]" lightgbm xgboost matplotlib    # the demand stage reads benchmark_readme.py
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py                 # demand and totals
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py totals          # one
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py joint           # several products
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py figure          # docs/images/sold-out-demand.png
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py joint_figure    # docs/images/joint-sold-out.png
 """
 
 from __future__ import annotations
@@ -63,8 +94,6 @@ import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from benchmark_readme import _crps
 
 from ashlar import ASRRegressor, observed
 
@@ -132,6 +161,8 @@ def _labels(fit, demand, sales, sold_out):
 
 
 def _score(model, x_test, demand, best_cost, seed):
+    from benchmark_readme import _crps
+
     dist = model.predict_dist(x_test)
     draws = np.asarray(dist.sample(jax.random.PRNGKey(seed), (DRAWS,)), dtype=np.float64).T
     q90, q75 = model.predict_quantiles(x_test, [0.9, RATIO]).T
@@ -295,9 +326,8 @@ def figure() -> None:
     panel averages the predicted mass over the held-out days of one
     condition, over the true demand of those days.
     """
-    import matplotlib.pyplot as plt
-
     import figures as style
+    import matplotlib.pyplot as plt
 
     style._load_fonts()
     seed = 0
@@ -388,10 +418,257 @@ def figure() -> None:
     style._save(fig, "sold-out-demand.png")
 
 
+PRODUCTS = 4
+SHELF_ROWS, SHELF_TRAIN = 12_000, 8_000
+SHELF_STORES = 20
+RUSH_LIFT = float(np.log(1.8))
+JOINT_HEADS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow")
+JOINT_FITS = ("oracle: true demand", "sales as demand", "censored")
+PER_PRODUCT = ("mixture per product", "censored")
+
+
+def shelf_days(seed: int, rows: int = SHELF_ROWS):
+    """Four products' log demand, log stock, and log sales per store-day, and the features the planner sees."""
+    rng = np.random.default_rng(seed)
+    store = rng.integers(0, SHELF_STORES, size=rows)
+    level = np.random.default_rng(2000 + seed).normal(2.0, 0.35, size=SHELF_STORES)
+    product_level = np.array([0.0, 0.4, -0.3, 0.2])
+    heat = np.array([0.15, -0.10, 0.05, 0.25])
+    weekday = rng.integers(0, 7, size=rows)
+    promo = rng.random(rows) < 0.25
+    temperature = rng.normal(15.0, 8.0, size=rows)
+    usual = (
+        level[store][:, None]
+        + product_level
+        + 0.25 * np.sin(2 * np.pi * weekday / 7)[:, None]
+        + 0.3 * promo[:, None]
+        + heat * ((temperature - 15.0) / 10.0)[:, None]
+    )
+    rush = rng.random(rows) < np.where(promo, 0.35, 0.10)
+    shock = 0.25 * rng.normal(size=(rows, 1)) + 0.2 * rng.normal(size=(rows, PRODUCTS))
+    log_demand = usual + RUSH_LIFT * rush[:, None] + shock
+    log_stock = usual + np.log(rng.uniform(1.2, 1.6, size=(rows, PRODUCTS))) + 0.05 * rng.normal(size=(rows, PRODUCTS))
+    sold_out = log_demand >= log_stock
+    frame = pd.DataFrame(
+        {
+            "store": pd.Categorical([f"s{index}" for index in store]),
+            "weekday": weekday.astype(np.float32),
+            "promo": promo.astype(np.float32),
+            "temperature": temperature.astype(np.float32),
+        }
+    )
+    return frame, log_demand, log_stock, np.minimum(log_demand, log_stock), sold_out, rush
+
+
+def _joint_targets(fit, log_demand, log_sales, sold_out):
+    if fit == JOINT_FITS[0]:
+        return log_demand
+    if fit == JOINT_FITS[1]:
+        return log_sales
+    return observed.censored(log_sales, sold_out)
+
+
+def _joint_record(log_density, draws, log_demand, log_stock):
+    """Scores from the joint log density of the true demand and joint draws ``(draws, rows, products)`` of log demand."""
+    total = np.exp(log_demand).sum(axis=1)
+    predicted_total = np.exp(draws).sum(axis=2)
+    q90 = np.quantile(predicted_total, 0.9, axis=0)
+    empty = np.mean((draws >= log_stock[None]).all(axis=2), axis=0)
+    happened = (log_demand >= log_stock).all(axis=1)
+    return {
+        "nll": float(-np.mean(log_density)),
+        "total_q90": float(np.mean(total <= q90)),
+        "all_empty_brier": float(np.mean(np.square(empty - happened))),
+        "all_empty_predicted": float(np.mean(empty)),
+    }
+
+
+def joint() -> None:
+    scores = {(head, fit): [] for head in JOINT_HEADS for fit in JOINT_FITS}
+    scores[PER_PRODUCT] = []
+    every = []
+    for seed in SEEDS:
+        frame, log_demand, log_stock, log_sales, sold_out, rush = shelf_days(seed)
+        train, test = np.arange(SHELF_TRAIN), np.arange(SHELF_TRAIN, SHELF_ROWS)
+        x_train, x_test = frame.iloc[train], frame.iloc[test]
+        every.append(float(np.mean(sold_out[test].all(axis=1))))
+        print(
+            f"seed {seed}: {sold_out.mean():.1%} of product-days sold out, {np.mean(sold_out.any(axis=1)):.1%} of days "
+            f"had one, every shelf emptied on {every[-1]:.1%} of test days; rush on {rush.mean():.1%}",
+            flush=True,
+        )
+        for head in JOINT_HEADS:
+            for fit in JOINT_FITS:
+                start = time.time()
+                model = ASRRegressor(task=head, random_state=seed).fit(
+                    x_train, _joint_targets(fit, log_demand[train], log_sales[train], sold_out[train])
+                )
+                draws = model.sample(x_test, n=DRAWS, seed=seed)
+                record = _joint_record(model.log_prob(x_test, log_demand[test]), draws, log_demand[test], log_stock[test])
+                record["seconds"] = time.time() - start
+                scores[(head, fit)].append(record)
+                print(f"  {head:22s} {fit:20s}", {key: round(value, 4) for key, value in record.items()}, flush=True)
+        start = time.time()
+        density = np.zeros(len(test))
+        draws = np.zeros((DRAWS, len(test), PRODUCTS))
+        for product in range(PRODUCTS):
+            label = observed.censored(log_sales[train, product], sold_out[train, product])
+            model = ASRRegressor(task="mixture", random_state=seed).fit(x_train, label)
+            density += model.log_prob(x_test, log_demand[test, product])
+            draws[..., product] = model.sample(x_test, n=DRAWS, seed=seed + 17 * product)
+        record = _joint_record(density, draws, log_demand[test], log_stock[test])
+        record["seconds"] = time.time() - start
+        scores[PER_PRODUCT].append(record)
+        print(f"  {PER_PRODUCT[0]:22s} {PER_PRODUCT[1]:20s}", {key: round(value, 4) for key, value in record.items()}, flush=True)
+
+    print(f"\n{len(SEEDS)} seeds, mean ± standard deviation, scored against the true demand")
+    print(
+        "| Head | Trained on | Joint NLL ↓ | Total below its 90% quantile | Every shelf empty: Brier ↓ "
+        f"| predicted share (it happened on {np.mean(every):.1%}) | Seconds |"
+    )
+    print("|---|---|---:|---:|---:|---:|---:|")
+    for (head, fit), rows in scores.items():
+        cells = []
+        for key in ("nll", "total_q90", "all_empty_brier", "all_empty_predicted", "seconds"):
+            values = np.asarray([row[key] for row in rows])
+            if key in ("total_q90", "all_empty_predicted"):
+                cells.append(f"{values.mean():.1%} ± {values.std(ddof=1):.1%}")
+            elif key == "seconds":
+                cells.append(f"{values.mean():.0f}")
+            else:
+                cells.append(f"{values.mean():.3f} ± {values.std(ddof=1):.3f}")
+        name = f"`{head}`" if head in JOINT_HEADS else head
+        print(f"| {name} | {fit} | " + " | ".join(cells) + " |")
+
+
+JOINT_FIGURE_HEAD = "multivariate_mixture"
+
+
+def joint_figure_draws(seed: int = 0):
+    """The held-out days of ``seed`` in ``joint``'s split, and each figure fit's joint draws of their log demand."""
+    frame, log_demand, _log_stock, log_sales, sold_out, _rush = shelf_days(seed)
+    train, test = np.arange(SHELF_TRAIN), np.arange(SHELF_TRAIN, SHELF_ROWS)
+    x_train, x_test = frame.iloc[train], frame.iloc[test]
+    draws = {}
+    for key, target in (
+        ("sales", log_sales[train]),
+        ("joint", observed.censored(log_sales[train], sold_out[train])),
+        ("oracle", log_demand[train]),
+    ):
+        model = ASRRegressor(task=JOINT_FIGURE_HEAD, random_state=seed).fit(x_train, target)
+        draws[key] = model.sample(x_test, n=DRAWS, seed=seed)
+        print(f"fitted {key}", flush=True)
+    independent = np.zeros((DRAWS, len(test), PRODUCTS))
+    for product in range(PRODUCTS):
+        label = observed.censored(log_sales[train, product], sold_out[train, product])
+        model = ASRRegressor(task="mixture", random_state=seed).fit(x_train, label)
+        independent[..., product] = model.sample(x_test, n=DRAWS, seed=seed + 17 * product)
+    draws["per_product"] = independent
+    return x_test, log_demand[test], log_sales[test], sold_out[test], draws
+
+
+def _round_axis(top: float):
+    """A round upper limit at or above ``top`` and its ticks from 0, the limit itself left unlabelled."""
+    step = next(step for step in (10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000) if top / step <= 4)
+    end = step * float(np.ceil(top / step))
+    return end, np.arange(0, int(end), int(step))
+
+
+def joint_figure() -> None:
+    """``docs/images/joint-sold-out.png``: the total demand of four products, recorded and as four fits see it.
+
+    Seed 0 and the split of ``joint``. Each panel pools the held-out days of
+    one condition: the true total demand behind it, and each fit's
+    predicted total from its joint draws, or from independent draws of the
+    per-product fits.
+    """
+    import figures as style
+    import matplotlib.pyplot as plt
+
+    style._load_fonts()
+    x_test, log_demand, log_sales, sold_out, draws = joint_figure_draws(0)
+    fits = (
+        ("sales", "fit to sales"),
+        ("per_product", "censored, product by product"),
+        ("joint", "censored, all four together"),
+        ("oracle", "fit to the true demand"),
+    )
+    truth = np.exp(log_demand).sum(axis=1)
+    recorded = np.exp(log_sales).sum(axis=1)
+    totals = {key: np.exp(value).sum(axis=2) for key, value in draws.items()}
+    promo = x_test["promo"].to_numpy() > 0
+    conditions = (("ordinary days", ~promo), ("promotion days", promo))
+    share = float(np.mean(sold_out))
+    together = float(np.mean(sold_out.all(axis=1)))
+    print(f"held-out product-days sold out {share:.4f}, days every shelf emptied {together:.4f}", flush=True)
+
+    width, height = 18.2, 8.9
+    fig = plt.figure(figsize=(width, height), facecolor=style.WHITE)
+    fig.text(0.045, 0.975, "Shelves that empty together hide the busiest days.", fontproperties=style.TITLE,
+             color=style.INK, ha="left", va="top")
+    for offset, line in (
+        (0.925, (f"Simulated demand for four products at 20 stores, which jumps for all four on a rush day. "
+                 f"{share:.0%} of product-days sold out, and every shelf emptied on {together:.0%} of days.")),
+        (0.885, ("Bars: the true total demand of the four over the held-out days. Lines: the recorded sales, then "
+                 "each fit's predicted total. Only the last fit saw demand.")),
+    ):
+        fig.text(0.045, offset, line, fontproperties=style.CLAIM, color=style.MUTED, ha="left", va="top")
+    fig.add_artist(plt.Line2D([0.045, 0.955], [0.852, 0.852], transform=fig.transFigure, color=style.HAIR,
+                              linewidth=1.05))
+
+    colors = {"sales": style.CLAY, "per_product": style.CLAY, "joint": style.TEAL, "oracle": style.MUTED}
+    panels = [("recorded", "recorded sales")] + list(fits)
+    rows = len(conditions)
+    for row, (label, mask) in enumerate(conditions):
+        top, ticks = _round_axis(float(np.quantile(truth[mask], 0.995)) * 1.05)
+        bins = np.linspace(0.0, top, 46)
+        centres = 0.5 * (bins[1:] + bins[:-1])
+        heights = np.histogram(truth[mask], bins=bins, density=True)[0]
+        sales = np.histogram(recorded[mask], bins=bins, density=True)[0]
+        curves, cover = {}, {}
+        for key, _title in fits:
+            pooled = totals[key][:, mask]
+            curves[key] = np.histogram(pooled.reshape(-1), bins=bins, density=True)[0]
+            cover[key] = float(np.mean(truth[mask] <= np.quantile(pooled, 0.9, axis=0)))
+        ceiling = 1.32 * max(heights.max(), sales.max(), max(values.max() for values in curves.values()))
+        print(f"{label} days {int(mask.sum())} " + " ".join(f"{key}_q90 {value:.4f}" for key, value in cover.items()),
+              flush=True)
+        for column, (key, title) in enumerate(panels):
+            ax = fig.add_axes([0.045 + column * 0.185, 0.095 + (rows - 1 - row) * 0.37, 0.16, 0.26])
+            style._style_plot(ax)
+            ax.hist(truth[mask], bins=bins, density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6,
+                    zorder=1)
+            if key == "recorded":
+                ax.hist(recorded[mask], bins=bins, density=True, histtype="step", color=style.INK, linewidth=1.6,
+                        zorder=3)
+                note, tone = f"a shelf empty on {np.mean(sold_out[mask].any(axis=1)):.0%} of days", style.MUTED
+            else:
+                lit = key == "joint"
+                ax.plot(centres, curves[key], color=colors[key], linewidth=2.3 if lit else 1.8, zorder=3)
+                note = f"90% quantile covers {cover[key]:.0%}"
+                tone = style.TEAL if lit else (style.MUTED if key == "oracle" else style.CLAY)
+            ax.set_xlim(0.0, top)
+            ax.set_ylim(0, ceiling)
+            ax.set_yticks([])
+            ax.set_xticks(ticks)
+            style._ticks(ax)
+            if row == 0:
+                ax.text(0.0, 1.08, title, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                        ha="left", va="bottom")
+            if column == 0:
+                ax.text(-0.09, 0.5, label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                        ha="center", va="center", rotation=90)
+            if row == rows - 1:
+                ax.set_xlabel("units of all four a day", fontproperties=style.AXIS, color=style.INK, labelpad=9)
+            ax.text(0.98, 0.93, note, transform=ax.transAxes, fontproperties=style.TICK, color=tone, ha="right",
+                    va="top")
+    style._save(fig, "joint-sold-out.png")
+
+
 def main() -> None:
     chosen = sys.argv[1:] or ["demand", "totals"]
     for name in chosen:
-        {"demand": demand, "totals": totals, "figure": figure}[name]()
+        {"demand": demand, "totals": totals, "joint": joint, "figure": figure, "joint_figure": joint_figure}[name]()
 
 
 if __name__ == "__main__":

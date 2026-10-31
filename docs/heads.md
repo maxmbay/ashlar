@@ -14,6 +14,7 @@
 | Counts with more spread than their mean | `negative_binomial` | A mean and a dispersion per row, the variance being mean + dispersion × mean². |
 | Often exactly zero, otherwise a positive amount | `hurdle` | The probability of zero, plus a lognormal or gamma amount. Tips, claims, rainfall. |
 | Several columns that move together | `multivariate_gaussian` | A joint normal with a learned low-rank covariance, so totals and joint events come out right. |
+| Several columns that move together in a few distinct ways, such as a day when everything spikes at once | `multivariate_mixture` | Five joint normals with learned weights (`head_kwargs={"components": 5}`), each with its own location and low-rank covariance. |
 | Several columns whose dependence is curved, skewed, or heavier in the tails | `multivariate_flow` | An autoregressive flow: each column's whole conditional shape can change with the columns before it. |
 
 ```python
@@ -29,7 +30,7 @@ model.predict_dist(X_new)                  # all of the above as one JAX object
 
 Every head returns the same kind of object from `predict_dist`, with `log_prob`, `sample`, moments, a CDF, and quantiles. [docs/distributions.md](distributions.md) describes it.
 
-Every head with a CDF, which is all of them except `quantile` and the joint heads, also trains on a `y` that was not seen exactly: a sold-out day, a bracket, a rounded or truncated value, a reading with known noise, or a total over several rows. [docs/observed.md](observed.md) says which head takes which label.
+Every head with a CDF, which is all of them except `quantile`, also trains on a `y` that was not seen exactly: a sold-out day, a bracket, a rounded or truncated value, a reading with known noise, or a total over several rows. The joint heads take a label with a cell per column, each exact, censored, in a range, or rounded, so a day when two of four products sold out still teaches all four. [docs/observed.md](observed.md) says which head takes which label.
 
 On hourly bike rentals and NYC taxi pickups, both overdispersed, the negative binomial's 80% interval holds 76% to 82% of held-out counts where a Poisson's, Ashlar's or LightGBM's, holds 24% to 62%, and its log mass is far better (4.50 against LightGBM's 6.52 on bike rentals). The `mixture` stays as good on CRPS for large counts; the count heads win where the counts are small and zeros matter, and lose on an underdispersed count such as abalone rings, where `gaussian` or `mixture` is the better choice. [docs/benchmarks.md](benchmarks.md#count-heads) has the tables.
 
