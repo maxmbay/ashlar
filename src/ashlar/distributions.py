@@ -43,7 +43,7 @@ from typing import ClassVar
 import jax
 import jax.numpy as jnp
 from equinox import Module, field
-from jax.scipy.special import betainc, gammaincc, ndtr, ndtri
+from jax.scipy.special import betainc, gammainc, gammaincc, ndtr, ndtri
 
 from ashlar.errors import AshlarError, ShapeError
 
@@ -89,6 +89,12 @@ class Distribution(Module):
 
     def cdf(self, value):
         raise NotImplementedError(f"{type(self).__name__} has no CDF.")
+
+    def cdf_left(self, value):
+        """``P(Y < value)``. The CDF itself, except where the distribution has an atom."""
+        if self.support == "nonnegative_integer":
+            return self.cdf(jnp.asarray(value) - 1.0)
+        return self.cdf(value)
 
     def quantile(self, q):
         if self.event_shape:
@@ -250,6 +256,9 @@ class Mixture(Distribution):
     def cdf(self, value):
         return jnp.sum(jnp.exp(self.logits) * self.components.cdf(self._expand(value)), axis=-1)
 
+    def cdf_left(self, value):
+        return jnp.sum(jnp.exp(self.logits) * self.components.cdf_left(self._expand(value)), axis=-1)
+
     def mean(self):
         axis = len(self.batch_shape)
         return jnp.sum(self._weights_for_event() * self.components.mean(), axis=axis)
@@ -360,6 +369,9 @@ class AffineTransformed(Distribution):
 
     def cdf(self, value):
         return self.base.cdf((value - self.loc) / self.scale)
+
+    def cdf_left(self, value):
+        return self.base.cdf_left((value - self.loc) / self.scale)
 
     def quantile(self, q):
         return self.loc + self.scale * self.base.quantile(q)
@@ -866,7 +878,11 @@ def _bisection_quantile(dist: Distribution, q):
     gap = dist.cdf(x0) - q
     newton = jnp.where(density > 1e-12, gap / jnp.maximum(density, 1e-12), 0.0)
     refined = x0 - newton + jax.lax.stop_gradient(newton)
-    refined = jnp.where(level <= 0.0, -jnp.inf, refined)
+    if dist.support in ("nonnegative", "positive"):
+        # An atom at zero, or a lower edge the bracket straddles, is answered exactly.
+        refined = jnp.where(frozen.cdf(jnp.zeros_like(x0)) >= level, 0.0, jnp.maximum(refined, 0.0))
+    else:
+        refined = jnp.where(level <= 0.0, -jnp.inf, refined)
     return jnp.where(level >= 1.0, jnp.inf, refined)
 
 
@@ -894,13 +910,12 @@ def _integer_quantile(dist: Distribution, q):
 def randomized_pit(dist: Distribution, value, key):
     """Probability integral transform of ``value``, uniform on ``(0, 1)`` when ``value`` is a draw from ``dist``.
 
-    For a count the PIT is spread uniformly over the jump of the CDF at the
-    observed value, so a discrete head still gives a uniform score.
+    Where the CDF jumps (a count, or the zero of a hurdle), the PIT is spread
+    uniformly over the jump at the observed value, so the score is still
+    uniform.
     """
     upper = dist.cdf(value)
-    if dist.support != "nonnegative_integer":
-        return upper
-    lower = dist.cdf(jnp.asarray(value) - 1.0)
+    lower = dist.cdf_left(value)
     return lower + jax.random.uniform(key, jnp.shape(upper), dtype=upper.dtype) * (upper - lower)
 
 
@@ -962,3 +977,169 @@ def joint_normal_distribution(flat, n_events: int) -> LowRankMultivariateNormal:
     std = positive_scale(flat[..., d : 2 * d])
     factor = flat[..., 2 * d :].reshape(flat.shape[:-1] + (d, rank))
     return LowRankMultivariateNormal(loc, factor, jnp.square(std))
+
+
+class LogNormal(Distribution):
+    """``exp`` of a normal with location ``loc`` and scale ``scale`` on the log axis. Positive values."""
+
+    loc: jax.Array
+    scale: jax.Array
+    reparameterized: ClassVar[bool] = True
+    support: ClassVar[str] = "positive"
+
+    def __init__(self, loc, scale):
+        self.loc, self.scale = _broadcast(loc, scale)
+
+    @property
+    def batch_shape(self):
+        return self.loc.shape
+
+    def log_prob(self, value):
+        value = jnp.asarray(value, dtype=self.loc.dtype)
+        safe = jnp.maximum(value, 1e-30)
+        density = _normal_log_prob(jnp.log(safe), self.loc, self.scale) - jnp.log(safe)
+        return jnp.where(value > 0, density, -jnp.inf)
+
+    def sample(self, key, sample_shape=()):
+        noise = jax.random.normal(key, tuple(sample_shape) + self.loc.shape, dtype=self.loc.dtype)
+        return jnp.exp(self.loc + self.scale * noise)
+
+    def mean(self):
+        return jnp.exp(self.loc + 0.5 * jnp.square(self.scale))
+
+    def variance(self):
+        return jnp.expm1(jnp.square(self.scale)) * jnp.exp(2 * self.loc + jnp.square(self.scale))
+
+    def cdf(self, value):
+        value = jnp.asarray(value, dtype=self.loc.dtype)
+        return jnp.where(value > 0, ndtr((jnp.log(jnp.maximum(value, 1e-30)) - self.loc) / self.scale), 0.0)
+
+    def quantile(self, q):
+        return jnp.exp(self.loc + self.scale * ndtri(jnp.asarray(q, dtype=self.loc.dtype)))
+
+
+class Gamma(Distribution):
+    """Gamma with mean ``mean_value`` and shape ``concentration``; variance ``mean² / concentration``."""
+
+    mean_value: jax.Array
+    concentration: jax.Array
+    reparameterized: ClassVar[bool] = True
+    support: ClassVar[str] = "positive"
+
+    def __init__(self, mean_value, concentration):
+        self.mean_value, self.concentration = _broadcast(mean_value, concentration)
+
+    @property
+    def batch_shape(self):
+        return self.mean_value.shape
+
+    def _rate(self):
+        return self.concentration / self.mean_value
+
+    def log_prob(self, value):
+        value = jnp.asarray(value, dtype=self.mean_value.dtype)
+        safe = jnp.maximum(value, 1e-30)
+        k, rate = self.concentration, self._rate()
+        density = k * jnp.log(rate) + (k - 1) * jnp.log(safe) - rate * safe - jax.scipy.special.gammaln(k)
+        return jnp.where(value > 0, density, -jnp.inf)
+
+    def sample(self, key, sample_shape=()):
+        shape = tuple(sample_shape) + self.batch_shape
+        draw = jax.random.gamma(key, jnp.broadcast_to(self.concentration, shape), shape, dtype=self.mean_value.dtype)
+        return draw / self._rate()
+
+    def mean(self):
+        return self.mean_value
+
+    def variance(self):
+        return jnp.square(self.mean_value) / self.concentration
+
+    def cdf(self, value):
+        value = jnp.asarray(value, dtype=self.mean_value.dtype)
+        return jnp.where(value > 0, gammainc(self.concentration, self._rate() * jnp.maximum(value, 0.0)), 0.0)
+
+
+class Hurdle(Distribution):
+    """An exact zero with probability ``zero``, otherwise a draw from the positive ``severity``.
+
+    The outcome of an insurance claim, a tip, a day's rain, or an order: most
+    rows are exactly zero, and the rest follow their own positive
+    distribution. ``log_prob`` is the log probability of the zero at 0 and
+    ``log(1 - zero)`` plus the severity's log density elsewhere, the usual
+    likelihood of a mixed outcome.
+    """
+
+    zero: jax.Array
+    severity: Distribution
+    support: ClassVar[str] = "nonnegative"
+
+    def __init__(self, zero, severity: Distribution):
+        self.zero = jnp.broadcast_to(jnp.asarray(zero, dtype=jnp.float32), severity.batch_shape)
+        self.severity = severity
+
+    @property
+    def batch_shape(self):
+        return self.zero.shape
+
+    def _log_zero(self):
+        return jnp.log(jnp.clip(self.zero, 1e-30, 1.0))
+
+    def _log_keep(self):
+        return jnp.log1p(-jnp.minimum(self.zero, 1.0 - 1e-7))
+
+    def log_prob(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        positive = self._log_keep() + self.severity.log_prob(jnp.where(value > 0, value, 1.0))
+        return jnp.where(value > 0, positive, jnp.where(value == 0, self._log_zero(), -jnp.inf))
+
+    def sample(self, key, sample_shape=()):
+        zero_key, severity_key = jax.random.split(key)
+        shape = tuple(sample_shape) + self.batch_shape
+        draw = self.severity.sample(severity_key, sample_shape)
+        return jnp.where(jax.random.bernoulli(zero_key, jnp.broadcast_to(self.zero, shape)), 0.0, draw)
+
+    def mean(self):
+        return (1.0 - self.zero) * self.severity.mean()
+
+    def variance(self):
+        keep = 1.0 - self.zero
+        severity_mean = self.severity.mean()
+        return keep * (self.severity.variance() + jnp.square(severity_mean)) - jnp.square(keep * severity_mean)
+
+    def cdf(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        inside = self.zero + (1.0 - self.zero) * self.severity.cdf(jnp.maximum(value, 0.0))
+        return jnp.where(value < 0, 0.0, inside)
+
+    def cdf_left(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        inside = self.zero + (1.0 - self.zero) * self.severity.cdf(value)
+        return jnp.where(value <= 0, 0.0, inside)
+
+    def quantile(self, q):
+        q = jnp.asarray(q, dtype=jnp.float32)
+        level = jnp.clip((q - self.zero) / jnp.maximum(1.0 - self.zero, 1e-30), 1e-7, 1.0 - 1e-7)
+        return jnp.where(q <= self.zero, 0.0, self.severity.quantile(level))
+
+
+HURDLE_SEVERITIES = ("lognormal", "gamma")
+
+
+def hurdle_distribution(flat, severity: str = "lognormal") -> Hurdle:
+    """The ``hurdle`` head from its flat projection ``batch + (3,)``: the zero logit, then two severity parameters.
+
+    ``lognormal``: the location and raw scale of ``log y``. ``gamma``: the log
+    mean and raw shape. Raw values go through ``softplus(raw) + 1e-4``.
+    """
+    from ashlar.predict import positive_scale
+
+    flat = jnp.asarray(flat)
+    if flat.shape[-1] != 3:
+        raise ShapeError(f"a hurdle projection has width 3; received {flat.shape[-1]}.")
+    zero = jax.nn.sigmoid(flat[..., 0])
+    if severity == "lognormal":
+        return Hurdle(zero, LogNormal(flat[..., 1], positive_scale(flat[..., 2])))
+    if severity == "gamma":
+        mean = jnp.exp(jnp.clip(flat[..., 1], -30.0, 30.0))
+        return Hurdle(zero, Gamma(mean, positive_scale(flat[..., 2])))
+    raise AshlarError(f"hurdle severity must be one of {HURDLE_SEVERITIES}; received {severity!r}.")

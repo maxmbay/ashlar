@@ -301,3 +301,37 @@ class MultivariateNormalHead(_EnsembleHead):
         del key
         self._check(hidden)
         return self.output(hidden)
+
+
+class HurdleHead(_EnsembleHead):
+    """Probability of an exact zero plus a positive severity. Output ``(batch, member, 3)``.
+
+    The three outputs are the zero logit and the severity's two parameters,
+    read by ``ashlar.distributions.hurdle_distribution``. ``severity`` is
+    ``lognormal`` (default) or ``gamma``. ``start`` is the initial bias; the
+    estimator sets it from the training target, so the fit starts at the
+    observed share of zeros and the spread of the positive values.
+    """
+
+    severity: str = field(static=True)
+
+    def __init__(self, d_in, k, *, n_events, n_classes, key, severity="lognormal", start=(0.0, 0.0, 0.0), **kwargs):
+        from ashlar.distributions import HURDLE_SEVERITIES
+
+        del n_classes
+        if kwargs:
+            raise ShapeError(f"hurdle head received unknown arguments {sorted(kwargs)}.")
+        if n_events != 1:
+            raise ShapeError("a hurdle head models one target column.")
+        if severity not in HURDLE_SEVERITIES:
+            raise ShapeError(f"hurdle severity must be one of {HURDLE_SEVERITIES}; received {severity!r}.")
+        weight = 0.01 * jax.random.normal(key, (k, d_in, 3), dtype=jnp.float32)
+        bias = jnp.broadcast_to(jnp.asarray(start, dtype=jnp.float32), (k, 3))
+        self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
+        self.k = k
+        self.severity = severity
+
+    def __call__(self, hidden, *, key):
+        del key
+        self._check(hidden)
+        return self.output(hidden)
