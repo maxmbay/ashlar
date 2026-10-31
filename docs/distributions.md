@@ -40,6 +40,8 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 | `student_t` | `StudentT` | bisection on the CDF |
 | `poisson`, `negative_binomial` | `Poisson`, `NegativeBinomial`, with the structural zero | the smallest whole number whose CDF reaches the level |
 | `quantile` | `QuantileLevels` | only its three trained levels; no density, CDF, or draws |
+| `hurdle` | `Hurdle`: a probability of exactly zero and a `LogNormal` or `Gamma` amount | 0 up to the zero share, the severity's quantile above it |
+| `multivariate_gaussian` | `LowRankMultivariateNormal` over the target columns | per column, through `marginals()` |
 | `normal` | `Mixture` of `Normal`s; `policy="mean_parameters"` gives one `Normal` | closed form, or bisection for the mixture |
 | `classification`, `ordinal`, tree | `Categorical` over `classes_` (the leaves, for a tree); values are class indices | none |
 
@@ -47,11 +49,45 @@ Two wrappers sit around the head. Every ensemble member is a component of an equ
 
 A bisection quantile is exact to float precision: it brackets the level with Cantelli's bound around the mean, halves the bracket 80 times, and then takes one Newton step that does not move the value but gives the implicit-function gradient. Before this object existed, the quantiles of every head but `quantile` were read from 1,000 draws; they are now exact, so they no longer depend on `n_samples` or `seed`, and calibration reads each held-out row's CDF instead of ranking it among draws.
 
-The flow's mean and variance are integrals: closed form on its identity tails and a 512-point rule across the spline. A count head's PIT is spread uniformly over the jump of its CDF at the observed count, so it is still uniform for a calibrated model.
+The flow's mean and variance are integrals: closed form on its identity tails and a 512-point rule across the spline. Where the CDF jumps, at a count or at the hurdle's zero, the PIT is spread uniformly over the jump (`cdf_left(y)` to `cdf(y)`), so it is still uniform for a calibrated model.
+
+## Several targets at once
+
+`task="multivariate_gaussian"` takes `y` with one column per outcome, demand at eight sites or the duration and the cost of a job, and predicts their joint normal. Its covariance is `W Wᵀ + diag(D)`, with a factor `W` of rank 2 by default (`head_kwargs={"rank": r}`), and both change from row to row, so the model learns when outcomes move together as well as how much each one varies.
+
+```python
+import jax
+from ashlar import ASRRegressor
+from ashlar.distributions import Independent
+
+model = ASRRegressor(task="multivariate_gaussian").fit(X, Y)   # Y is (rows, sites)
+dist = model.predict_dist(X_new)          # batch (rows,), event (sites,)
+dist.covariance()                         # (rows, sites, sites), in the units of Y
+draws = dist.sample(jax.random.key(0), (4000,))         # (4000, rows, sites): coherent scenarios
+p_over = (draws.sum(axis=-1) > capacity).mean(axis=0)   # P(total > capacity) per row
+
+dist.marginals()                          # each site on its own: batch (rows, sites)
+Independent(dist.marginals())             # the same sites with the dependence dropped
+```
+
+`model.predict` is the mean of every column, `model.predict_quantiles` gives each column's marginal quantiles as `(rows, columns, levels)`, and `model.log_prob(X, Y)` is the joint log density. `rank=0` trains independent columns. A question about several columns at once, such as a total, a difference, or whether two things both happen, needs the joint draws, because the marginals alone do not determine it. [The joint demand benchmark](benchmarks.md#joint-demand-across-locations) shows how much that matters on real loads.
+
+## An exact zero and a positive amount
+
+`task="hurdle"` is for a target that is often exactly zero and otherwise positive: a tip, an insurance claim, a day's rain, an order. One output is the probability of zero; the other two describe the amount when it is not zero, a `lognormal` by default or a `gamma` with `head_kwargs={"severity": "gamma"}`. The target stays in its own units.
+
+```python
+model = ASRRegressor(task="hurdle").fit(X, tips)
+dist = model.predict_dist(X_new)
+dist.cdf(0.0)             # P(tip = 0)
+model.predict(X_new)      # the mean, zeros included
+```
+
+Its `log_prob` is a log probability at zero and a log density elsewhere, the usual likelihood of a mixed outcome, so compare it only with another model of the same kind; CRPS compares it with anything. Quantiles at or below the share of zeros are exactly 0, and an 80% interval that reaches down to 0 contains every zero, so it can hold more than 80% of rows even after calibration.
 
 ## JAX transforms
 
-A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, and `LowRankMultivariateNormal`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.
+A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, and `LowRankMultivariateNormal`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.
 
 ```python
 import jax
