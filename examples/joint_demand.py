@@ -32,7 +32,7 @@ everything before it and scored on the 28 days after it; one fit per model
 and origin.
 
     JAX_PLATFORMS=cpu python examples/joint_demand.py            # fit and score
-    JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4 and TabM joint models
+    JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4, TabM, and flow joint models
     JAX_PLATFORMS=cpu python examples/joint_demand.py report     # tables
     JAX_PLATFORMS=cpu python examples/joint_demand.py figure     # docs/images/joint-demand.png
 """

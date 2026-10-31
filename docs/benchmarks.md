@@ -474,6 +474,25 @@ What holds up:
 - **A static correlation captures most of it on these loads.** The copula on independent heads covers 80.7% and ties or beats the joint model on every event score, within noise. The gain here comes from modelling dependence at all, not from letting it change with the hour. The joint head gets there in one model and one fit, with the best joint log density, but it does not beat the classical fix.
 - **Against its own marginals made independent, the joint model's edge per origin is a coin flip** on everything but coverage: it wins 11 to 13 of 25 origins on joint NLL, total CRPS, and each event score.
 
+**Richer joint models, added after the table above was seen.** Three more joint models ran afterwards on the same 25 origins, capacities, and draws: the normal head with rank 4, the rank-2 normal on the TabM backbone (`backbone="tabm"`, 32 members), and `task="multivariate_flow"`, the autoregressive flow, which did not exist when the first four ran. They were added to ask whether a richer joint closes the gap to the static correlation, so read them as exploratory, not as a fixed protocol.
+
+| Score | `joint` (rank 2) | rank 4 | TabM | `multivariate_flow` |
+|---|---:|---:|---:|---:|
+| Joint NLL of the eight loads ↓ | 67.31 ± 0.29 | 67.23 ± 0.29 | 66.88 ± 0.25 | **66.48 ± 0.29** |
+| CRPS per client, kW ↓ | 683.6 ± 23 | 677.1 ± 26 | 690.8 ± 25 | **667.9 ± 23** |
+| CRPS of the total, kW ↓ | 2,970 ± 120 | 2,975 ± 140 | 3,031 ± 130 | **2,926 ± 130** |
+| Total inside its 80% interval | 81.2% | 83.0% | 88.6% | 76.7% |
+| Width of that interval, kW | 13,650 | 14,010 | 16,020 | 11,690 |
+| Brier, total > 80th percentile ↓ | 0.0468 | 0.0465 | **0.0459** | 0.0484 |
+| Log loss, total > 80th percentile ↓ | 0.149 | 0.147 | **0.145** | 0.152 |
+| Brier, total > 95th percentile ↓ | 0.0284 | 0.0278 | **0.0277** | 0.0291 |
+| Log loss, total > 95th percentile ↓ | 0.095 | **0.091** | 0.092 | 0.095 |
+
+- **The flow models the eight loads best.** It has the best joint log density, 0.83 nats per hour better than the rank-2 normal and better at 22 of 25 origins, and the best CRPS for each client and for the total.
+- **It is a little too sure about the total.** Its 80% interval for the total holds 76.7% of hours, and where it gives P(total > capacity) between 2% and 10% (5.1% on average), the event happened 8.5% of the time. Its event scores tie the normal: it wins 11 to 16 of 25 origins on each. The better density does not carry over to the tail of the sum here.
+- **TabM's 32 members give the best event scores**, by a margin well inside the noise, with an interval that is too wide (88.6%). Rank 4 changes little.
+- **None of them clearly beats the static correlation on P(total > capacity).** The question this benchmark asks is answered about as well by independent heads with a fixed residual correlation as by any joint model tried.
+
 ![The 80% band for the total load of eight clients over the first three held-out days, joint against independent marginals, and the reliability of P(total > capacity) over all held-out hours.](images/joint-demand.png)
 
 ## Member uncertainty
