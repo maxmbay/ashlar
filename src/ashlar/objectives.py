@@ -288,27 +288,81 @@ def make_distribution_objective(kind: str):
     return objective
 
 
-def make_joint_objective(n_events: int, family: str = "normal"):
+def make_joint_objective(n_events: int, family: str = "normal", *, components: int | None = None):
     """Mean member negative log-density of a joint head, weighted over rows.
 
-    ``family`` is ``normal`` for ``multivariate_gaussian`` or ``flow`` for
-    ``multivariate_flow``.
+    ``family`` is ``normal`` for ``multivariate_gaussian``, ``mixture`` for
+    ``multivariate_mixture`` (with its number of ``components``), or
+    ``flow`` for ``multivariate_flow``.
 
     ``y`` is the standardized ``(batch, event)`` target. The density is the
     full joint one, so the loss rewards getting the dependence between
     columns right, not only each column.
     """
-    from ashlar.distributions import joint_flow_distribution, joint_normal_distribution
-
-    build = joint_flow_distribution if family == "flow" else joint_normal_distribution
 
     def objective(raw, y, sample_weight):
         context = raw[0] if family == "flow" else raw
         if context.ndim != 3:
             raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
         target = _target_events(y, int(n_events))
-        dist = build(raw, n_events)
+        dist = joint_member_distribution(family, raw, int(n_events), components)
         losses = -dist.log_prob(target[:, None, :])
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
+
+
+def joint_member_distribution(family: str, raw, n_events: int, components: int | None = None):
+    """Each member's joint distribution for every row, batch ``(rows, members)``, on the standardized target.
+
+    ``family`` is ``normal`` (``multivariate_gaussian``), ``mixture``
+    (``multivariate_mixture``, with its number of ``components``), or
+    ``flow`` (``multivariate_flow``).
+    """
+    from ashlar.distributional import MIXTURE_COMPONENTS
+    from ashlar.distributions import (
+        joint_flow_distribution,
+        joint_mixture_distribution,
+        joint_normal_distribution,
+    )
+
+    if family == "flow":
+        return joint_flow_distribution(raw, n_events)
+    if family == "mixture":
+        return joint_mixture_distribution(raw, n_events, MIXTURE_COMPONENTS if components is None else int(components))
+    return joint_normal_distribution(raw, n_events)
+
+
+# Quasi-random points per row when a joint head trains on coarse cells.
+BOX_TRAINING_POINTS = 32
+
+
+def make_joint_observed_objective(
+    n_events: int, family: str = "normal", *, components: int | None = None, points: int = BOX_TRAINING_POINTS
+):
+    """Mean member negative log-likelihood of a joint label, weighted over rows.
+
+    ``y`` is the ``(batch, event, 6)`` array of ``ashlar.observed.fields`` on
+    the standardized target. Each row scores ``log_box``: the joint density
+    of its exact cells times the probability of its coarse cells given them,
+    integrated at ``points`` fixed quasi-random points where a row has more
+    than one coarse cell (fewer than ``ashlar.distributions.BOX_POINTS``,
+    which scoring uses, to keep a training step cheap).
+    """
+    from ashlar.distributions import box_points
+
+    d = int(n_events)
+    grid = box_points(int(points), d)
+
+    def objective(raw, y, sample_weight):
+        context = raw[0] if family == "flow" else raw
+        if context.ndim != 3:
+            raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
+        y = jnp.asarray(y, dtype=jnp.float32)
+        if y.ndim != 3 or y.shape[1] != d:
+            raise ShapeError(f"a joint label's fields are (batch, {d}, 6); received {y.shape}.")
+        dist = joint_member_distribution(family, raw, d, components)
+        losses = -dist.log_box(y[:, None, :, 0], y[:, None, :, 1], grid)
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
 
     return objective
@@ -324,5 +378,122 @@ def make_hurdle_objective(severity: str):
         value = jnp.asarray(y, dtype=raw.dtype).reshape(-1)
         losses = -hurdle_distribution(raw, severity).log_prob(value[:, None])
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
+
+
+def member_distribution(task: str, raw, severity: str = "lognormal"):
+    """Each member's distribution for every row, batch ``(rows, members)``, on the head's own scale.
+
+    The distribution heads and ``hurdle`` read their flat projection; ``normal``
+    reads its one event's location and scale.
+    """
+    from ashlar.distributions import Normal, head_distribution, hurdle_distribution
+    from ashlar.predict import split_normal_parameters
+
+    if task == "normal":
+        loc, scale = split_normal_parameters(raw)
+        if loc.shape[-1] != 1:
+            raise ShapeError(f"an observed label is one target column; the normal head has {loc.shape[-1]}.")
+        return Normal(loc[..., 0], scale[..., 0])
+    if raw.ndim != 3:
+        raise ShapeError(f"{task} head output must be (batch, member, width); received {raw.shape}.")
+    if task == "hurdle":
+        return hurdle_distribution(raw, severity)
+    return head_distribution(task, raw)
+
+
+def make_observed_objective(task: str, *, severity: str = "lognormal", truncated: bool = False, noisy: bool = False):
+    """Mean member negative log-likelihood of what was observed, weighted over rows.
+
+    ``y`` is the ``(batch, 6)`` array of ``ashlar.observed.fields`` on the
+    head's own scale: standardized for a scaled task, raw for a count, the
+    hurdle, and ``normal``. An exact row scores its density, a coarse row the
+    probability of its interval; ``truncated`` divides by the probability of
+    each row's truncation range and ``noisy`` widens each row by its noise.
+    Both are fixed when the objective is built, so labels without them pay
+    nothing. Members are averaged, not mixed, as in the other objectives.
+    """
+    from ashlar.observed import log_likelihood
+
+    def objective(raw, y, sample_weight):
+        dist = member_distribution(task, raw, severity)
+        y = jnp.asarray(y, dtype=jnp.float32)
+        column = [y[:, index][:, None] for index in range(5)]
+        losses = -log_likelihood(
+            dist,
+            column[0],
+            column[1],
+            column[2] if truncated else None,
+            column[3] if truncated else None,
+            column[4] if noisy else None,
+        )
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    return objective
+
+
+TOTAL_TASKS = ("gaussian", "normal", "poisson")
+
+
+def sum_distribution(dist, segment, num_segments: int, live):
+    """The distribution of each segment's sum of independent rows, for normal and Poisson rows.
+
+    ``dist`` has batch ``(rows, members)``; ``segment`` maps each row to its
+    observation. A sum of normals is normal, with the variances added, and a
+    sum of Poisson counts is Poisson. Where ``live`` is false (padding, or an
+    observation with no weight) the result is a placeholder that stays finite.
+    """
+    import jax
+
+    from ashlar.distributions import Normal, Poisson
+
+    def total(values):
+        return jax.ops.segment_sum(values, segment, num_segments=num_segments)
+
+    if isinstance(dist, Normal):
+        variance = jnp.where(live, total(jnp.square(dist.scale)), 1.0)
+        return Normal(total(dist.loc), jnp.sqrt(variance))
+    if isinstance(dist, Poisson):
+        return Poisson(jnp.where(live, total(dist.mean_count), 1.0))
+    raise ShapeError(f"a total over rows needs normal or Poisson rows; received {type(dist).__name__}.")
+
+
+def make_total_objective(task: str, *, truncated: bool = False, noisy: bool = False):
+    """Mean member negative log-likelihood when some observations are totals over groups of rows.
+
+    ``y`` is ``(batch, 7)``: the six ``ashlar.observed.fields`` on the head's
+    own scale and a flag on the first row of each observation. The rows of an
+    observation are adjacent in the batch (``ashlar.train.pack_units``), and
+    its weight sits on its first row. Each observation scores the
+    distribution of the sum of its rows, so a row of its own scores itself.
+    Each member sums its own rows, and members are averaged as elsewhere.
+    """
+    import jax
+
+    from ashlar.observed import log_likelihood
+
+    def objective(raw, y, sample_weight):
+        y = jnp.asarray(y, dtype=jnp.float32)
+        rows = y.shape[0]
+        start = y[:, 6] > 0
+        segment = jnp.clip(jnp.cumsum(start.astype(jnp.int32)) - 1, 0, rows - 1)
+        weight = jax.ops.segment_sum(
+            jnp.where(start, jnp.asarray(sample_weight, dtype=jnp.float32), 0.0), segment, num_segments=rows
+        )
+        live = (weight > 0)[:, None]
+        dist = sum_distribution(member_distribution(task, raw), segment, rows, live)
+        observation = jax.ops.segment_sum(jnp.where(start[:, None], y[:, :5], 0.0), segment, num_segments=rows)
+        column = [observation[:, index][:, None] for index in range(5)]
+        losses = -log_likelihood(
+            dist,
+            column[0],
+            column[1],
+            column[2] if truncated else None,
+            column[3] if truncated else None,
+            column[4] if noisy else None,
+        )
+        losses = jnp.where(live, losses, 0.0)
+        return weighted_mean(jnp.mean(losses, axis=1), weight)
 
     return objective

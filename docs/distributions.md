@@ -19,6 +19,24 @@ dist[:10]                            # the first ten rows, still a distribution
 
 `model.sample`, `model.log_prob`, `model.predict_quantiles`, `model.predict_interval`, and `model.calibrate` all read this object, so they agree with it and with each other.
 
+A univariate distribution also gives the probabilities a coarse label needs, in log space so they stay finite far into the tails:
+
+```python
+dist.log_cdf(t), dist.log_survival(t)            # log P(y <= t), log P(y > t)
+dist.log_cdf_left(t), dist.log_survival_left(t)  # log P(y < t), log P(y >= t); differ only at an atom
+dist.log_interval(a, b)                          # log P(a <= y <= b), closed at both ends
+dist.cdf_interval(a, b)                          # (P(y < a), P(y <= b)), where a coarse row's PIT lies
+dist.convolve_normal(s)                          # y plus normal noise of sd s: normal, mixture, affine
+```
+
+They are what [`ashlar.observed`](observed.md) trains and scores censored, interval, truncated, and noisy labels with. A joint distribution gives the same for a row whose columns are each exact or in an interval:
+
+```python
+dist.log_box(lower, upper)       # log p(exact columns) + log P(the other columns in their intervals | them)
+```
+
+A column with `lower == upper` is exact. The joint normal and the mixture are closed form when a row has at most one coarse column, and the flow when its only coarse column is the last; otherwise `log_box` integrates at `box_points(256, columns)`, quasi-random points, with the GHK simulator. [Joint labels](observed.md#several-products-that-sell-out-together) has the detail.
+
 ## Shapes
 
 `batch_shape` indexes rows, and `event_shape` is the shape of one outcome: `()` for one number, `(d,)` for a joint outcome over `d` columns. A value passed to `log_prob` or `cdf` broadcasts against `batch_shape + event_shape`, and `sample(key, sample_shape)` returns `sample_shape + batch_shape + event_shape`. A quantile level broadcasts against `batch_shape`, so levels in a column give one row of quantiles per level:
@@ -35,13 +53,14 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 |---|---|---|
 | `gaussian` | `Normal` | closed form |
 | `mixture` | `Mixture` of five `Normal`s | bisection on the CDF |
-| `flow` | `Flow`, the spline | closed form: the spline at the normal quantile |
+| `flow` | `Flow`: the spline, then each row's shift and scale | closed form: the map at the normal quantile |
 | `histogram` | `Histogram` | closed form |
 | `student_t` | `StudentT` | bisection on the CDF |
 | `poisson`, `negative_binomial` | `Poisson`, `NegativeBinomial`, with the structural zero | the smallest whole number whose CDF reaches the level |
 | `quantile` | `QuantileLevels` | only its three trained levels; no density, CDF, or draws |
 | `hurdle` | `Hurdle`: a probability of exactly zero and a `LogNormal` or `Gamma` amount | 0 up to the zero share, the severity's quantile above it |
 | `multivariate_gaussian` | `LowRankMultivariateNormal` over the target columns | per column, through `marginals()` |
+| `multivariate_mixture` | `Mixture` of five `LowRankMultivariateNormal`s over the target columns | per column, bisection on each marginal mixture's CDF |
 | `multivariate_flow` | `AutoregressiveFlow` over the target columns | per column, from draws (`marginals()` is an `Empirical`) |
 | `normal` | `Mixture` of `Normal`s; `policy="mean_parameters"` gives one `Normal` | closed form, or bisection for the mixture |
 | `classification`, `ordinal`, tree | `Categorical` over `classes_` (the leaves, for a tree); values are class indices | none |
@@ -50,7 +69,7 @@ Two wrappers sit around the head. Every ensemble member is a component of an equ
 
 A bisection quantile is exact to float precision: it brackets the level with Cantelli's bound around the mean, halves the bracket 80 times, and then takes one Newton step that does not move the value but gives the implicit-function gradient. Before this object existed, the quantiles of every head but `quantile` were read from 1,000 draws; they are now exact, so they no longer depend on `n_samples` or `seed`, and calibration reads each held-out row's CDF instead of ranking it among draws.
 
-The flow's mean and variance are integrals: closed form on its identity tails and a 512-point rule across the spline. Where the CDF jumps, at a count or at the hurdle's zero, the PIT is spread uniformly over the jump (`cdf_left(y)` to `cdf(y)`), so it is still uniform for a calibrated model.
+The flow's mean and variance are integrals: closed form on the spline's linear tails and a 512-point rule across it, then moved by the row's shift and scale. Where the CDF jumps, at a count or at the hurdle's zero, the PIT is spread uniformly over the jump (`cdf_left(y)` to `cdf(y)`), so it is still uniform for a calibrated model.
 
 ## Several targets at once
 
@@ -75,7 +94,9 @@ Independent(dist.marginals())             # the same sites with the dependence d
 
 ## Dependence that is not a correlation
 
-A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_flow"` takes the same `y` and predicts a conditional masked autoregressive flow: `p(y | x) = p(y₁ | x) p(y₂ | y₁, x) ⋯`, where each column's conditional is a standard normal pushed through a monotone spline, shifted and scaled. A masked network reads the columns before each one and the row's context from the trunk, and sets that column's knots, shift, and scale. So the whole shape of a column, not only its mean, can change with the columns before it: one load that spikes when another is high, a cost that grows more uncertain with the duration, a dependence that is strong in the tails and absent in the middle.
+A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_mixture"` takes the same `y` and predicts a mixture of joint normals, five by default (`head_kwargs={"components": 5, "rank": 2}`), each with its own weight, location, and low-rank covariance for every row. It fits dependence that comes in regimes, such as a rush day when every column jumps together and an ordinary day when they barely move, which a single normal averages into one correlation. Its `log_prob` is exact, a draw picks a component and then draws from it, and its marginals are mixtures of normals with exact quantiles.
+
+For dependence that is curved or skewed rather than a few regimes, `task="multivariate_flow"` takes the same `y` and predicts a conditional masked autoregressive flow: `p(y | x) = p(y₁ | x) p(y₂ | y₁, x) ⋯`, where each column's conditional is a standard normal pushed through a monotone spline, shifted and scaled. A masked network reads the columns before each one and the row's context from the trunk, and sets that column's knots, shift, and scale. So the whole shape of a column, not only its mean, can change with the columns before it: one load that spikes when another is high, a cost that grows more uncertain with the duration, a dependence that is strong in the tails and absent in the middle.
 
 ```python
 model = ASRRegressor(task="multivariate_flow").fit(X, Y)

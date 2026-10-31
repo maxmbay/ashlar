@@ -82,6 +82,8 @@ model.log_prob(X_new, y_new)                # log density of each observed value
 
 `model.calibrate(X_holdout, y_holdout)` makes `predict_interval` and `predict_quantiles` split-conformal on rows the model did not train on, and `model.predict_uncertainty(X_new)` splits the spread of an ensemble backbone into `aleatoric` and `epistemic` parts. [docs/heads.md](heads.md#calibrated-intervals) covers both.
 
+When `y` was not seen exactly, pass a label from `ashlar.observed` instead: `observed.censored(sales, sold_out)` for a sold-out day, `observed.interval(low, high)` for a bracket, and so on for rounded, truncated, noisy, and total labels. Every head above except `quantile` trains on censored, interval, rounded, and truncated labels, a few on noisy and total ones, and `log_prob`, `score`, and `calibrate` take them too. [docs/observed.md](observed.md) covers each kind.
+
 A distribution task caps the global gradient norm at 1, because a density head on a target with a spike, such as tips that are exactly zero, can shrink a component until one minibatch's gradient blows up. `gradient_clip` sets the cap for any task, and `0` turns it off.
 
 ## Embeddings

@@ -203,6 +203,7 @@ def fit_loop(
     learning_rate_schedule: str = "constant",
     share_training_batches: bool = True,
     gradient_clip: float | None = None,
+    units=None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
 
@@ -210,10 +211,15 @@ def fit_loop(
     the scalar rate with a linear decay to zero. ``surface`` warms up at
     ``1e-4`` for one epoch, capped at 20 steps, then replaces the rate with
     ``surface_learning_rate``. The constructor rate is unused after that probe.
+
+    ``units`` keeps observations that span several adjacent rows, such as
+    group totals, whole inside each minibatch; see ``_fit_scanned``.
     """
     n_rows = int(numeric_z.shape[0])
     batch_size = max(1, min(int(batch_size), n_rows))
     surface = learning_rate_schedule == "surface"
+    if units is not None and (surface or not (share_training_batches or int(core.backbone.k) == 1)):
+        raise AshlarError("observations that span several rows train with shared minibatches and a fixed schedule, not surface.")
     if surface:
         optimizer = make_optimizer(SURFACE_PROBE_RATE, weight_decay, gradient_clip)
     else:
@@ -292,6 +298,7 @@ def fit_loop(
             key=key,
             validation=validation,
             score_fn=score_fn,
+            units=units,
         )
     history = {"train_loss": [], "val_loss": []}
     best_core = core
@@ -420,6 +427,42 @@ def np_mean(values: list[float]) -> float:
 EVAL_CHUNK_ROWS = 8192
 
 
+def pack_units(first, size, order, batch_size: int, steps: int | None = None):
+    """Rows of whole observations, in ``order``, packed into batches of ``batch_size`` rows.
+
+    ``first`` and ``size`` give each observation's adjacent rows (a group
+    total, or one row). An observation never straddles two batches, and its
+    rows stay adjacent and in order, so an objective can find each one from a
+    flag on its first row. Returns ``(index, keep)`` of shape
+    ``(steps, batch_size)``: row indices, and ``False`` on padding, whose index
+    is 0. Each batch starts its observations within its first
+    ``batch_size - largest + 1`` slots, which fixes the number of batches.
+    """
+    first = np.asarray(first, dtype=np.int64)
+    size = np.asarray(size, dtype=np.int64)
+    order = np.asarray(order, dtype=np.int64)
+    largest = int(size.max())
+    if largest > batch_size:
+        raise ValueError(f"an observation of {largest} rows does not fit in a batch of {batch_size}.")
+    capacity = batch_size - largest + 1
+    total = int(size.sum())
+    if steps is None:
+        steps = max(1, (total - 1) // capacity + 1)
+    sizes = size[order]
+    start = np.cumsum(sizes) - sizes
+    batch = start // capacity
+    lead = np.searchsorted(batch, np.arange(steps), side="left")
+    lead_start = start[np.minimum(lead, len(start) - 1)]
+    slot = start - lead_start[batch]
+    unit = np.repeat(np.arange(len(order)), sizes)
+    within = np.arange(total) - np.repeat(start, sizes)
+    index = np.zeros((steps, batch_size), dtype=np.int32)
+    keep = np.zeros((steps, batch_size), dtype=bool)
+    index[batch[unit], slot[unit] + within] = first[order][unit] + within
+    keep[batch[unit], slot[unit] + within] = True
+    return index, keep
+
+
 def chunked_weighted(fn, arrays, weights, chunk_rows: int = EVAL_CHUNK_ROWS):
     """``fn`` over row chunks, recombined with the ``batch_weight_sum`` reduction.
 
@@ -455,6 +498,7 @@ def _fit_scanned(
     key,
     validation,
     score_fn,
+    units=None,
 ):
     """Shared-minibatch training with one compiled scan per epoch.
 
@@ -462,19 +506,24 @@ def _fit_scanned(
     checkpoint as the step-by-step loop. A minibatch with zero weight mass
     leaves the model and optimizer state unchanged. The last minibatch is
     padded with zero-weight rows, as before.
+
+    ``units`` is ``(first, size)`` of observations that span adjacent rows,
+    such as group totals. Each epoch then shuffles observations instead of
+    rows and packs them whole into minibatches (``pack_units``), with at
+    least two of the largest per batch.
     """
     n_rows = int(data[0].shape[0])
-    steps_per_epoch = max(1, (n_rows + batch_size - 1) // batch_size)
+    if units is not None:
+        first, size = (np.asarray(part, dtype=np.int64) for part in units)
+        largest = int(size.max())
+        batch_size = min(max(int(batch_size), 2 * largest), n_rows)
+        steps_per_epoch = max(1, (n_rows - 1) // (batch_size - largest + 1) + 1)
+    else:
+        steps_per_epoch = max(1, (n_rows + batch_size - 1) // batch_size)
     padded = steps_per_epoch * batch_size
     params, static = eqx_partition(core, is_array)
 
-    @filter_jit
-    def run_epoch(params, state, order, batch_key):
-        valid = jnp.arange(padded) < n_rows
-        index = jnp.where(valid, jnp.pad(order, (0, padded - n_rows)), 0)
-        index = index.reshape(steps_per_epoch, batch_size)
-        mask = valid.reshape(steps_per_epoch, batch_size)
-
+    def scan_epoch(params, state, index, mask, batch_key):
         def body(carry, inputs):
             params, state = carry
             take, keep, step_index = inputs
@@ -506,6 +555,16 @@ def _fit_scanned(
         return params, state, losses, seen
 
     @filter_jit
+    def run_epoch(params, state, order, batch_key):
+        valid = jnp.arange(padded) < n_rows
+        index = jnp.where(valid, jnp.pad(order, (0, padded - n_rows)), 0)
+        index = index.reshape(steps_per_epoch, batch_size)
+        mask = valid.reshape(steps_per_epoch, batch_size)
+        return scan_epoch(params, state, index, mask, batch_key)
+
+    run_packed_epoch = filter_jit(scan_epoch)
+
+    @filter_jit
     def evaluate(model, *batch):
         *features, y_batch, w_batch = batch
         raw = model(*features, key=None)
@@ -520,8 +579,15 @@ def _fit_scanned(
     for epoch in range(max_epochs):
         epoch_key = jax.random.fold_in(key, epoch)
         perm_key, batch_key = jax.random.split(epoch_key)
-        order = jax.random.permutation(perm_key, n_rows)
-        params, opt_state, losses, seen = run_epoch(params, opt_state, order, batch_key)
+        if units is None:
+            order = jax.random.permutation(perm_key, n_rows)
+            params, opt_state, losses, seen = run_epoch(params, opt_state, order, batch_key)
+        else:
+            order = np.asarray(jax.random.permutation(perm_key, len(first)))
+            index, keep = pack_units(first, size, order, batch_size, steps_per_epoch)
+            params, opt_state, losses, seen = run_packed_epoch(
+                params, opt_state, jnp.asarray(index), jnp.asarray(keep), batch_key
+            )
         seen = np.asarray(losses)[np.asarray(seen)]
         if seen.size == 0:
             raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")

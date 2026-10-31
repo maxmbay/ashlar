@@ -184,3 +184,41 @@ def test_forecasters_save_and_load_without_pickle(tmp_path):
 def test_forecaster_save_requires_fit(tmp_path):
     with pytest.raises(AshlarError):
         ASRForecaster().save(tmp_path / "unfitted")
+
+
+def test_flow_models_saved_before_the_shift_and_scale_still_load(tmp_path):
+    """A 0.0.3 flow save holds only the spline and no layout marker; it loads and predicts as it did."""
+    import json
+
+    from ashlar.distributional import flow_parameter_count
+    from ashlar.estimator import _bare_spline_flow_head
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(200, 3)).astype(np.float32)
+    y = (x[:, 0] + rng.normal(size=200)).astype(np.float32)
+    model = ASRRegressor(task="flow", max_epochs=2, random_state=0).fit(x, y)
+    model.core_ = _bare_spline_flow_head(model.core_)
+    assert model.core_.head.output.weight.shape[-1] == flow_parameter_count()
+    series = np.sin(np.arange(260) / 5.0) + 0.1 * rng.normal(size=260)
+    forecaster = ASRForecaster(lookback=16, horizon=3, max_epochs=2, patience=1, head="flow").fit(series)
+    width = 3 * flow_parameter_count()
+    forecaster.model_ = eqx.tree_at(
+        lambda net: (net.out_weight, net.out_bias),
+        forecaster.model_,
+        (forecaster.model_.out_weight[:, :width], forecaster.model_.out_bias[:width]),
+    )
+    for fitted, name in ((model, "table"), (forecaster, "forecast")):
+        directory = tmp_path / name
+        if fitted is model:
+            fitted.save(directory, save_optimizer=False)
+        else:
+            fitted.save(directory)
+        metadata = json.loads((directory / "metadata.json").read_text())
+        del metadata["flow_layout"]
+        (directory / "metadata.json").write_text(json.dumps(metadata))
+    restored = ASRRegressor.load(tmp_path / "table")
+    assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    assert np.allclose(restored.log_prob(x[:20], y[:20]), model.log_prob(x[:20], y[:20]))
+    again = ASRForecaster.load(tmp_path / "forecast")
+    assert np.allclose(again.predict(series[-40:]), forecaster.predict(series[-40:]))
+    assert np.allclose(again.log_prob(series[-43:-3], series[-3:]), forecaster.log_prob(series[-43:-3], series[-3:]))

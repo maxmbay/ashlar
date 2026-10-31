@@ -29,6 +29,7 @@ from ashlar.heads import (
     HurdleHead,
     LogitsHead,
     MultivariateFlowHead,
+    MultivariateMixtureHead,
     MultivariateNormalHead,
     NormalHead,
     OrdinalHead,
@@ -58,8 +59,15 @@ from ashlar.objectives import (
     normal_objective,
     make_distribution_objective,
     make_hurdle_objective,
+    joint_member_distribution,
     make_joint_objective,
+    make_joint_observed_objective,
+    make_observed_objective,
     make_ordinal_expectation_objective,
+    make_total_objective,
+    member_distribution,
+    sum_distribution,
+    TOTAL_TASKS,
     make_ordinal_histogram_objective,
     ordinal_objective,
     regression_objective,
@@ -73,8 +81,10 @@ from ashlar.calibrate import (
     pit_values,
     recalibrated_levels,
 )
-from ashlar.distributional import COUNT_HEADS, QUANTILE_LEVELS, decode, point_values
+from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
+from ashlar import observed
 from ashlar.distributions import (
+    BOX_POINTS,
     AffineTransformed,
     Categorical,
     Independent,
@@ -83,15 +93,13 @@ from ashlar.distributions import (
     QuantileLevels,
     head_distribution,
     hurdle_distribution,
-    joint_flow_distribution,
-    joint_normal_distribution,
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
 from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
-from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer
+from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer, pack_units
 from ashlar.weights import REDUCTION, class_weight_multiplier, validate_sample_weight
 
 _BACKBONES = {
@@ -109,6 +117,7 @@ _HEADS = {
     "softmax": SoftmaxHead,
     "distribution": DistributionHead,
     "multivariate_normal": MultivariateNormalHead,
+    "multivariate_mixture": MultivariateMixtureHead,
     "multivariate_flow": MultivariateFlowHead,
     "hurdle": HurdleHead,
     "tree": TreeHead,
@@ -128,13 +137,17 @@ _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
 DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
-JOINT_TASKS = ("multivariate_gaussian", "multivariate_flow")
+JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow")
 _SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
+_TASK_HEAD["multivariate_mixture"] = "multivariate_mixture"
 _TASK_HEAD["multivariate_flow"] = "multivariate_flow"
+_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow"}
 # Rows per block when reading a flow's draws, which take one network pass per column.
 _FLOW_CHUNK_ROWS = 128
+# Points × rows × members × columns × components per block when scoring a joint label.
+_BOX_CHUNK_CELLS = 1 << 22
 
 
 def _raw_count(raw) -> int:
@@ -152,6 +165,11 @@ _TASK_HEAD["hurdle"] = "hurdle"
 _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu"}
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
 DISTRIBUTION_GRADIENT_CLIP = 1.0
+# Tasks that train on an ``ashlar.observed`` label: every univariate head with a CDF.
+OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", *COUNT_HEADS, "normal", "hurdle")
+# Those whose distribution plus normal noise stays in closed form.
+NOISY_TASKS = ("gaussian", "mixture", "normal")
+# Those whose sum over independent rows stays in closed form, for group totals: ``TOTAL_TASKS``.
 
 
 def _squeeze_univariate(point):
@@ -235,6 +253,51 @@ def _jit_pit():
 
         _PIT = eqx.filter_jit(randomized_pit)
     return _PIT
+
+
+_OBSERVED_LOG_LIKELIHOOD = {}
+_OBSERVED_PIT = None
+
+
+def _jit_observed_log_likelihood(truncated: bool, noisy: bool):
+    """``ashlar.observed.log_likelihood`` of ``(rows, 6)`` label fields, compiled once per kind of label."""
+    key = (bool(truncated), bool(noisy))
+    if key not in _OBSERVED_LOG_LIKELIHOOD:
+        import equinox as eqx
+
+        def score(dist, rows):
+            return observed.log_likelihood(
+                dist,
+                rows[:, 0],
+                rows[:, 1],
+                rows[:, 2] if truncated else None,
+                rows[:, 3] if truncated else None,
+                rows[:, 4] if noisy else None,
+            )
+
+        _OBSERVED_LOG_LIKELIHOOD[key] = eqx.filter_jit(score)
+    return _OBSERVED_LOG_LIKELIHOOD[key]
+
+
+_JOINT_LOG_BOX = None
+
+
+def _jit_joint_log_box():
+    global _JOINT_LOG_BOX
+    if _JOINT_LOG_BOX is None:
+        import equinox as eqx
+
+        _JOINT_LOG_BOX = eqx.filter_jit(lambda dist, lower, upper, points: dist.log_box(lower, upper, points))
+    return _JOINT_LOG_BOX
+
+
+def _jit_observed_pit():
+    global _OBSERVED_PIT
+    if _OBSERVED_PIT is None:
+        import equinox as eqx
+
+        _OBSERVED_PIT = eqx.filter_jit(observed.randomized_pit)
+    return _OBSERVED_PIT
 
 
 class ASRModel(BaseEstimator):
@@ -446,7 +509,7 @@ class ASRModel(BaseEstimator):
         }:
             raise AshlarError(
                 "task must be 'regression', 'classification', 'ordinal', 'normal', 'tree', 'custom', "
-                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', 'multivariate_gaussian', or 'multivariate_flow'."
+                f"a distribution ({', '.join(DISTRIBUTION_TASKS)}), 'hurdle', or a joint task ({', '.join(JOINT_TASKS)})."
             )
         if (self.task == "tree") != (self.tree is not None):
             raise AshlarError("task='tree' needs a tree= outcome spec, and tree= only applies to task='tree'.")
@@ -589,6 +652,7 @@ class ASRModel(BaseEstimator):
         X = self._with_cyclical(X)
         if validation is not None:
             validation = (self._with_cyclical(validation[0]), *validation[1:])
+        y_array, validation = self._observed_inputs(y_array, validation)
         names, columns = frame_columns(X)
         n_rows = len(columns[0])
         if len(y_array) != n_rows:
@@ -601,6 +665,9 @@ class ASRModel(BaseEstimator):
         train_idx, val_idx, val_pack = self._partition(
             names, columns, y_array, weights, validation, groups, validation_sample_weight
         )
+        self._check_observed(y_array, None if val_pack is None else val_pack[1])
+        if self._totals():
+            train_idx, val_idx, val_pack = self._whole_groups(y_array, train_idx, val_idx, val_pack)
         trials = None
         try:
             if search not in (None, False):
@@ -617,6 +684,127 @@ class ASRModel(BaseEstimator):
         finally:
             self._trial = None
         return self
+
+    def _observed_inputs(self, y_array, validation):
+        """Read both ``y`` and the validation ``y`` as ``ashlar.observed`` labels when either one is."""
+        val_observed = validation is not None and len(validation) >= 2 and observed.is_observed(target_array(validation[1]))
+        if not (observed.is_observed(y_array) or val_observed):
+            self._observed_spec = None
+            return y_array, validation
+        y_array = observed.as_observed(y_array)
+        if validation is not None:
+            validation = (validation[0], observed.as_observed(target_array(validation[1])), *validation[2:])
+        self._observed_spec = {}
+        return y_array, validation
+
+    def _check_observed(self, label, val_label=None):
+        """Refuse an observed label the task cannot score, before anything is fitted."""
+        if getattr(self, "_observed_spec", None) is None:
+            return
+        labels = [label] if val_label is None else [label, val_label]
+        task = self.task
+        if task in JOINT_TASKS:
+            self._check_joint_observed(labels)
+            return
+        if any(np.ndim(part) != 1 for part in labels) and task != "custom":
+            raise AshlarError(
+                f"a label with a cell per column is for a joint task ({', '.join(JOINT_TASKS)}); the {task} task reads one column."
+            )
+        if task not in OBSERVED_TASKS and task != "custom":
+            raise AshlarError(
+                f"an ashlar.observed label needs a head with a CDF; the {task} task has none. "
+                f"Use one of {', '.join(OBSERVED_TASKS)}."
+            )
+        if task == "normal" and self.n_events not in (None, 1):
+            raise AshlarError("an ashlar.observed label is one target column; the normal task here has several.")
+        if any(observed.is_noisy(part) for part in labels) and task not in NOISY_TASKS and task != "custom":
+            raise AshlarError(
+                f"a noisy label needs a head whose distribution plus normal noise has a closed form: "
+                f"{', '.join(NOISY_TASKS)}; the {task} head has none."
+            )
+        totals = any(observed.has_groups(part) for part in labels)
+        if totals:
+            if task not in TOTAL_TASKS:
+                raise AshlarError(
+                    f"a group total needs a head whose sum over rows has a closed form: "
+                    f"{', '.join(TOTAL_TASKS)}; the {task} head has none."
+                )
+            if task == "poisson" and (self.head_kwargs or {}).get("zero_inflated"):
+                raise AshlarError("a sum of zero-inflated Poisson counts has no closed form; drop zero_inflated for group totals.")
+            if self.learning_rate_schedule == "surface":
+                raise AshlarError("group totals keep each group in one minibatch, which the surface schedule's probe does not; use another schedule.")
+            for part in labels:
+                observed.check_whole(part)
+        for part in labels:
+            bounds = np.concatenate([part[name] for name in ("lower", "upper", "truncate_lower", "truncate_upper")])
+            finite = bounds[np.isfinite(bounds)]
+            if task in COUNT_HEADS and (np.any(finite < 0) or np.any(finite != np.round(finite))):
+                raise AshlarError(f"the {task} head models counts: observed bounds must be non-negative whole numbers or infinite.")
+            if task in HURDLE_TASKS and np.any(finite < 0):
+                raise AshlarError("the hurdle head models an exact zero or a positive amount: observed bounds must be non-negative.")
+        self._observed_spec = {
+            "truncated": any(observed.is_truncated(part) for part in labels),
+            "noisy": any(observed.is_noisy(part) for part in labels),
+            "totals": totals,
+        }
+
+    def _check_joint_observed(self, labels):
+        """Refuse a label a joint head cannot score: one cell per row and column, exact or an interval."""
+        for part in labels:
+            if np.ndim(part) != 2:
+                raise AshlarError(
+                    "a joint task takes a label with a cell per target column, shape (rows, columns); "
+                    "build one with observed.stack, or pass a table to observed.censored or observed.interval."
+                )
+        columns = {int(np.shape(part)[1]) for part in labels}
+        if len(columns) > 1:
+            raise ShapeError(f"the training and validation labels have different columns: {sorted(columns)}.")
+        if self.n_events is not None and int(self.n_events) not in columns:
+            raise ShapeError(f"n_events={self.n_events} does not match a label with {columns.pop()} columns.")
+        coarse = any(not observed.is_exact(part).all() for part in labels)
+        if coarse and self.task == "multivariate_flow" and int((self.head_kwargs or {}).get("depth", 1)) != 1:
+            raise AshlarError(
+                "the joint flow trains on coarse cells with one autoregressive block, head_kwargs={'depth': 1}; "
+                "with more, a column depends on the columns after it."
+            )
+        self._observed_spec = {"truncated": False, "noisy": False, "totals": False, "joint": True, "coarse": coarse}
+
+    def _observing(self) -> bool:
+        return getattr(self, "_observed_spec", None) is not None
+
+    def _totals(self) -> bool:
+        return self._observing() and bool(self._observed_spec.get("totals"))
+
+    def _whole_groups(self, y_array, train_idx, val_idx, val_pack):
+        """Keep each group total on one side of the validation split, with its rows adjacent.
+
+        An internal split moves a group that it cut to the side of the group's
+        first row, so a temporal split keeps time order. A grouped split must
+        already keep each total inside one of its groups.
+        """
+        label = observed.as_observed(y_array)
+        if val_pack is None and val_idx is not None and len(val_idx):
+            held = np.zeros(len(label), dtype=bool)
+            held[val_idx] = True
+            group = label["group"]
+            members = np.flatnonzero(group >= 0)
+            ids, lead, inverse = np.unique(group[members], return_index=True, return_inverse=True)
+            side = held[members[lead]][inverse]
+            if self.split == "group" and np.any(side != held[members]):
+                raise AshlarError("a group total spans two groups of the validation split; give its rows one split group.")
+            held[members] = side
+            train_idx, val_idx = np.flatnonzero(~held), np.flatnonzero(held)
+            if not len(train_idx) or not len(val_idx):
+                raise AshlarError("keeping each group total whole left one side of the validation split empty.")
+        train_idx = np.asarray(train_idx)[observed.contiguous_order(label[train_idx])]
+        if val_idx is not None and len(val_idx):
+            val_idx = np.asarray(val_idx)[observed.contiguous_order(label[val_idx])]
+        if val_pack is not None:
+            frame, y_val, w_val = val_pack
+            order = observed.contiguous_order(observed.as_observed(y_val))
+            val_names, val_columns = frame_columns(frame)
+            val_pack = (_take_rows(val_names, val_columns, order), observed.as_observed(y_val)[order], np.asarray(w_val)[order])
+        return train_idx, val_idx, val_pack
 
     def _partition(self, names, columns, y_array, weights, validation, groups, validation_sample_weight):
         n_rows = len(columns[0])
@@ -652,12 +840,14 @@ class ASRModel(BaseEstimator):
         y_train = y_array[train_idx]
         w_train = weights[train_idx]
         classes, y_train_model, w_train = self._training_target(y_train, w_train)
-        if self.task not in {"custom", *_LABELED_TASKS}:
+        if self._observing():
+            pass
+        elif self.task not in {"custom", *_LABELED_TASKS}:
             if not np.isfinite(np.asarray(y_train_model, dtype=np.float64)).all():
                 raise AshlarError("regression and normal targets must be finite. Mask missing outcomes in a custom objective.")
-        if self.task in COUNT_HEADS:
+        if self.task in COUNT_HEADS and not self._observing():
             _check_counts(y_train_model, self.task)
-        if self.task in HURDLE_TASKS and np.any(np.asarray(y_train_model) < 0):
+        if self.task in HURDLE_TASKS and not self._observing() and np.any(np.asarray(y_train_model) < 0):
             raise AshlarError("the hurdle head models an exact zero or a positive amount: y must be non-negative.")
         y_train_model = self._fit_target_scale(y_train_model)
         self.calibration_ = None
@@ -691,7 +881,7 @@ class ASRModel(BaseEstimator):
                 numeric_z=numeric_z,
             )
             opt_state = None
-        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
@@ -717,6 +907,7 @@ class ASRModel(BaseEstimator):
             category_index=encoded.category_index,
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
+            units=units,
         )
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
@@ -840,7 +1031,7 @@ class ASRModel(BaseEstimator):
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
             numeric_z=numeric_z,
         )
-        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
@@ -874,6 +1065,7 @@ class ASRModel(BaseEstimator):
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
             score_fn=score_fn,
+            units=units,
         )
         if not history["val_loss"]:
             raise AshlarError("a search trial produced no validation loss.")
@@ -925,9 +1117,18 @@ class ASRModel(BaseEstimator):
             if not np.any(weights > 0):
                 raise AshlarError("every training label is empty; a tree model needs at least one labelled row.")
             return np.asarray(tree.leaf_names, dtype=object), nodes, weights
+        if observed.is_observed(y_train):
+            return None, y_train, w_train
         if self.task == "custom":
             return None, np.asarray(y_train, dtype=np.float32), w_train
         return None, _regression_target(y_train, self.n_events), w_train
+
+    def _train_targets(self, y_train_model, w_train):
+        """Device targets and weights, and for group totals the ``(first, size)`` of each observation."""
+        if self._totals():
+            return _total_targets(y_train_model, w_train)
+        y_device, w_device = _device_targets(self.task, y_train_model, w_train)
+        return y_device, w_device, None
 
     def _output_sizes(self, y_train_model, classes):
         if self.task == "tree":
@@ -975,12 +1176,26 @@ class ASRModel(BaseEstimator):
     def _objective(self, class_values=None, n_events: int = 1):
         if self.objective is not None:
             return self.objective
+        if self._observing():
+            spec = self._observed_spec
+            if spec.get("joint"):
+                family, components = _JOINT_FAMILY[self.task], self._mixture_components()
+                if spec.get("coarse"):
+                    return make_joint_observed_objective(n_events, family, components=components)
+                # Every cell exact: the joint density of the values themselves, the first field.
+                density = make_joint_objective(n_events, family, components=components)
+                return lambda raw, y, sample_weight: density(raw, y[..., 0], sample_weight)
+            if spec.get("totals"):
+                return make_total_objective(self.task, truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy")))
+            return make_observed_objective(
+                self.task, severity=self._severity(), truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy"))
+            )
         if self.task == "ordinal" and self.histogram_variance is not None:
             return make_ordinal_histogram_objective(float(self.histogram_variance))
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
         if self.task in JOINT_TASKS:
-            return make_joint_objective(n_events, "flow" if self.task == "multivariate_flow" else "normal")
+            return make_joint_objective(n_events, _JOINT_FAMILY[self.task], components=self._mixture_components())
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
@@ -995,11 +1210,17 @@ class ASRModel(BaseEstimator):
         kwargs = dict(self.head_kwargs or {})
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
+        if observed.is_observed(y_encoded):
+            # Starting values read each observation's representative value; a censored row reads its bound.
+            values = observed.representative(y_encoded)
+            y_encoded = values[np.isfinite(values)]
+            if y_encoded.size == 0:
+                y_encoded = np.zeros(1)
         if self.task in COUNT_HEADS:
             mean = float(np.mean(np.asarray(y_encoded, dtype=np.float64)))
             kwargs["log_mean"] = float(np.log(max(mean, 1e-3)))
         if self.task in HURDLE_TASKS:
-            kwargs["start"] = _hurdle_start(y_encoded, self._severity())
+            kwargs["start"] = _hurdle_start(np.maximum(y_encoded, 0.0), self._severity())
         if self.task == "tree":
             kwargs["tree"] = self.tree_.to_json()
             if kwargs.get("edge_prior") == "empirical":
@@ -1034,6 +1255,15 @@ class ASRModel(BaseEstimator):
 
     def _severity(self) -> str:
         return str((self.head_kwargs or {}).get("severity", "lognormal"))
+
+    def _mixture_components(self) -> int | None:
+        """The joint mixture's component count, as its head reads it; ``None`` for the other tasks."""
+        if self.task != "multivariate_mixture":
+            return None
+        from ashlar.distributional import MIXTURE_COMPONENTS
+
+        value = (self.head_kwargs or {}).get("components")
+        return MIXTURE_COMPONENTS if value is None else int(value)
 
     def _bottleneck_width(self) -> int | None:
         value = self.bottleneck
@@ -1154,6 +1384,27 @@ class ASRModel(BaseEstimator):
             self.target_mean_ = None
             self.target_std_ = None
             return y
+        if observed.is_observed(y) and np.ndim(y) == 2:
+            # A joint label's scale, column by column, from each cell's representative value.
+            values = observed.representative(y)
+            known = np.isfinite(values)
+            count = known.sum(axis=0)
+            filled = np.where(known, values, 0.0)
+            mean = np.where(count > 0, filled.sum(axis=0) / np.maximum(count, 1), 0.0)
+            spread = np.where(known, np.square(values - mean), 0.0).sum(axis=0) / np.maximum(count, 1)
+            std = np.where(count > 1, np.sqrt(spread), 1.0)
+            self.target_mean_ = np.asarray(mean, dtype=np.float64)
+            self.target_std_ = np.where(std >= 1e-6, std, 1.0).astype(np.float64)
+            return self._apply_target_scale(y)
+        if observed.is_observed(y):
+            # The scale of a coarse label: each observation's representative value.
+            values = observed.representative(y)
+            values = values[np.isfinite(values)]
+            mean = float(np.mean(values)) if values.size else 0.0
+            std = float(np.std(values)) if values.size > 1 else 1.0
+            self.target_mean_ = mean
+            self.target_std_ = std if std >= 1e-6 else 1.0
+            return self._apply_target_scale(y)
         array = np.asarray(y, dtype=np.float64)
         mean = np.mean(array, axis=0)
         std = np.asarray(np.std(array, axis=0), dtype=np.float64)
@@ -1165,6 +1416,8 @@ class ASRModel(BaseEstimator):
     def _apply_target_scale(self, y):
         if not self.standardize_target or self.target_mean_ is None:
             return y
+        if observed.is_observed(y):
+            return observed.affine(y, np.asarray(self.target_mean_, dtype=np.float64), np.asarray(self.target_std_, dtype=np.float64) + 1e-30)
         array = np.asarray(y, dtype=np.float64)
         return (array - np.asarray(self.target_mean_, dtype=np.float64)) / (
             np.asarray(self.target_std_, dtype=np.float64) + 1e-30
@@ -1200,6 +1453,10 @@ class ASRModel(BaseEstimator):
             nodes = self.tree_.encode(_label_list(y_val))
             w_val = np.where(nodes == 0, 0.0, np.asarray(w_val, dtype=np.float64))
             y_device, w_device = _device_targets(self.task, nodes, w_val)
+        elif self._totals():
+            y_device, w_device, units = _total_targets(self._apply_target_scale(observed.as_observed(y_val)), w_val)
+        elif self._observing():
+            y_device, w_device = _device_targets(self.task, self._apply_target_scale(observed.as_observed(y_val)), w_val)
         elif self.task == "custom":
             y_device, w_device = _device_targets(self.task, np.asarray(y_val, dtype=np.float32), w_val)
         else:
@@ -1210,7 +1467,7 @@ class ASRModel(BaseEstimator):
             y_device, w_device = _device_targets(self.task, y_model, w_val)
         if float(jnp.sum(w_device)) <= 0.0:
             raise WeightError("validation weights sum to zero, so the early-stopping metric is undefined.")
-        return (
+        arrays = (
             numeric_z,
             categorical,
             encoded.category_index,
@@ -1219,6 +1476,9 @@ class ASRModel(BaseEstimator):
             y_device,
             w_device,
         )
+        if self._totals() and len(w_device) > EVAL_CHUNK_ROWS:
+            arrays = _chunk_units(arrays, units)
+        return arrays
 
     def _with_cyclical(self, X):
         """Replace each ``cyclical`` column by its ``_sin`` and ``_cos`` on a circle of that period.
@@ -1330,6 +1590,9 @@ class ASRModel(BaseEstimator):
                     for start in range(0, _raw_count(raw), _FLOW_CHUNK_ROWS)
                 ]
             )
+        elif self.task == "multivariate_mixture":
+            # Each member's mixture mean, averaged: the mean of the joint mixture.
+            point = np.asarray(self._joint_components(raw).mean().mean(axis=1))
         elif self.task in JOINT_TASKS:
             # The mean of the member locations: the mean of the joint mixture.
             point = np.asarray(jnp.mean(raw[..., : int(self.n_events_)], axis=1))
@@ -1352,9 +1615,24 @@ class ASRModel(BaseEstimator):
 
         The same score a scikit-learn classifier or regressor returns, so
         ``cross_val_score`` and ``GridSearchCV`` work without ``scoring=``.
+        With an ``ashlar.observed`` label, R² has no meaning, so the score is
+        the mean log-likelihood of the observations, higher being better.
         """
         from sklearn.metrics import accuracy_score, r2_score
 
+        if observed.is_observed(target_array(y)):
+            label = observed.as_observed(target_array(y))
+            if observed.has_groups(label):
+                # One value per observation; a group's weight is the mean of its rows'.
+                values, order, first, size = self._total_log_likelihood(X, label)
+                weights = None
+                if sample_weight is not None:
+                    row_weights = validate_sample_weight(sample_weight, len(label))
+                    weights = np.add.reduceat(row_weights[order], first) / size
+                return float(np.average(values, weights=weights))
+            values = self.log_prob(X, y)
+            weights = None if sample_weight is None else validate_sample_weight(sample_weight, len(values))
+            return float(np.average(values, weights=weights))
         prediction = self.predict(X)
         if self.task in _LABELED_TASKS:
             return float(accuracy_score(target_array(y), prediction, sample_weight=sample_weight))
@@ -1523,9 +1801,7 @@ class ASRModel(BaseEstimator):
 
     def _joint_components(self, raw):
         """Each member's joint distribution on the standardized target, batch ``(rows, members)``."""
-        if self.task == "multivariate_flow":
-            return joint_flow_distribution(raw, int(self.n_events_))
-        return joint_normal_distribution(raw, int(self.n_events_))
+        return joint_member_distribution(_JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components())
 
     def _dist_chunks(self, X):
         """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory.
@@ -1559,10 +1835,17 @@ class ASRModel(BaseEstimator):
         return draws.astype(np.float64)
 
     def log_prob(self, X, y):
-        """Log density (log mass for counts and classes) of ``y`` under ``predict_dist(X)``, per row, in the units of ``y``."""
+        """Log density (log mass for counts and classes) of ``y`` under ``predict_dist(X)``, per row, in the units of ``y``.
+
+        With an ``ashlar.observed`` label, the log-likelihood of each row's
+        observation: the log density of an exact value, the log probability
+        of an interval or a censored value, less that of a truncation range.
+        """
         self._require_fitted()
         if self.task == "quantile":
             raise AshlarError("the quantile head has three levels, not a density, so it has no log_prob.")
+        if observed.is_observed(target_array(y)):
+            return self._observed_log_prob(X, observed.as_observed(target_array(y)))
         dist = self.predict_dist(X)
         if self.task == "tree":
             nodes = self.tree_.encode(_label_list(target_array(y)))
@@ -1575,6 +1858,103 @@ class ASRModel(BaseEstimator):
         else:
             value = jnp.asarray(np.asarray(target_array(y), dtype=np.float32).reshape(dist.batch_shape + dist.event_shape))
         return np.asarray(dist.log_prob(value), dtype=np.float64)
+
+    def _total_log_likelihood(self, X, label):
+        """Log-likelihood of each observation of a label with group totals, in the units of ``y``.
+
+        Each member sums its own rows, as in training, and the members' sums
+        are mixed with equal weight. Returns the values, the row order that
+        makes groups adjacent, and each observation's ``(first, size)`` in it.
+        """
+        from jax.scipy.special import logsumexp
+
+        self._univariate_dist("score of a group total")
+        if self.task not in TOTAL_TASKS:
+            raise AshlarError(f"a group total needs one of {', '.join(TOTAL_TASKS)}; this model is {self.task}.")
+        if observed.is_noisy(label) and self.task not in NOISY_TASKS:
+            raise AshlarError(f"a noisy label needs one of {', '.join(NOISY_TASKS)}; this model is {self.task}.")
+        observed.check_whole(label)
+        order = observed.contiguous_order(label)
+        label = label[order]
+        first, size = observed.units(label)
+        raw = self._raw_from_frame(X)
+        if int(raw.shape[0]) != len(label):
+            raise AshlarError(f"X has {int(raw.shape[0])} rows and y has {len(label)}.")
+        dist = member_distribution(self.task, raw[jnp.asarray(order)])
+        if self.target_mean_ is not None:
+            dist = Normal(self.target_mean_ + self.target_std_ * dist.loc, self.target_std_ * dist.scale)
+        segment = jnp.asarray(np.repeat(np.arange(len(first)), size))
+        summed = sum_distribution(dist, segment, len(first), True)
+        rows = jnp.asarray(observed.fields(label)[first], dtype=jnp.float32)
+        truncated, noisy = observed.is_truncated(label), observed.is_noisy(label)
+        values = observed.log_likelihood(
+            summed,
+            rows[:, 0:1],
+            rows[:, 1:2],
+            rows[:, 2:3] if truncated else None,
+            rows[:, 3:4] if truncated else None,
+            rows[:, 4:5] if noisy else None,
+        )
+        values = logsumexp(values, axis=1) - np.log(values.shape[1])
+        return np.asarray(values, dtype=np.float64), order, first, size
+
+    def _observed_log_prob(self, X, label):
+        self._univariate_dist("log_prob of an observed label")
+        if self.task in JOINT_TASKS:
+            return self._joint_observed_log_prob(X, label)
+        if np.ndim(label) != 1:
+            raise AshlarError(f"a label with a cell per column is for a joint task; this model is {self.task}.")
+        if observed.has_groups(label):
+            raise AshlarError(
+                "log_prob is one number per row, and a group total is one observation of several rows. "
+                "Use score(X, y), the mean log-likelihood per observation."
+            )
+        if observed.is_noisy(label) and self.task not in NOISY_TASKS:
+            raise AshlarError(f"a noisy label needs one of {', '.join(NOISY_TASKS)}; this model is {self.task}.")
+        part = observed.fields(label)
+        score = _jit_observed_log_likelihood(observed.is_truncated(label), observed.is_noisy(label))
+        pieces = []
+        for start, dist in self._dist_chunks(X):
+            rows = part[start : start + int(dist.batch_shape[0])]
+            pieces.append(np.asarray(score(dist, jnp.asarray(rows, dtype=jnp.float32)), dtype=np.float64))
+        values = np.concatenate(pieces) if pieces else np.zeros(0)
+        if values.shape[0] != len(label):
+            raise ShapeError(f"X has {values.shape[0]} rows and y has {len(label)}.")
+        return values
+
+    def _joint_observed_log_prob(self, X, label, points: int = BOX_POINTS):
+        """``log_box`` of a joint label under ``predict_dist(X)``, per row, in the units of ``y``.
+
+        Rows with more than one coarse cell are integrated at ``points``
+        quasi-random points, in blocks small enough to keep the draws in memory.
+        """
+        from ashlar.distributions import box_points
+
+        d = int(self.n_events_)
+        if np.ndim(label) != 2 or np.shape(label)[1] != d:
+            raise AshlarError(
+                f"this joint model has {d} columns; its label needs a cell per row and column, shape (rows, {d}), "
+                f"and received shape {np.shape(label)}."
+            )
+        observed.check(label)
+        if observed.is_exact(label).all():
+            return self.log_prob(X, np.asarray(label["lower"], dtype=np.float64))
+        part = observed.fields(label)
+        grid = box_points(int(points), d)
+        # A flow's step holds its masked network's hidden units for every point, about eight times a column's cells.
+        width = int(points) * int(self.core_.head.k) * d * (self._mixture_components() or 1)
+        width *= 8 if self.task == "multivariate_flow" else 1
+        size = max(8, min(4096, _BOX_CHUNK_CELLS // width))
+        dist = self.predict_dist(X)
+        rows = int(dist.batch_shape[0])
+        if rows != len(label):
+            raise ShapeError(f"X has {rows} rows and y has {len(label)}.")
+        score = _jit_joint_log_box()
+        pieces = []
+        for start in range(0, rows, size):
+            cells = jnp.asarray(part[start : start + size], dtype=jnp.float32)
+            pieces.append(np.asarray(score(dist[start : start + size], cells[..., 0], cells[..., 1], grid), dtype=np.float64))
+        return np.concatenate(pieces) if pieces else np.zeros(0)
 
     def _univariate_dist(self, name: str):
         self._require_fitted()
@@ -1688,6 +2068,8 @@ class ASRModel(BaseEstimator):
         self._univariate_dist("calibrate")
         if self.task in JOINT_TASKS:
             raise AshlarError("calibrate reads one target column; a joint model's columns are calibrated together, not yet supported.")
+        if observed.is_observed(target_array(y)):
+            return self._calibrate_observed(X, observed.as_observed(target_array(y)), seed)
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if not np.isfinite(target).all():
             raise AshlarError("calibration targets must be finite.")
@@ -1712,6 +2094,28 @@ class ASRModel(BaseEstimator):
         except NotImplementedError:
             draws = self.sample(X, n=n_samples, seed=seed)
             pit = pit_values(draws, target, seed=seed)
+        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
+        return self
+
+    def _calibrate_observed(self, X, label, seed: int):
+        """Calibrate on coarse rows: each row's PIT is uniform over what its label allows."""
+        if self.task == "quantile":
+            raise AshlarError("the quantile head calibrates from exact values; it has no CDF to spread a coarse label over.")
+        if observed.is_truncated(label) or observed.is_noisy(label) or observed.has_groups(label):
+            raise AshlarError(
+                "calibrate needs rows drawn from the model's own distribution: exact, interval, or censored labels. "
+                "A truncated, noisy, or grouped label is not."
+            )
+        part = observed.fields(label)
+        key = jax.random.PRNGKey(int(seed))
+        pit = []
+        for start, chunk in self._dist_chunks(X):
+            key, pit_key = jax.random.split(key)
+            rows = jnp.asarray(part[start : start + int(chunk.batch_shape[0])], dtype=jnp.float32)
+            pit.append(np.asarray(_jit_observed_pit()(chunk, rows[:, 0], rows[:, 1], pit_key), dtype=np.float64))
+        pit = np.concatenate(pit)
+        if pit.shape[0] != len(label):
+            raise ShapeError(f"X has {pit.shape[0]} rows and y has {len(label)}.")
         self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
         return self
 
@@ -1869,6 +2273,7 @@ class ASRModel(BaseEstimator):
             "schema": self.encoder_.to_json(),
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
+            "flow_layout": FLOW_LAYOUT,
         }
         (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
         save_leaves(directory / "core.eqx", self.core_)
@@ -1929,6 +2334,8 @@ class ASRModel(BaseEstimator):
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
+        if payload.get("flow_layout") != FLOW_LAYOUT:
+            template = _bare_spline_flow_head(template)
         estimator.encoder_ = encoder
         estimator.embedded_columns_ = [column.name for column in encoder.embedding_columns]
         estimator.numeric_transform_ = load_leaves(directory / "numeric.eqx", encoder.numeric_transform)
@@ -1971,6 +2378,25 @@ class ASRModel(BaseEstimator):
     def _require_fitted(self):
         if not getattr(self, "is_fitted_", False):
             raise AshlarError("this estimator is not fitted.")
+
+
+def _bare_spline_flow_head(core):
+    """Shape a built-in flow head like one saved before its per-row shift and scale.
+
+    Such a save holds only the spline's parameters; the head then reads them
+    with shift 0 and scale 1, as it was trained.
+    """
+    import equinox as eqx
+
+    head = getattr(core, "head", None)
+    if not isinstance(head, DistributionHead) or head.kind != "flow":
+        return core
+    width = bare_spline_width(head.output.weight.shape[-1], 1)
+    return eqx.tree_at(
+        lambda tree: (tree.head.output.weight, tree.head.output.bias),
+        core,
+        (head.output.weight[..., :width], head.output.bias[..., :width]),
+    )
 
 
 def _task_signature(defaults: dict, positional: tuple[str, ...]) -> inspect.Signature:
@@ -2231,9 +2657,43 @@ def _regression_target(y, n_events):
 
 def _device_targets(task, y, weights):
     w = jnp.asarray(weights, dtype=jnp.float32)
+    if observed.is_observed(y):
+        return jnp.asarray(observed.fields(y), dtype=jnp.float32), w
     if task in _CLASSIFIER_TASKS:
         return jnp.asarray(y, dtype=jnp.int32), w
     return jnp.asarray(y, dtype=jnp.float32), w
+
+
+def _total_targets(label, weights):
+    """``(rows, 7)`` targets for ``make_total_objective``, each observation's weight on its first row, and its rows.
+
+    The seventh column flags the first row of each observation. A group's
+    weight is the mean of its rows' weights.
+    """
+    label = observed.as_observed(label)
+    first, size = observed.units(label)
+    weights = np.asarray(weights, dtype=np.float64)
+    start = np.zeros(len(label), dtype=np.float64)
+    start[first] = 1.0
+    unit_weight = np.zeros(len(label), dtype=np.float64)
+    if len(first):
+        unit_weight[first] = np.add.reduceat(weights, first) / size
+    y = np.concatenate([observed.fields(label), start[:, None]], axis=1)
+    return jnp.asarray(y, dtype=jnp.float32), jnp.asarray(unit_weight, dtype=jnp.float32), (first, size)
+
+
+def _chunk_units(arrays, units):
+    """Lay validation rows out so that no observation crosses an ``EVAL_CHUNK_ROWS`` boundary.
+
+    Padding rows repeat row 0 with no weight; the last chunk is left short.
+    """
+    first, size = units
+    index, keep = pack_units(first, size, np.arange(len(first)), EVAL_CHUNK_ROWS)
+    index, keep = index.reshape(-1), keep.reshape(-1)
+    end = int(np.flatnonzero(keep)[-1]) + 1
+    index, keep = jnp.asarray(index[:end]), jnp.asarray(keep[:end])
+    *features, y, w = (array[index] for array in arrays)
+    return (*features, y, jnp.where(keep, w, 0.0))
 
 
 def _label_list(y) -> list:
