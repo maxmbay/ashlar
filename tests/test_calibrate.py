@@ -86,6 +86,7 @@ def test_quantile_head_takes_the_cqr_margin():
         model.predict_interval(X_new, 0.9)
 
 
+@pytest.mark.slow
 def test_fit_clears_the_calibration_and_misuse_raises():
     X, y = _heteroscedastic(400, 0)
     model = _small("gaussian").fit(X, y)

@@ -109,6 +109,7 @@ LOWER = np.array([-INF, -9.0, -3.0, 0.5, 4.0, 7.5, -1.0, -2.0])
 UPPER = np.array([-6.0, -8.0, INF, 0.7, 4.5, INF, 1.0, INF])
 
 
+@pytest.mark.slow
 def test_normal_and_student_t_intervals_hold_in_the_far_tails():
     normal = Normal(jnp.zeros(8), jnp.ones(8))
     expected = _reference(lambda v, left=False: stats.norm.cdf(v), lambda v, left=False: stats.norm.sf(v), LOWER, UPPER)
@@ -122,6 +123,7 @@ def test_normal_and_student_t_intervals_hold_in_the_far_tails():
     assert np.isclose(far, stats.norm.logsf(40.0), rtol=1e-4)
 
 
+@pytest.mark.slow
 def test_count_intervals_with_a_structural_zero_and_a_far_tail():
     lower = np.array([0.0, 3.0, 40.0, 0.0, 7.0, 120.0])
     upper = np.array([0.0, INF, INF, 2.0, 7.0, 130.0])
@@ -153,6 +155,7 @@ def test_count_intervals_with_a_structural_zero_and_a_far_tail():
     assert np.allclose(got, expected, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.slow
 def test_shape_parameters_now_have_gradients():
     """JAX's betainc has no gradient in its shape arguments; the Student-t's df and the negative binomial's dispersion need one."""
     lower, upper = jnp.array([1.5, -INF, 0.2]), jnp.array([INF, -2.0, 0.9])
@@ -184,6 +187,7 @@ def test_shape_parameters_now_have_gradients():
     assert np.isclose(float(jax.grad(nb_tail)(0.5)), numeric, rtol=2e-2)
 
 
+@pytest.mark.slow
 def test_positive_and_mixed_families():
     lower, upper = np.array([0.0, 1.0, 30.0]), np.array([1.0, 2.0, INF])
     gamma = stats.gamma(3.0, scale=2.0 / 3.0)
@@ -210,6 +214,7 @@ def test_positive_and_mixed_families():
     assert np.isfinite(float(loc_grad))
 
 
+@pytest.mark.slow
 def test_flow_and_histogram_intervals():
     raw = jax.random.normal(jax.random.PRNGKey(0), (4, flow_output_count())) * 0.5
     flow = Flow(raw)
@@ -342,6 +347,7 @@ def test_truncated_and_noisy_labels_recover_the_value_behind_them():
     assert abs(spread(naive) - np.hypot(0.5, 1.5)) < 0.2
 
 
+@pytest.mark.slow
 def test_survival_on_the_log_scale_with_any_continuous_head():
     rng = np.random.default_rng(4)
     n = 3000
@@ -355,6 +361,7 @@ def test_survival_on_the_log_scale_with_any_continuous_head():
     assert np.mean(np.abs(median - (1.0 + 0.8 * x[:400, 0]))) < 0.2
 
 
+@pytest.mark.slow
 def test_observed_models_save_and_load(tmp_path):
     x, _demand, sales, sold_out = _sold_out(600, seed=5)
     model = ASRRegressor(task="mixture", max_epochs=3, random_state=0).fit(x, observed.censored(sales, sold_out))
@@ -364,6 +371,7 @@ def test_observed_models_save_and_load(tmp_path):
     assert np.allclose(restored.log_prob(x[:20], label), model.log_prob(x[:20], label), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_tasks_and_labels_that_cannot_be_scored_are_refused():
     x, _demand, sales, sold_out = _sold_out(200, seed=6)
     label = observed.censored(sales, sold_out)
@@ -426,6 +434,7 @@ def test_group_labels_record_their_size_and_catch_a_cut_group():
         observed.units(scattered)
 
 
+@pytest.mark.slow
 def test_the_total_objective_scores_the_distribution_of_each_sum():
     from ashlar.objectives import make_observed_objective, make_total_objective
 
@@ -501,6 +510,7 @@ def test_daily_distributions_are_learned_from_weekly_totals():
     assert np.mean(np.abs(np.log(poisson.predict(x[test]) / rate[test]))) < 0.15
 
 
+@pytest.mark.slow
 def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
     x, y, week, _mean, _spread = _weekly(n_weeks=300, seed=11)
     weekly = np.bincount(week, weights=y)[week]
@@ -534,6 +544,7 @@ def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
         ASRRegressor(task="normal", max_epochs=1).fit(x[:3], label[:3])
 
 
+@pytest.mark.slow
 def test_totals_that_cannot_be_trained_are_refused():
     x, y, week, _mean, _spread = _weekly(n_weeks=40, seed=13)
     label = observed.total(np.bincount(week, weights=y)[week], week)

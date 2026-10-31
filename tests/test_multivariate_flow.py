@@ -37,6 +37,7 @@ def test_head_output_and_errors():
         AutoregressiveFlow(context[..., :-1], w_in, w_out, 3)
 
 
+@pytest.mark.slow
 def test_zero_parameters_are_the_standard_normal():
     context, w_in, w_out = _raw(scale=0.0)
     dist = AutoregressiveFlow(context, w_in, w_out, 3)
@@ -44,6 +45,7 @@ def test_zero_parameters_are_the_standard_normal():
     assert np.allclose(dist.log_prob(y), jnp.sum(jax.scipy.stats.norm.logpdf(y), axis=-1), atol=1e-5)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("depth", [1, 2])
 def test_inverse_undoes_forward_and_density_is_the_change_of_variables(depth):
     context, w_in, w_out = _raw(depth=depth)
@@ -62,6 +64,7 @@ def test_inverse_undoes_forward_and_density_is_the_change_of_variables(depth):
         assert np.all(np.triu(jacobian, 1) == 0) and np.all(np.abs(np.tril(jacobian, -1)[:, 1:, :1]) > 0)
 
 
+@pytest.mark.slow
 def test_member_mixture_draws_moments_marginals_and_indexing():
     dist = Mixture(joint_flow_distribution(_raw(rows=2, members=2), 3))
     draws = np.asarray(dist.sample(jax.random.PRNGKey(5), (20000,)))
@@ -75,6 +78,7 @@ def test_member_mixture_draws_moments_marginals_and_indexing():
     assert isinstance(single, Empirical) and single.batch_shape == (2, 2, 3)
 
 
+@pytest.mark.slow
 def test_objective_is_the_member_mean_negative_log_density():
     raw = _raw(rows=6, members=2)
     y = jax.random.normal(jax.random.PRNGKey(2), (6, 3))
@@ -102,6 +106,7 @@ def test_fit_beats_the_joint_normal_on_curved_dependence(tmp_path):
     assert flow.log_prob(x[test], y[test]).mean() > normal.log_prob(x[test], y[test]).mean() + 0.3
 
 
+@pytest.mark.slow
 def test_the_flow_task_predicts_samples_and_saves(tmp_path):
     x, y = _curved()
     train, test = slice(0, 600), slice(2500, None)

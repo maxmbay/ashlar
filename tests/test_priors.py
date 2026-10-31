@@ -75,6 +75,7 @@ def test_priors_learn_a_conjunction():
     assert set(np.unique(named.predict(fresh_x[:20]))).issubset({"DOWN", "UP"})
 
 
+@pytest.mark.slow
 def test_gradient_penalty_handles_more_than_two_classes():
     rows, labels = _three_class(180, 0)
     model = ASRGradientSparseNet(random_state=0, max_epochs=20, patience=8).fit(rows, labels, "classification")

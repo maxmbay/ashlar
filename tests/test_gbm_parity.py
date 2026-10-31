@@ -28,6 +28,7 @@ def test_tags_follow_the_task():
     assert is_classifier(clone(ASRClassifier()))
 
 
+@pytest.mark.slow
 def test_score_is_accuracy_or_r2_and_scorers_read_probabilities():
     X, y = _regression()
     labels = (y > np.median(y)).astype(int)
@@ -49,6 +50,7 @@ def test_numeric_embeddings_fit_save_and_load(kind, tmp_path):
     assert np.allclose(model.predict(X), restored.predict(X), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_piecewise_edges_are_frozen_and_start_linear():
     X, y = _regression()
     model = ASRModel(num_embeddings="piecewise", num_embedding_dim=4, max_epochs=3, weight_decay=0.1)
@@ -118,6 +120,7 @@ def test_cosine_schedule_trains():
     assert len(model.history_["train_loss"]) == 4
 
 
+@pytest.mark.slow
 def test_cyclical_columns_become_points_on_a_circle(tmp_path):
     rng = np.random.default_rng(0)
     hour = rng.uniform(0, 24, size=600)

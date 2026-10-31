@@ -126,6 +126,7 @@ SAMPLED = [
 ]
 
 
+@pytest.mark.slow
 def test_joint_normal_box_is_exact_for_one_coarse_column_and_close_for_several():
     loc, cov, dist = _normal()
     for lower, upper in CLOSED:
@@ -141,6 +142,7 @@ def test_joint_normal_box_is_exact_for_one_coarse_column_and_close_for_several()
         assert float(dist.log_box(jnp.asarray(lower), jnp.asarray(upper), box_points(32, 3))) == pytest.approx(expected, abs=1e-2)
 
 
+@pytest.mark.slow
 def test_box_gradients_stay_finite_on_open_sides_and_far_tails():
     loc, _cov, _dist = _normal()
     rng = np.random.default_rng(1)
@@ -155,6 +157,7 @@ def test_box_gradients_stay_finite_on_open_sides_and_far_tails():
         assert np.isfinite(float(value)) and all(bool(jnp.all(jnp.isfinite(part))) for part in grads)
 
 
+@pytest.mark.slow
 def test_mixtures_affine_maps_and_independent_columns_compose():
     rng = np.random.default_rng(2)
     components = LowRankMultivariateNormal(rng.normal(size=(4, 3)), 0.5 * rng.normal(size=(4, 3, 2)), rng.uniform(0.3, 1.0, size=(4, 3)))
@@ -200,6 +203,7 @@ def _trapezoid(values, grid):
     return jnp.sum(0.5 * (values[1:] + values[:-1]) * (grid[1:] - grid[:-1]))
 
 
+@pytest.mark.slow
 def test_flow_box_matches_quadrature_of_its_density():
     flow = _flow()
 
@@ -221,6 +225,7 @@ def test_flow_box_matches_quadrature_of_its_density():
     assert box([0.1, -0.3], [0.1, -0.3], 1) == pytest.approx(float(flow.log_prob(point)[0, 0]), abs=1e-5)
 
 
+@pytest.mark.slow
 def test_flow_box_gradients_and_its_one_block_limit():
     flow = _flow()
 
@@ -235,6 +240,7 @@ def test_flow_box_gradients_and_its_one_block_limit():
         _flow(depth=2).log_box(jnp.zeros((1, 1, 2)), jnp.ones((1, 1, 2)))
 
 
+@pytest.mark.slow
 def test_the_joint_observed_objective_is_the_mean_member_box():
     rng = np.random.default_rng(4)
     raw = jnp.asarray(rng.normal(size=(6, 2, 3 * 4)))
@@ -277,6 +283,7 @@ def test_a_censored_joint_fit_recovers_the_demand_behind_the_sales(task):
     assert censored.score(x[test], label[test]) == pytest.approx(values.mean(), rel=1e-6)
 
 
+@pytest.mark.slow
 def test_the_joint_mixture_task_predicts_samples_and_saves(tmp_path):
     from ashlar import ASRModel
 

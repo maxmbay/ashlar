@@ -1,13 +1,13 @@
 name: tests
 
-# Two tiers. Pull requests run the fast tier: every test not marked `slow`, which
-# still fits and scores each head, spread over the runner's cores. The full suite,
-# including the slow tests that check a fit recovers known parameters, runs on
-# pushes to dev and main, nightly, and on demand (Actions > tests > Run workflow).
-# The publish workflow runs the full suite again before a release.
+# Two tiers. Pull requests run the smoke tier: every test not marked `slow`, which
+# keeps the cheap math checks and one fit, predict, and save test per head. The
+# full suite runs on pushes to dev and main, nightly, and on demand (Actions >
+# tests > Run workflow). The publish workflow runs the full suite again before a
+# release. Most of the suite's time is XLA compilation of many small models.
 #
-# Most of the suite's time is XLA compilation, so JAX's persistent compilation
-# cache is kept between runs; a warm cache cuts a file's time by about two thirds.
+# JAX's persistent compilation cache is kept between runs; it cuts a warm local
+# run by about two thirds, though on hosted runners its hit rate is unproven.
 
 on:
   pull_request:

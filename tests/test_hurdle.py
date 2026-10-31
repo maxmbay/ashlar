@@ -12,6 +12,7 @@ from ashlar.distributions import Gamma, Hurdle, LogNormal, Mixture, randomized_p
 from ashlar.errors import AshlarError
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("severity", [LogNormal(jnp.array([0.0, 1.0]), jnp.array([0.5, 1.0])), Gamma(jnp.array([2.0, 5.0]), jnp.array([0.7, 3.0]))])
 def test_hurdle_moments_quantiles_and_pit(severity):
     dist = Hurdle(jnp.array([0.3, 0.6]), severity)

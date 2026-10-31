@@ -43,6 +43,7 @@ def _continuous():
     }
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("name", list(_continuous()))
 def test_continuous_shapes_moments_and_quantiles(name):
     dist = _continuous()[name]
@@ -73,6 +74,7 @@ def test_continuous_shapes_moments_and_quantiles(name):
         NegativeBinomial(jnp.array([0.5, 4.0, 30.0]), jnp.array([0.2, 1.0, 0.5]), jnp.array([0.0, 0.2, 0.05])),
     ],
 )
+@pytest.mark.slow
 def test_count_cdf_quantile_and_moments(dist):
     support = jnp.arange(0.0, 400.0)[:, None]
     mass = np.exp(np.asarray(dist.log_prob(support)))
@@ -90,6 +92,7 @@ def test_count_cdf_quantile_and_moments(dist):
     assert draws.shape == (5, 3) and np.all(np.asarray(draws) == np.round(np.asarray(draws)))
 
 
+@pytest.mark.slow
 def test_randomized_pit_is_uniform_for_counts():
     dist = Poisson(jnp.full((20000,), 2.0))
     draws = dist.sample(KEY)
@@ -97,6 +100,7 @@ def test_randomized_pit_is_uniform_for_counts():
     assert abs(np.mean(pit < 0.2) - 0.2) < 0.015 and abs(np.mean(pit < 0.7) - 0.7) < 0.015
 
 
+@pytest.mark.slow
 def test_low_rank_density_matches_dense_and_draws_match_covariance():
     from scipy.stats import multivariate_normal
 
@@ -113,6 +117,7 @@ def test_low_rank_density_matches_dense_and_draws_match_covariance():
     assert np.allclose(independent.log_prob(value), Independent(Normal(jnp.zeros(5), jnp.sqrt(diag))).log_prob(value))
 
 
+@pytest.mark.slow
 def test_joint_marginals_and_independent_marginals():
     components = LowRankMultivariateNormal(jnp.zeros((4, 3, 2)), jnp.ones((4, 3, 2, 1)), jnp.full((4, 3, 2), 0.25))
     joint = AffineTransformed(Mixture(components), jnp.array([10.0, -1.0]), jnp.array([2.0, 0.5]))
@@ -128,6 +133,7 @@ def test_joint_marginals_and_independent_marginals():
     assert np.allclose(joint.covariance()[0], np.cov(draws[:, 0].T), rtol=0.05)
 
 
+@pytest.mark.slow
 def test_distributions_are_pytrees_for_jit_vmap_grad_and_indexing():
     dist = _continuous()["affine"]
     value = jnp.array([9.0, 10.0, 11.0])
@@ -152,6 +158,7 @@ def test_distributions_are_pytrees_for_jit_vmap_grad_and_indexing():
     assert np.isclose(jax.grad(tail)(loc)[0], numeric, rtol=1e-2)
 
 
+@pytest.mark.slow
 def test_head_distribution_matches_the_training_density():
     for kind, width in [("gaussian", 2), ("mixture", 15), ("flow", flow_output_count()), ("flow", flow_parameter_count()), ("histogram", 16), ("student_t", 3)]:
         flat = jax.random.normal(KEY, (6, width))
@@ -179,6 +186,7 @@ def _table(n=400, seed=0):
     return x, y
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("task", ["gaussian", "mixture", "flow", "histogram", "student_t"])
 def test_estimator_methods_read_predict_dist(task):
     x, y = _table()
@@ -195,6 +203,7 @@ def test_estimator_methods_read_predict_dist(task):
     assert np.allclose(np.median(draws, axis=0), quantiles[:5, 1], atol=0.05 * spread.max())
 
 
+@pytest.mark.slow
 def test_classifier_predict_dist_is_categorical():
     x, _y = _table()
     labels = np.where(x[:, 0] > 0, "up", "down")
@@ -206,6 +215,7 @@ def test_classifier_predict_dist_is_categorical():
     assert set(np.unique(model.sample(x[:10], n=5))) <= {"up", "down"}
 
 
+@pytest.mark.slow
 def test_forecaster_predict_dist_matches_log_prob():
     series = np.sin(np.arange(400) / 6.0) * 10 + np.random.default_rng(0).normal(size=400)
     model = ASRForecaster(lookback=24, horizon=3, head="mixture", max_epochs=2).fit(series)
