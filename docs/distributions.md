@@ -19,6 +19,18 @@ dist[:10]                            # the first ten rows, still a distribution
 
 `model.sample`, `model.log_prob`, `model.predict_quantiles`, `model.predict_interval`, and `model.calibrate` all read this object, so they agree with it and with each other.
 
+A univariate distribution also gives the probabilities a coarse label needs, in log space so they stay finite far into the tails:
+
+```python
+dist.log_cdf(t), dist.log_survival(t)            # log P(y <= t), log P(y > t)
+dist.log_cdf_left(t), dist.log_survival_left(t)  # log P(y < t), log P(y >= t); differ only at an atom
+dist.log_interval(a, b)                          # log P(a <= y <= b), closed at both ends
+dist.cdf_interval(a, b)                          # (P(y < a), P(y <= b)), where a coarse row's PIT lies
+dist.convolve_normal(s)                          # y plus normal noise of sd s: normal, mixture, affine
+```
+
+They are what [`ashlar.observed`](observed.md) trains and scores censored, interval, truncated, and noisy labels with.
+
 ## Shapes
 
 `batch_shape` indexes rows, and `event_shape` is the shape of one outcome: `()` for one number, `(d,)` for a joint outcome over `d` columns. A value passed to `log_prob` or `cdf` broadcasts against `batch_shape + event_shape`, and `sample(key, sample_shape)` returns `sample_shape + batch_shape + event_shape`. A quantile level broadcasts against `batch_shape`, so levels in a column give one row of quantiles per level:
@@ -35,7 +47,7 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 |---|---|---|
 | `gaussian` | `Normal` | closed form |
 | `mixture` | `Mixture` of five `Normal`s | bisection on the CDF |
-| `flow` | `Flow`, the spline | closed form: the spline at the normal quantile |
+| `flow` | `Flow`: the spline, then each row's shift and scale | closed form: the map at the normal quantile |
 | `histogram` | `Histogram` | closed form |
 | `student_t` | `StudentT` | bisection on the CDF |
 | `poisson`, `negative_binomial` | `Poisson`, `NegativeBinomial`, with the structural zero | the smallest whole number whose CDF reaches the level |
@@ -50,7 +62,7 @@ Two wrappers sit around the head. Every ensemble member is a component of an equ
 
 A bisection quantile is exact to float precision: it brackets the level with Cantelli's bound around the mean, halves the bracket 80 times, and then takes one Newton step that does not move the value but gives the implicit-function gradient. Before this object existed, the quantiles of every head but `quantile` were read from 1,000 draws; they are now exact, so they no longer depend on `n_samples` or `seed`, and calibration reads each held-out row's CDF instead of ranking it among draws.
 
-The flow's mean and variance are integrals: closed form on its identity tails and a 512-point rule across the spline. Where the CDF jumps, at a count or at the hurdle's zero, the PIT is spread uniformly over the jump (`cdf_left(y)` to `cdf(y)`), so it is still uniform for a calibrated model.
+The flow's mean and variance are integrals: closed form on the spline's linear tails and a 512-point rule across it, then moved by the row's shift and scale. Where the CDF jumps, at a count or at the hurdle's zero, the PIT is spread uniformly over the jump (`cdf_left(y)` to `cdf(y)`), so it is still uniform for a calibrated model.
 
 ## Several targets at once
 

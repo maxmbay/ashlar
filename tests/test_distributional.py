@@ -14,6 +14,7 @@ from ashlar.distributional import (
     flow_forward,
     flow_inverse,
     flow_log_density,
+    flow_output_count,
     flow_parameter_count,
     histogram_bin,
     histogram_edges,
@@ -148,6 +149,51 @@ def test_spline_identity_roundtrip_and_density():
     assert np.array_equal(np.asarray(histogram_bin(edges)), np.asarray([0, 0, 8, 15, 15]))
 
 
+def test_flow_shift_and_scale_give_each_row_its_own_spread_and_tail():
+    from scipy.stats import norm
+
+    count = flow_parameter_count()
+    raw = jnp.zeros((3, flow_output_count()), dtype=jnp.float32)
+    # An identity spline: each row is exactly a normal at its own shift and scale.
+    raw = raw.at[:, count].set(jnp.asarray([0.0, 2.0, -1.0]))
+    raw = raw.at[:, count + 1].set(jnp.asarray([0.0, 1.5, -2.0]))
+    scale = np.log1p(np.exp(np.asarray(raw[:, count + 1]) + np.log(np.expm1(1.0 - 1e-3)))) + 1e-3
+    assert np.isclose(scale[0], 1.0, atol=1e-6)
+    value = jnp.asarray([0.5, 4.0, -1.2], dtype=jnp.float32)
+    expected = norm.logpdf(np.asarray(value), loc=[0.0, 2.0, -1.0], scale=scale)
+    assert np.allclose(flow_log_density(raw, value), expected, atol=1e-4)
+    base = jnp.asarray([0.3, -0.7, 1.1], dtype=jnp.float32)
+    drawn = flow_forward(raw, base)
+    assert np.allclose(drawn, np.asarray([0.0, 2.0, -1.0]) + scale * np.asarray(base), atol=1e-5)
+    recovered, logdet = flow_inverse(raw, drawn)
+    assert np.allclose(recovered, base, atol=1e-5)
+    assert np.allclose(logdet, -np.log(scale), atol=1e-5)
+    # Past the spline's range the tail is the row's own normal tail, not a shared one.
+    from ashlar.distributions import Flow
+
+    dist = Flow(raw)
+    threshold = jnp.asarray([3.0, 3.0, 3.0], dtype=jnp.float32)
+    tail = 1.0 - np.asarray(dist.cdf(threshold))
+    assert np.allclose(tail, norm.sf(3.0, loc=[0.0, 2.0, -1.0], scale=scale), atol=1e-5)
+    assert np.allclose(dist.mean(), [0.0, 2.0, -1.0], atol=1e-3)
+    assert np.allclose(dist.variance(), np.square(scale), rtol=1e-3)
+
+
+def test_flow_reads_a_bare_spline_as_shift_zero_scale_one():
+    count = flow_parameter_count()
+    spline = jax.random.normal(jax.random.PRNGKey(3), (4, count), dtype=jnp.float32) * 0.5
+    wide = jnp.concatenate([spline, jnp.zeros((4, 2), dtype=jnp.float32)], axis=-1)
+    value = jnp.asarray([-4.0, -0.5, 0.7, 3.5], dtype=jnp.float32)
+    assert np.allclose(flow_log_density(spline, value), flow_log_density(wide, value), atol=1e-5)
+    base = jnp.asarray([-3.5, -0.2, 0.4, 2.0], dtype=jnp.float32)
+    assert np.allclose(flow_forward(spline, base), flow_forward(wide, base), atol=1e-5)
+    # A flow projection saved before the shift and scale existed still decodes.
+    legacy = decode("flow", spline.reshape(2, 2 * count), 2)
+    assert legacy.shape == (2, 2, count)
+    with pytest.raises(ShapeError):
+        decode("flow", jnp.zeros((2, 2 * count + 1)), 2)
+
+
 @pytest.mark.parametrize("head", HEADS)
 def test_distributional_loss_is_finite_and_reaches_the_head(head):
     horizon = 3
@@ -244,7 +290,7 @@ def _assert_parameters(head, decoded, target):
         assert probabilities.shape[-1] == HISTOGRAM_BINS
         assert np.allclose(np.asarray(jnp.sum(probabilities, axis=-1)), 1.0, atol=1e-5)
     elif head == "flow":
-        assert decoded.shape[-1] == flow_parameter_count()
+        assert decoded.shape[-1] == flow_output_count()
 
 
 def _assert_fitted_api(model, history, single, origins=None):

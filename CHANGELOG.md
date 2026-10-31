@@ -2,6 +2,21 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Added
+
+- **Labels that say what was observed.** `ashlar.observed` builds a `y` that records what was seen about each value rather than the value itself: `exact`, `interval`, `censored` (right or left), `survival` (with delayed entry), `rounded`, `truncated`, `noisy`, and group totals (`total`, `grouped`). They compose, and `concatenate` mixes kinds in one table. Pass one as `y` to `fit`, `log_prob`, `score`, or `calibrate`, and the head trains on the probability it gives to the observation; `predict_dist` still describes the value itself. Every univariate head with a CDF takes them: `gaussian`, `mixture`, `flow`, `histogram`, `student_t`, the count heads, `hurdle`, and `normal`. Noisy labels need `gaussian`, `mixture`, or `normal`, and totals `gaussian`, `normal`, or `poisson`. A label is a NumPy structured array, so scikit-learn splits it. [docs/observed.md](docs/observed.md) has the detail.
+- `calibrate` takes interval and censored rows, drawing each row's PIT uniformly over what its label allows.
+- Group totals train each group whole inside one minibatch and keep it on one side of an internal validation split. A split that cuts a group raises.
+- `Distribution.log_cdf`, `log_survival`, `log_cdf_left`, `log_survival_left`, `log_interval`, and `cdf_interval` on every univariate distribution, computed in log space so they stay finite far into the tails, and `convolve_normal` on the normal, mixture, and affine distributions.
+- `examples/benchmark_observed.py`: demand fitted from sales when a third of days sell out, and daily values fitted from weekly totals, each against the usual fits and an oracle. Its `figure` stage draws the README figure `docs/images/sold-out-demand.png`. Its results are in [docs/benchmarks.md](docs/benchmarks.md#labels-that-say-what-was-observed).
+
+### Fixed
+
+- **The `flow` head gives each row its own spread and tails.** It was a spline on a fixed range with identity tails, so the spread past that range, and so every far quantile and tail probability, was the same for every row: on a lognormal target whose spread more than doubles across rows, it put 0.13% of every row's mass above a high threshold, where the truth is 1.8% on average and 4.4% in the riskiest tenth of rows. The head now ends in a shift and a scale per row, `y = shift + scale * spline(z)`, and gives 1.8% and 4.3%. Its output is two values wider per step. Models and forecasters saved with the old head load and predict as they did.
+- `jax.grad` through a Student-t's `cdf` or `quantile` in its degrees of freedom, or a negative binomial's `cdf` in its dispersion, raised, because JAX's `betainc` has no gradient in its shape arguments. Both now differentiate, by central differences in those arguments.
+
 ## 0.0.3 — 2026-10-31
 
 ### Added

@@ -25,6 +25,19 @@ Methods, with ``value`` broadcasting against ``batch_shape + event_shape``:
   precision and still differentiable.
 - ``marginals()``: the univariate marginal of every coordinate, with the event
   axis moved into the batch. A univariate distribution returns itself.
+- ``log_cdf(value)`` and ``log_survival(value)``: ``log P(Y <= value)`` and
+  ``log P(Y > value)``, computed in log space so a far tail stays finite.
+  ``log_cdf_left`` and ``log_survival_left`` are ``log P(Y < value)`` and
+  ``log P(Y >= value)``, which differ only at an atom.
+- ``log_interval(lower, upper)``: ``log P(lower <= Y <= upper)`` for the
+  closed interval, with ``-inf`` or ``inf`` for an open side. It subtracts on
+  the side of the median the interval lies on, in log space, so a censored or
+  interval label far in a tail keeps a finite likelihood and gradient. This
+  is what ``ashlar.observed`` trains on.
+- ``convolve_normal(scale)``: the distribution of ``Y`` plus independent
+  normal noise of standard deviation ``scale``, for the families where that
+  has a closed form: ``Normal``, and a ``Mixture`` or ``AffineTransformed`` of
+  normals.
 
 A method a family cannot support raises ``NotImplementedError``: the quantile
 head has three levels and no density, and a multivariate outcome has no
@@ -43,7 +56,7 @@ from typing import ClassVar
 import jax
 import jax.numpy as jnp
 from equinox import Module, field
-from jax.scipy.special import betainc, gammainc, gammaincc, ndtr, ndtri
+from jax.scipy.special import betainc, betaln, gammainc, gammaincc, log_ndtr, ndtr, ndtri
 
 from ashlar.errors import AshlarError, ShapeError
 
@@ -56,6 +69,8 @@ class Distribution(Module):
 
     reparameterized: ClassVar[bool] = False
     support: ClassVar[str] = "real"
+    # True for a family with a density and no atom, where ``P(Y < v) = P(Y <= v)``.
+    atomless: ClassVar[bool] = False
 
     @property
     def batch_shape(self) -> tuple[int, ...]:
@@ -93,8 +108,68 @@ class Distribution(Module):
     def cdf_left(self, value):
         """``P(Y < value)``. The CDF itself, except where the distribution has an atom."""
         if self.support == "nonnegative_integer":
-            return self.cdf(jnp.asarray(value) - 1.0)
+            return self.cdf(jnp.ceil(jnp.asarray(value)) - 1.0)
         return self.cdf(value)
+
+    def log_cdf(self, value):
+        """``log P(Y <= value)``. Families with a closed form override this to stay finite in the far tail."""
+        return _safe_log(self.cdf(value))
+
+    def log_survival(self, value):
+        """``log P(Y > value)``."""
+        return _safe_log(1.0 - self.cdf(value))
+
+    def log_cdf_left(self, value):
+        """``log P(Y < value)``: ``log_cdf`` except at an atom."""
+        if self.atomless:
+            return self.log_cdf(value)
+        if self.support == "nonnegative_integer":
+            return self.log_cdf(jnp.ceil(jnp.asarray(value)) - 1.0)
+        return _safe_log(self.cdf_left(value))
+
+    def log_survival_left(self, value):
+        """``log P(Y >= value)``: ``log_survival`` except at an atom."""
+        if self.atomless:
+            return self.log_survival(value)
+        if self.support == "nonnegative_integer":
+            return self.log_survival(jnp.ceil(jnp.asarray(value)) - 1.0)
+        return _safe_log(1.0 - self.cdf_left(value))
+
+    def log_interval(self, lower, upper):
+        """``log P(lower <= Y <= upper)`` for the closed interval. ``-inf`` or ``inf`` leaves a side open.
+
+        Both bounds broadcast against ``batch_shape``. The difference is taken
+        on the side of the median the interval lies on, in log space, so it
+        stays accurate and finite far in either tail. An empty interval,
+        ``lower > upper``, has probability 0.
+        """
+        if self.event_shape:
+            raise NotImplementedError("a joint outcome has no single interval; use marginals().log_interval(...).")
+        lower, upper = _bounds(lower, upper)
+        has_lower = lower > -jnp.inf
+        has_upper = upper < jnp.inf
+        low = jnp.where(jnp.isfinite(lower), lower, 0.0)
+        high = jnp.where(jnp.isfinite(upper), upper, 0.0)
+        below_upper = jnp.where(has_upper, self.log_cdf(high), 0.0)
+        above_upper = jnp.where(has_upper, self.log_survival(high), -jnp.inf)
+        below_lower = jnp.where(has_lower, self.log_cdf_left(low), -jnp.inf)
+        above_lower = jnp.where(has_lower, self.log_survival_left(low), 0.0)
+        result = _interval_from_tails(below_upper, above_upper, below_lower, above_lower)
+        return jnp.where(_empty(lower, upper), -jnp.inf, result)
+
+    def cdf_interval(self, lower, upper):
+        """``(P(Y < lower), P(Y <= upper))``: where the closed interval starts and ends on the CDF axis.
+
+        A coarse label's probability integral transform is uniform between the two.
+        """
+        lower, upper = _bounds(lower, upper)
+        low = jnp.where(lower > -jnp.inf, self.cdf_left(jnp.where(jnp.isfinite(lower), lower, 0.0)), 0.0)
+        high = jnp.where(upper < jnp.inf, self.cdf(jnp.where(jnp.isfinite(upper), upper, 0.0)), 1.0)
+        return low, high
+
+    def convolve_normal(self, scale):
+        """The distribution of ``Y + e`` for independent ``e ~ Normal(0, scale)``."""
+        raise NotImplementedError(f"{type(self).__name__} has no closed form with added normal noise.")
 
     def quantile(self, q):
         if self.event_shape:
@@ -139,12 +214,120 @@ def _normal_log_prob(value, loc, scale):
     return -0.5 * (jnp.log(2 * jnp.pi) + 2 * jnp.log(scale) + z**2)
 
 
+# The smallest probability a log is taken of; float32's smallest normal number is about 1.2e-38.
+_TINY = 1e-37
+_LOG_HALF = math.log(0.5)
+
+
+def _safe_log(probability):
+    """``log`` of a probability, floored at ``log(1e-37)`` so neither the value nor its gradient is infinite."""
+    return jnp.log(jnp.maximum(probability, _TINY))
+
+
+def _log_or(probability, fallback):
+    """``log(probability)``, or ``fallback`` where the probability underflows, and never below ``fallback``.
+
+    ``fallback`` is a lower bound of the log probability that stays finite,
+    such as the log mass of one count inside the interval.
+    """
+    usable = probability > _TINY
+    direct = jnp.log(jnp.where(usable, probability, 1.0))
+    return jnp.where(usable, jnp.maximum(direct, fallback), fallback)
+
+
+def _log1mexp(t):
+    """``log(1 - exp(t))`` for ``t <= 0``, accurate on both sides of ``-log 2`` (Maechler, 2012).
+
+    ``t`` is held below ``-1e-7``, so an interval of zero width gets a very
+    small probability with a finite gradient instead of ``-inf``.
+    """
+    t = jnp.minimum(t, -1e-7)
+    return jnp.where(t > _LOG_HALF, jnp.log(-jnp.expm1(t)), jnp.log1p(-jnp.exp(t)))
+
+
+def _log_diff_exp(big, small):
+    """``log(exp(big) - exp(small))`` for ``big >= small``. ``small`` may be ``-inf``."""
+    finite = jnp.isfinite(big)
+    safe_big = jnp.where(finite, big, 0.0)
+    gap = jnp.where(finite, small - safe_big, -jnp.inf)
+    return jnp.where(finite, safe_big + _log1mexp(gap), big)
+
+
+def _interval_from_tails(below_upper, above_upper, below_lower, above_lower):
+    """``log P(a <= Y <= b)`` from ``log P(Y <= b)``, ``log P(Y > b)``, ``log P(Y < a)``, ``log P(Y >= a)``.
+
+    Below the median the probability is ``F(b) - F(a-)``; above it,
+    ``S(a-) - S(b)``; across it, ``1 - F(a-) - S(b)``. Each is the form whose
+    terms are not both close to 1.
+    """
+    lower_side = _log_diff_exp(below_upper, below_lower)
+    upper_side = _log_diff_exp(above_lower, above_upper)
+    outside = jnp.minimum(jnp.exp(below_lower) + jnp.exp(above_upper), 1.0 - 1e-7)
+    across = jnp.log1p(-outside)
+    return jnp.where(below_upper <= _LOG_HALF, lower_side, jnp.where(above_lower <= _LOG_HALF, upper_side, across))
+
+
+def _bounds(lower, upper):
+    lower = jnp.asarray(lower, dtype=jnp.float32)
+    upper = jnp.asarray(upper, dtype=jnp.float32)
+    shape = jnp.broadcast_shapes(lower.shape, upper.shape)
+    return jnp.broadcast_to(lower, shape), jnp.broadcast_to(upper, shape)
+
+
+def _empty(lower, upper):
+    return (lower > upper) | (lower == jnp.inf) | (upper == -jnp.inf)
+
+
+def _finite_standardized(value, loc, scale):
+    """``(value - loc) / scale``, with an infinite ``value`` passed through so no infinity meets ``loc`` or ``scale``."""
+    value = jnp.asarray(value, dtype=jnp.float32)
+    finite = jnp.isfinite(value)
+    inner = (jnp.where(finite, value, 0.0) - loc) / scale
+    return jnp.where(finite, inner, value)
+
+
+@jax.custom_jvp
+def _betainc(a, b, x):
+    """The regularized incomplete beta function with a gradient in ``a`` and ``b`` as well as ``x``.
+
+    JAX's ``betainc`` differentiates only in ``x``. The Student-t's degrees of
+    freedom and the negative binomial's dispersion sit in ``a`` or ``b``, so
+    their CDFs need the other two: central differences at a relative step of
+    1%, accurate to about 1e-4 in float32.
+    """
+    return betainc(a, b, x)
+
+
+def _broadcast_betainc(a, b, x):
+    a, b, x = jnp.broadcast_arrays(*(jnp.asarray(part, dtype=jnp.float32) for part in (a, b, x)))
+    return _betainc(a, b, x)
+
+
+def _shape_step(value):
+    return 1e-2 * jnp.maximum(jnp.abs(value), 1e-3)
+
+
+@_betainc.defjvp
+def _betainc_jvp(primals, tangents):
+    a, b, x = primals
+    da, db, dx = tangents
+    value = betainc(a, b, x)
+    step_a, step_b = _shape_step(a), _shape_step(b)
+    slope_a = (betainc(a + step_a, b, x) - betainc(a - step_a, b, x)) / (2.0 * step_a)
+    slope_b = (betainc(a, b + step_b, x) - betainc(a, b - step_b, x)) / (2.0 * step_b)
+    inside = jnp.clip(x, 1e-30, 1.0 - 1e-7)
+    log_density = (a - 1.0) * jnp.log(inside) + (b - 1.0) * jnp.log1p(-inside) - betaln(a, b)
+    slope_x = jnp.exp(jnp.minimum(log_density, 80.0))
+    return value, slope_a * da + slope_b * db + slope_x * dx
+
+
 class Normal(Distribution):
     """Normal with location ``loc`` and standard deviation ``scale``."""
 
     loc: jax.Array
     scale: jax.Array
     reparameterized: ClassVar[bool] = True
+    atomless: ClassVar[bool] = True
 
     def __init__(self, loc, scale):
         self.loc, self.scale = _broadcast(loc, scale)
@@ -155,6 +338,15 @@ class Normal(Distribution):
 
     def log_prob(self, value):
         return _normal_log_prob(value, self.loc, self.scale)
+
+    def log_cdf(self, value):
+        return log_ndtr((value - self.loc) / self.scale)
+
+    def log_survival(self, value):
+        return log_ndtr((self.loc - value) / self.scale)
+
+    def convolve_normal(self, scale):
+        return Normal(self.loc, jnp.sqrt(jnp.square(self.scale) + jnp.square(jnp.asarray(scale, dtype=self.scale.dtype))))
 
     def sample(self, key, sample_shape=()):
         noise = jax.random.normal(key, tuple(sample_shape) + self.loc.shape, dtype=self.loc.dtype)
@@ -180,6 +372,7 @@ class StudentT(Distribution):
     scale: jax.Array
     df: jax.Array
     reparameterized: ClassVar[bool] = True
+    atomless: ClassVar[bool] = True
 
     def __init__(self, loc, scale, df):
         self.loc, self.scale, self.df = _broadcast(loc, scale, df)
@@ -204,10 +397,22 @@ class StudentT(Distribution):
     def variance(self):
         return jnp.where(self.df > 2, jnp.square(self.scale) * self.df / (self.df - 2), jnp.inf)
 
-    def cdf(self, value):
+    def _tail(self, value):
+        """The standardized value and ``P(T > |t|)``, which is accurate even when it is tiny."""
         t = (value - self.loc) / self.scale
-        tail = 0.5 * betainc(0.5 * self.df, 0.5, self.df / (self.df + t * t))
+        return t, 0.5 * _betainc(0.5 * self.df, jnp.full_like(self.df, 0.5), self.df / (self.df + t * t))
+
+    def cdf(self, value):
+        t, tail = self._tail(value)
         return jnp.where(t > 0, 1.0 - tail, tail)
+
+    def log_cdf(self, value):
+        t, tail = self._tail(value)
+        return jnp.where(t < 0, _safe_log(tail), jnp.log1p(-jnp.minimum(tail, 0.5)))
+
+    def log_survival(self, value):
+        t, tail = self._tail(value)
+        return jnp.where(t > 0, _safe_log(tail), jnp.log1p(-jnp.minimum(tail, 0.5)))
 
 
 class Mixture(Distribution):
@@ -262,6 +467,35 @@ class Mixture(Distribution):
 
     def cdf_left(self, value):
         return jnp.sum(jnp.exp(self.logits) * self.components.cdf_left(self._expand(value)), axis=-1)
+
+    def _log_mix(self, values):
+        return jax.nn.logsumexp(values + self.logits, axis=-1)
+
+    def log_cdf(self, value):
+        return self._log_mix(self.components.log_cdf(self._expand(value)))
+
+    def log_survival(self, value):
+        return self._log_mix(self.components.log_survival(self._expand(value)))
+
+    def log_cdf_left(self, value):
+        return self._log_mix(self.components.log_cdf_left(self._expand(value)))
+
+    def log_survival_left(self, value):
+        return self._log_mix(self.components.log_survival_left(self._expand(value)))
+
+    def log_interval(self, lower, upper):
+        """Each component's interval probability, mixed: accurate even where the mixture's own CDF is flat."""
+        lower, upper = _bounds(lower, upper)
+        return self._log_mix(self.components.log_interval(self._expand(lower), self._expand(upper)))
+
+    def cdf_interval(self, lower, upper):
+        lower, upper = _bounds(lower, upper)
+        low, high = self.components.cdf_interval(self._expand(lower), self._expand(upper))
+        weight = jnp.exp(self.logits)
+        return jnp.sum(weight * low, axis=-1), jnp.sum(weight * high, axis=-1)
+
+    def convolve_normal(self, scale):
+        return Mixture(self.components.convolve_normal(self._expand(scale)), self.logits)
 
     def mean(self):
         axis = len(self.batch_shape)
@@ -386,6 +620,32 @@ class AffineTransformed(Distribution):
 
     def cdf_left(self, value):
         return self.base.cdf_left((value - self.loc) / self.scale)
+
+    def _inner(self, value):
+        return _finite_standardized(value, self.loc, self.scale)
+
+    def log_cdf(self, value):
+        return self.base.log_cdf(self._inner(value))
+
+    def log_survival(self, value):
+        return self.base.log_survival(self._inner(value))
+
+    def log_cdf_left(self, value):
+        return self.base.log_cdf_left(self._inner(value))
+
+    def log_survival_left(self, value):
+        return self.base.log_survival_left(self._inner(value))
+
+    def log_interval(self, lower, upper):
+        lower, upper = _bounds(lower, upper)
+        return self.base.log_interval(self._inner(lower), self._inner(upper))
+
+    def cdf_interval(self, lower, upper):
+        lower, upper = _bounds(lower, upper)
+        return self.base.cdf_interval(self._inner(lower), self._inner(upper))
+
+    def convolve_normal(self, scale):
+        return AffineTransformed(self.base.convolve_normal(jnp.asarray(scale, dtype=jnp.float32) / self.scale), self.loc, self.scale)
 
     def quantile(self, q):
         return self.loc + self.scale * self.base.quantile(q)
@@ -542,17 +802,22 @@ class LowRankMultivariateNormal(Distribution):
 
 
 class Flow(Distribution):
-    """The ``flow`` head: a rational-quadratic spline pushed forward from a standard normal.
+    """The ``flow`` head: a standard normal pushed through a rational-quadratic spline, then shifted and scaled.
 
-    ``params`` is ``batch_shape + (parameters,)``, the unconstrained spline of
-    ``ashlar.distributional``. The spline is monotone, so the quantile at
-    ``q`` is the spline at the normal quantile of ``q``. Mean and variance
-    are exact normal integrals on the identity tails plus a
-    512-point midpoint rule inside the spline's range.
+    ``y = shift + scale * spline(z)``. ``params`` is ``batch_shape +
+    (parameters,)``: the unconstrained spline of ``ashlar.distributional``,
+    then the shift and the raw scale, one of each per row, so every row has
+    its own spread and its own tails. A bare spline (``flow_parameter_count()``
+    values, the layout saved before the shift and scale) has shift 0 and
+    scale 1. The map is monotone, so the quantile at ``q`` is the map at the
+    normal quantile of ``q``. Mean and variance are exact normal integrals
+    on the linear tails plus a 512-point midpoint rule inside the spline's
+    range.
     """
 
     params: jax.Array
     reparameterized: ClassVar[bool] = True
+    atomless: ClassVar[bool] = True
 
     def __init__(self, params):
         self.params = jnp.asarray(params, dtype=jnp.float32)
@@ -581,39 +846,54 @@ class Flow(Distribution):
         noise = jax.random.normal(key, tuple(sample_shape) + self.batch_shape, dtype=self.params.dtype)
         return self._forward(noise)
 
-    def cdf(self, value):
+    def _base(self, value):
+        """The standard-normal value that the flow maps to ``value``."""
         from ashlar.distributional import flow_inverse
 
         params, value = self._params_for(jnp.asarray(value, dtype=self.params.dtype))
         base, _logdet = flow_inverse(params, value)
-        return ndtr(base)
+        return base
+
+    def cdf(self, value):
+        return ndtr(self._base(value))
+
+    def log_cdf(self, value):
+        return log_ndtr(self._base(value))
+
+    def log_survival(self, value):
+        return log_ndtr(-self._base(value))
 
     def quantile(self, q):
         return self._forward(ndtri(jnp.asarray(q, dtype=self.params.dtype)))
 
     def _moments(self):
         """First two moments. The spline is the identity outside ``[-bound, bound]``,
-        so the tails are closed-form normal integrals; the inside is a midpoint rule."""
-        from ashlar.distributional import FLOW_BOUND
+        so the tails are closed-form normal integrals; the inside is a midpoint rule.
+        The shift and scale then move them."""
+        from ashlar.distributional import FLOW_BOUND, flow_affine, flow_forward
 
+        spline, shift, scale = flow_affine(self.params)
         bound = float(FLOW_BOUND)
         width = 2.0 * bound / QUADRATURE_NODES
         nodes = -bound + width * (jnp.arange(QUADRATURE_NODES, dtype=self.params.dtype) + 0.5)
         weights = width * jnp.exp(-0.5 * jnp.square(nodes)) / math.sqrt(2 * math.pi)
-        values = self._forward(nodes.reshape((-1,) + (1,) * len(self.batch_shape)))
+        grid = jnp.broadcast_to(
+            nodes.reshape((-1,) + (1,) * len(self.batch_shape)), (QUADRATURE_NODES,) + tuple(self.batch_shape)
+        )
+        values = flow_forward(jnp.broadcast_to(spline, grid.shape + spline.shape[-1:]), grid)
         weights = weights.reshape((-1,) + (1,) * len(self.batch_shape))
         density = math.exp(-0.5 * bound * bound) / math.sqrt(2 * math.pi)
         tail_mass = 0.5 * math.erfc(bound / math.sqrt(2.0))
         first = jnp.sum(weights * values, axis=0)
         second = jnp.sum(weights * jnp.square(values), axis=0) + 2.0 * (bound * density + tail_mass)
-        return first, second
+        spread = jnp.maximum(second - jnp.square(first), 0.0)
+        return shift + scale * first, jnp.square(scale) * spread
 
     def mean(self):
         return self._moments()[0]
 
     def variance(self):
-        first, second = self._moments()
-        return jnp.maximum(second - jnp.square(first), 0.0)
+        return self._moments()[1]
 
 
 class Histogram(Distribution):
@@ -625,6 +905,7 @@ class Histogram(Distribution):
     """
 
     logits: jax.Array
+    atomless: ClassVar[bool] = True
 
     def __init__(self, logits):
         self.logits = jnp.asarray(logits, dtype=jnp.float32)
@@ -679,6 +960,34 @@ class Histogram(Distribution):
         fraction = jnp.clip((value[..., None] - edges[:-1]) / (edges[1:] - edges[:-1]), 0.0, 1.0)
         return jnp.sum(fraction * (cumulative[..., 1:] - cumulative[..., :-1]), axis=-1)
 
+    def _inside(self, lower, upper):
+        """Interval bounds held inside the edges. The head has no mass past them, so a bound beyond
+        an end bin's center is read at that center, and an interval wholly out there reads the
+        outer half of the end bin, as ``log_prob`` reads a value out there in the end bin."""
+        edges = self._edges()
+        half = 0.5 * (edges[1] - edges[0])
+        lower, upper = _bounds(lower, upper)
+        return jnp.clip(lower, edges[0], edges[-1] - half), jnp.clip(upper, edges[0] + half, edges[-1])
+
+    def log_interval(self, lower, upper):
+        empty = _empty(*_bounds(lower, upper))
+        low, high = self._inside(lower, upper)
+        edges = self._edges()
+        overlap = jnp.minimum(high[..., None], edges[1:]) - jnp.maximum(low[..., None], edges[:-1])
+        fraction = jnp.clip(overlap / (edges[1:] - edges[:-1]), 0.0, 1.0)
+        probability = jnp.sum(fraction * self._probabilities(), axis=-1)
+        return jnp.where(empty, -jnp.inf, _safe_log(probability))
+
+    def log_survival(self, value):
+        edges = self._edges()
+        value = jnp.asarray(value, dtype=self.logits.dtype)
+        above = jnp.clip((edges[1:] - value[..., None]) / (edges[1:] - edges[:-1]), 0.0, 1.0)
+        return _safe_log(jnp.sum(above * self._probabilities(), axis=-1))
+
+    def cdf_interval(self, lower, upper):
+        low, high = self._inside(lower, upper)
+        return self.cdf(low), self.cdf(high)
+
     def quantile(self, q):
         edges = self._edges()
         q = jnp.asarray(q, dtype=self.logits.dtype)
@@ -726,6 +1035,22 @@ class _Count(Distribution):
         inside = self.zero + (1.0 - self.zero) * self._count_cdf(jnp.maximum(k, 0.0))
         return jnp.where(k < 0, 0.0, jnp.clip(inside, 0.0, 1.0))
 
+    def _log_count_cdf(self, k):
+        raise NotImplementedError
+
+    def _log_count_survival(self, k):
+        raise NotImplementedError
+
+    def log_cdf(self, value):
+        k = jnp.floor(jnp.asarray(value, dtype=self.mean_count.dtype))
+        count = jnp.log1p(-jnp.minimum(self.zero, 1.0 - 1e-7)) + self._log_count_cdf(jnp.maximum(k, 0.0))
+        return jnp.where(k < 0, -jnp.inf, jnp.logaddexp(_safe_log(self.zero), count))
+
+    def log_survival(self, value):
+        k = jnp.floor(jnp.asarray(value, dtype=self.mean_count.dtype))
+        count = jnp.log1p(-jnp.minimum(self.zero, 1.0 - 1e-7)) + self._log_count_survival(jnp.maximum(k, 0.0))
+        return jnp.where(k < 0, 0.0, count)
+
     def mean(self):
         return (1.0 - self.zero) * self.mean_count
 
@@ -754,6 +1079,13 @@ class Poisson(_Count):
 
     def _count_cdf(self, k):
         return gammaincc(k + 1.0, self.mean_count)
+
+    def _log_count_cdf(self, k):
+        # The mass at k is a lower bound that stays finite where the CDF underflows.
+        return _log_or(gammaincc(k + 1.0, self.mean_count), self._log_count(k))
+
+    def _log_count_survival(self, k):
+        return _log_or(gammainc(k + 1.0, self.mean_count), self._log_count(k + 1.0))
 
     def _count_variance(self):
         return self.mean_count
@@ -786,7 +1118,16 @@ class NegativeBinomial(_Count):
 
     def _count_cdf(self, k):
         size = 1.0 / self.dispersion
-        return betainc(size, k + 1.0, size / (size + self.mean_count))
+        return _broadcast_betainc(size, k + 1.0, size / (size + self.mean_count))
+
+    def _log_count_cdf(self, k):
+        size = 1.0 / self.dispersion
+        return _log_or(_broadcast_betainc(size, k + 1.0, size / (size + self.mean_count)), self._log_count(k))
+
+    def _log_count_survival(self, k):
+        size = 1.0 / self.dispersion
+        below = _broadcast_betainc(k + 1.0, size, self.mean_count / (size + self.mean_count))
+        return _log_or(below, self._log_count(k + 1.0))
 
     def _count_variance(self):
         return self.mean_count + self.dispersion * jnp.square(self.mean_count)
@@ -1258,6 +1599,7 @@ class LogNormal(Distribution):
     scale: jax.Array
     reparameterized: ClassVar[bool] = True
     support: ClassVar[str] = "positive"
+    atomless: ClassVar[bool] = True
 
     def __init__(self, loc, scale):
         self.loc, self.scale = _broadcast(loc, scale)
@@ -1286,6 +1628,19 @@ class LogNormal(Distribution):
         value = jnp.asarray(value, dtype=self.loc.dtype)
         return jnp.where(value > 0, ndtr((jnp.log(jnp.maximum(value, 1e-30)) - self.loc) / self.scale), 0.0)
 
+    def _log_axis(self, value):
+        value = jnp.asarray(value, dtype=self.loc.dtype)
+        positive = value > 0
+        return positive, (jnp.log(jnp.where(positive, value, 1.0)) - self.loc) / self.scale
+
+    def log_cdf(self, value):
+        positive, z = self._log_axis(value)
+        return jnp.where(positive, log_ndtr(z), -jnp.inf)
+
+    def log_survival(self, value):
+        positive, z = self._log_axis(value)
+        return jnp.where(positive, log_ndtr(-z), 0.0)
+
     def quantile(self, q):
         return jnp.exp(self.loc + self.scale * ndtri(jnp.asarray(q, dtype=self.loc.dtype)))
 
@@ -1297,6 +1652,7 @@ class Gamma(Distribution):
     concentration: jax.Array
     reparameterized: ClassVar[bool] = True
     support: ClassVar[str] = "positive"
+    atomless: ClassVar[bool] = True
 
     def __init__(self, mean_value, concentration):
         self.mean_value, self.concentration = _broadcast(mean_value, concentration)
@@ -1329,6 +1685,19 @@ class Gamma(Distribution):
     def cdf(self, value):
         value = jnp.asarray(value, dtype=self.mean_value.dtype)
         return jnp.where(value > 0, gammainc(self.concentration, self._rate() * jnp.maximum(value, 0.0)), 0.0)
+
+    def _scaled(self, value):
+        value = jnp.asarray(value, dtype=self.mean_value.dtype)
+        positive = value > 0
+        return positive, self._rate() * jnp.where(positive, value, 1.0)
+
+    def log_cdf(self, value):
+        positive, x = self._scaled(value)
+        return jnp.where(positive, _safe_log(gammainc(self.concentration, x)), -jnp.inf)
+
+    def log_survival(self, value):
+        positive, x = self._scaled(value)
+        return jnp.where(positive, _safe_log(gammaincc(self.concentration, x)), 0.0)
 
 
 class Hurdle(Distribution):
@@ -1387,6 +1756,29 @@ class Hurdle(Distribution):
         value = jnp.asarray(value, dtype=jnp.float32)
         inside = self.zero + (1.0 - self.zero) * self.severity.cdf(value)
         return jnp.where(value <= 0, 0.0, inside)
+
+    def _severity_tails(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        positive = value > 0
+        inner = jnp.where(positive, value, 1.0)
+        return value, positive, self.severity.log_cdf(inner), self.severity.log_survival(inner)
+
+    def log_cdf(self, value):
+        value, positive, below, _above = self._severity_tails(value)
+        inside = jnp.logaddexp(self._log_zero(), self._log_keep() + jnp.where(positive, below, -jnp.inf))
+        return jnp.where(value >= 0, inside, -jnp.inf)
+
+    def log_cdf_left(self, value):
+        value, positive, below, _above = self._severity_tails(value)
+        return jnp.where(positive, jnp.logaddexp(self._log_zero(), self._log_keep() + below), -jnp.inf)
+
+    def log_survival(self, value):
+        value, positive, _below, above = self._severity_tails(value)
+        return jnp.where(value >= 0, self._log_keep() + jnp.where(positive, above, 0.0), 0.0)
+
+    def log_survival_left(self, value):
+        value, positive, _below, above = self._severity_tails(value)
+        return jnp.where(positive, self._log_keep() + above, 0.0)
 
     def quantile(self, q):
         q = jnp.asarray(q, dtype=jnp.float32)
