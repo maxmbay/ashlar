@@ -77,23 +77,23 @@ The mixture has the best likelihood on every table and the best CRPS on three of
 
 ![Four heads on taxi fare, under three conditions.](images/fare-heads.png)
 
-One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The same model answers with a different shape for each condition, and a different head wins each one on held-out log density: the mixture on Manhattan hops (−2.79), the flow on the heavier Brooklyn tail (−3.19), and the histogram at 48 bins on the Queens airport corridor (−3.30), where 32% of trips run at the $52 flat fare. Only the histogram grows a real spike there, 23% of its mass against the mixture's 5%, the gaussian's 1%, and the flow's 0%: a spike at one value is what a smooth density cannot make, and the flow pays for it with its worst row. [`examples/readme_figures.py`](../examples/readme_figures.py) draws it.
+One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The same model answers with a different shape for each condition, and the best head changes with it, on held-out log density: the mixture on Manhattan hops (−2.79), and the histogram at 48 bins on Brooklyn trips (−3.29, against the mixture's −3.30 and the flow's −3.47) and on the Queens airport corridor (−3.30), where 32% of trips run at the $52 flat fare. Only the histogram grows a real spike there, 23% of its mass against the flow's 15%, the mixture's 5%, and the gaussian's 1%: a smooth density can only approach a spike at one value. [`examples/readme_figures.py`](../examples/readme_figures.py) draws it.
 
 ## Smaller tables
 
 ![Average predictive density of four heads on held-out taxi tips.](images/tip-heads.png)
 
-NYC taxi tips with the payment type hidden. A third of tips are exactly zero, the cash fares, and the rest are a skewed bump around $2. The Gaussian head has to cover both with one bell, so it puts only 8% of its mass within 25¢ of zero and spills below it. The flow and the mixture grow a spike there and put 42% and 37% within 25¢ of zero. The histogram sees the spike but cannot make it narrower than one bin.
+NYC taxi tips with the payment type hidden. A third of tips are exactly zero, the cash fares, and the rest are a skewed bump around $2. The Gaussian head has to cover both with one bell, so it puts only 8% of its mass within 25¢ of zero and spills below it. The flow and the mixture grow a spike there and put 40% and 37% within 25¢ of zero. The histogram sees the spike but cannot make it narrower than one bin.
 
 | Target | Shape | `gaussian` | `mixture` | `flow` | `histogram` | Tree mean + normal |
 |---|---|---:|---:|---:|---:|---:|
-| Taxi tips, $ | spike at zero, skewed | 0.950 | **0.872** | 0.958 | 0.917 | 1.001 |
-| California value, $100k | capped at 5.0 | 0.225 | **0.205** | 0.208 | 0.229 | 0.236 |
-| Diamond price, $1,000 | skewed, spread grows with size | 0.216 | **0.202** | 0.232 | 0.343 | 0.274 |
-| Abalone rings | near normal, counts | 1.105 | **1.076** | 1.088 | 1.089 | 1.157 |
-| Melbourne min. temperature, °C, one day ahead | seasonal, near normal | 1.264 | **1.243** | 1.248 | 1.262 | — |
+| Taxi tips, $ | spike at zero, skewed | 0.950 | **0.872** | **0.872** | 0.917 | 1.001 |
+| California value, $100k | capped at 5.0 | 0.225 | **0.205** | 0.211 | 0.229 | 0.236 |
+| Diamond price, $1,000 | skewed, spread grows with size | 0.216 | **0.202** | 0.210 | 0.343 | 0.274 |
+| Abalone rings | near normal, counts | 1.105 | **1.076** | 1.087 | 1.089 | 1.157 |
+| Melbourne min. temperature, °C, one day ahead | seasonal, near normal | 1.264 | **1.243** | 1.247 | 1.262 | — |
 
-CRPS, three splits each. The mixture is the best head on every table here, and every Ashlar density head beats a tree mean with a constant-width normal on California, diamonds, and abalone. The right head still depends on the shape: the histogram is the worst head on diamond prices, where most of the mass sits in two or three of its fixed bins.
+CRPS, three splits each. The mixture is the best head on four of the five tables and ties the flow on taxi tips, and every Ashlar density head beats a tree mean with a constant-width normal on California, diamonds, and abalone. The right head still depends on the shape: the histogram is the worst head on diamond prices, where most of the mass sits in two or three of its fixed bins.
 
 The intervals are better calibrated too. With an interval that promises 80%, the three LightGBM quantile models cover 70% of held-out California values, 69% of diamond prices, and 72% of abalone rings. Ashlar's mixture covers 76%, 80%, and 78%. On the temperature forecast the mixture beats LightGBM on the same 28-day window on every interval score: pinball 0.554 against 0.573, and coverage 83% against 77%.
 

@@ -263,13 +263,15 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 ## Distributions on smaller tables
 
+The `flow` rows here and under [Forecast heads](#forecast-heads) were rerun on the same splits after the flow head gained its per-row shift and scale; before it, every row shared the spline's tails. The other rows are from the first run.
+
 ### Abalone, rings
 
 4,177 rows, 3 splits.
 
 | Model | CRPS | Pinball | 80% coverage | 80% width | NLL | MAE | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, `flow` | 1.088 ± 0.046 | 0.488 ± 0.021 | 78% | 4.341 ± 0.202 | 2.020 ± 0.065 | 1.491 ± 0.057 | 8.2 |
+| Ashlar, `flow` | 1.087 ± 0.030 | 0.486 ± 0.012 | 77% | 4.489 ± 0.099 | 1.965 ± 0.023 | 1.512 ± 0.044 | 9.1 |
 | Ashlar, `gaussian` | 1.105 ± 0.025 | 0.494 ± 0.010 | 84% | 5.098 ± 0.251 | 2.059 ± 0.027 | 1.530 ± 0.038 | 6.7 |
 | Ashlar, `histogram` | 1.089 ± 0.033 | 0.487 ± 0.015 | 81% | 4.847 ± 0.104 | 1.942 ± 0.008 | 1.520 ± 0.029 | 6.0 |
 | Ashlar, `mixture` | 1.076 ± 0.039 | 0.481 ± 0.018 | 78% | 4.398 ± 0.063 | 1.941 ± 0.033 | 1.498 ± 0.036 | 7.6 |
@@ -286,7 +288,7 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 | Model | CRPS | Pinball | 80% coverage | 80% width | NLL | MAE | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, `flow` | 0.208 ± 0.002 | 0.094 ± 0.001 | 74% | 0.786 ± 0.007 | 0.120 ± 0.009 | 0.285 ± 0.002 | 58 |
+| Ashlar, `flow` | 0.211 ± 0.002 | 0.095 ± 0.001 | 77% | 0.853 ± 0.011 | 0.036 ± 0.015 | 0.290 ± 0.002 | 50 |
 | Ashlar, `gaussian` | 0.225 ± 0.003 | 0.101 ± 0.001 | 83% | 1.014 ± 0.012 | 0.403 ± 0.018 | 0.311 ± 0.005 | 38 |
 | Ashlar, `histogram` | 0.229 ± 0.003 | 0.103 ± 0.002 | 86% | 1.122 ± 0.035 | 0.479 ± 0.008 | 0.310 ± 0.002 | 32 |
 | Ashlar, `mixture` | 0.205 ± 0.001 | 0.092 ± 0.001 | 76% | 0.812 ± 0.035 | 0.076 ± 0.037 | 0.287 ± 0.002 | 51 |
@@ -303,7 +305,7 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 | Model | CRPS | Pinball | 80% coverage | 80% width | NLL | MAE | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, `flow` | 0.232 ± 0.014 | 0.106 ± 0.006 | 78% | 0.861 ± 0.083 | 0.071 ± 0.117 | 0.307 ± 0.020 | 25 |
+| Ashlar, `flow` | 0.210 ± 0.018 | 0.094 ± 0.008 | 79% | 0.907 ± 0.089 | -0.054 ± 0.123 | 0.289 ± 0.025 | 25 |
 | Ashlar, `gaussian` | 0.216 ± 0.013 | 0.097 ± 0.006 | 84% | 1.126 ± 0.185 | -0.015 ± 0.094 | 0.294 ± 0.012 | 24 |
 | Ashlar, `histogram` | 0.343 ± 0.003 | 0.154 ± 0.002 | 95% | 2.177 ± 0.007 | 1.007 ± 0.011 | 0.427 ± 0.005 | 17 |
 | Ashlar, `mixture` | 0.202 ± 0.007 | 0.091 ± 0.003 | 80% | 0.907 ± 0.050 | -0.111 ± 0.056 | 0.283 ± 0.010 | 27 |
@@ -320,7 +322,7 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 | Model | CRPS | Pinball | 80% coverage | 80% width | NLL | MAE | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, `flow` | 0.958 ± 0.012 | 0.420 ± 0.006 | 74% | 3.033 ± 0.207 | -0.016 ± 0.404 | 1.403 ± 0.017 | 19 |
+| Ashlar, `flow` | 0.872 ± 0.023 | 0.376 ± 0.007 | 75% | 3.439 ± 0.263 | 0.005 ± 0.394 | 1.322 ± 0.023 | 16 |
 | Ashlar, `gaussian` | 0.950 ± 0.019 | 0.406 ± 0.007 | 79% | 4.038 ± 0.151 | 1.767 ± 0.018 | 1.443 ± 0.037 | 6.1 |
 | Ashlar, `histogram` | 0.917 ± 0.017 | 0.398 ± 0.009 | 81% | 3.762 ± 0.129 | 1.416 ± 0.021 | 1.370 ± 0.033 | 7.2 |
 | Ashlar, `mixture` | 0.872 ± 0.017 | 0.372 ± 0.005 | 84% | 3.689 ± 0.116 | 0.092 ± 0.386 | 1.420 ± 0.045 | 15 |
@@ -355,7 +357,7 @@ Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClas
 
 | Model | CRPS | Pinball | 80% coverage | 80% width | NLL | MAE | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, `flow` | 1.248 ± 0.006 | 0.556 ± 0.002 | 84% | 6.029 ± 0.056 | 2.230 ± 0.005 | 1.755 ± 0.010 | 19 |
+| Ashlar, `flow` | 1.247 ± 0.003 | 0.555 ± 0.001 | 83% | 6.098 ± 0.033 | 2.223 ± 0.002 | 1.746 ± 0.002 | 20 |
 | Ashlar, `gaussian` | 1.264 ± 0.005 | 0.564 ± 0.002 | 85% | 6.348 ± 0.022 | 2.240 ± 0.005 | 1.756 ± 0.007 | 21 |
 | Ashlar, `histogram` | 1.262 ± 0.004 | 0.562 ± 0.002 | 87% | 6.616 ± 0.034 | 2.284 ± 0.003 | 1.745 ± 0.006 | 18 |
 | Ashlar, `mixture` | 1.243 ± 0.004 | 0.554 ± 0.001 | 83% | 6.052 ± 0.089 | 2.221 ± 0.002 | 1.726 ± 0.004 | 16 |
