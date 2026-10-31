@@ -14,6 +14,7 @@
 | Counts with more spread than their mean | `negative_binomial` | A mean and a dispersion per row, the variance being mean + dispersion × mean². |
 | Often exactly zero, otherwise a positive amount | `hurdle` | The probability of zero, plus a lognormal or gamma amount. Tips, claims, rainfall. |
 | Several columns that move together | `multivariate_gaussian` | A joint normal with a learned low-rank covariance, so totals and joint events come out right. |
+| Several columns whose dependence is curved, skewed, or heavier in the tails | `multivariate_flow` | An autoregressive flow: each column's whole conditional shape can change with the columns before it. |
 
 ```python
 from ashlar import ASRRegressor

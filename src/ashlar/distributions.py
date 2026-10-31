@@ -117,6 +117,10 @@ class Distribution(Module):
             raise ShapeError("index a distribution's batch axes with integers and slices only.")
         if len(index) > len(self.batch_shape):
             raise ShapeError(f"index has {len(index)} axes; the batch shape is {self.batch_shape}.")
+        return self._index(index)
+
+    def _index(self, index):
+        """This distribution at ``index`` over its leading batch axes. Every leaf starts with the batch."""
         return jax.tree.map(lambda leaf: leaf[index], self)
 
     def __repr__(self):
@@ -282,10 +286,20 @@ class Mixture(Distribution):
         outer = centered[..., :, None] * centered[..., None, :]
         return jnp.sum(weight * (self.components.covariance() + outer), axis=axis)
 
+    def _index(self, index):
+        return Mixture(self.components._index(index), self.logits[index])
+
     def sample(self, key, sample_shape=()):
         sample_shape = tuple(sample_shape)
         choice_key, draw_key = jax.random.split(key)
         choice = jax.random.categorical(choice_key, self.logits, axis=-1, shape=sample_shape + self.batch_shape)
+        if getattr(self.components, "shared_parameters", False):
+            # Weights shared across rows cannot be gathered per draw: draw every component, then keep the chosen one.
+            draws = self.components.sample(draw_key, sample_shape)
+            index = choice.reshape(choice.shape + (1,) * (1 + len(self.event_shape)))
+            return jnp.take_along_axis(draws, index, axis=len(sample_shape) + len(self.batch_shape))[
+                (slice(None),) * (len(sample_shape) + len(self.batch_shape)) + (0,)
+            ]
         return self.select(choice, len(sample_shape)).sample(draw_key)
 
     def select(self, choice, sample_ndim: int = 0) -> Distribution:
@@ -385,6 +399,9 @@ class AffineTransformed(Distribution):
             return self
         return AffineTransformed(self.base.marginals(), self.loc, self.scale)
 
+    def _index(self, index):
+        return AffineTransformed(self.base._index(index), self.loc[index], self.scale[index])
+
 
 class Independent(Distribution):
     """Reinterpret the last batch axis of ``base`` as one joint outcome of independent coordinates.
@@ -434,6 +451,9 @@ class Independent(Distribution):
 
     def marginals(self):
         return self.base
+
+    def _index(self, index):
+        return Independent(self.base._index(index))
 
 
 class LowRankMultivariateNormal(Distribution):
@@ -874,10 +894,15 @@ def _bisection_quantile(dist: Distribution, q):
 
     low, high = jax.lax.fori_loop(0, _BISECTION_STEPS, step, (low, high))
     x0 = jax.lax.stop_gradient(0.5 * (low + high))
-    density = jnp.exp(dist.log_prob(x0))
-    gap = dist.cdf(x0) - q
-    newton = jnp.where(density > 1e-12, gap / jnp.maximum(density, 1e-12), 0.0)
-    refined = x0 - newton + jax.lax.stop_gradient(newton)
+    try:
+        density = jnp.exp(dist.log_prob(x0))
+    except NotImplementedError:
+        # No density, as for draws: the bisection answer, with no gradient.
+        refined = x0
+    else:
+        gap = dist.cdf(x0) - q
+        newton = jnp.where(density > 1e-12, gap / jnp.maximum(density, 1e-12), 0.0)
+        refined = x0 - newton + jax.lax.stop_gradient(newton)
     if dist.support in ("nonnegative", "positive"):
         # An atom at zero, or a lower edge the bracket straddles, is answered exactly.
         refined = jnp.where(frozen.cdf(jnp.zeros_like(x0)) >= level, 0.0, jnp.maximum(refined, 0.0))
@@ -977,6 +1002,253 @@ def joint_normal_distribution(flat, n_events: int) -> LowRankMultivariateNormal:
     std = positive_scale(flat[..., d : 2 * d])
     factor = flat[..., 2 * d :].reshape(flat.shape[:-1] + (d, rank))
     return LowRankMultivariateNormal(loc, factor, jnp.square(std))
+
+
+
+MOMENT_DRAWS = 1024
+_MOMENT_CHUNK = 64
+
+
+class Empirical(Distribution):
+    """Equal-weight draws, ``values`` shaped ``batch_shape + (draws,)``.
+
+    The marginals of a ``MultivariateFlow`` are this: its coordinates have no
+    closed-form CDF, so they are read from fixed draws. ``cdf`` is the share of
+    draws at or below a value and ``quantile`` the matching order statistic.
+    It has no density.
+    """
+
+    values: jax.Array
+
+    def __init__(self, values):
+        self.values = jnp.asarray(values, dtype=jnp.float32)
+
+    @property
+    def batch_shape(self):
+        return self.values.shape[:-1]
+
+    def sample(self, key, sample_shape=()):
+        shape = tuple(sample_shape) + self.batch_shape
+        index = jax.random.randint(key, shape, 0, self.values.shape[-1])
+        values = jnp.broadcast_to(self.values, shape + self.values.shape[-1:])
+        return jnp.take_along_axis(values, index[..., None], axis=-1)[..., 0]
+
+    def mean(self):
+        return jnp.mean(self.values, axis=-1)
+
+    def variance(self):
+        return jnp.var(self.values, axis=-1)
+
+    def cdf(self, value):
+        return jnp.mean(self.values <= jnp.asarray(value, dtype=self.values.dtype)[..., None], axis=-1)
+
+    def cdf_left(self, value):
+        return jnp.mean(self.values < jnp.asarray(value, dtype=self.values.dtype)[..., None], axis=-1)
+
+    def quantile(self, q):
+        q = jnp.asarray(q, dtype=self.values.dtype)
+        n = self.values.shape[-1]
+        shape = jnp.broadcast_shapes(q.shape, self.batch_shape)
+        ordered = jnp.broadcast_to(jnp.sort(self.values, axis=-1), shape + (n,))
+        index = jnp.clip(jnp.ceil(jnp.broadcast_to(q, shape) * n) - 1, 0, n - 1).astype(jnp.int32)
+        return jnp.take_along_axis(ordered, index[..., None], axis=-1)[..., 0]
+
+
+def autoregressive_masks(n_events: int, hidden: int):
+    """MADE masks: column ``j`` of the output sees only columns before ``j`` of the input.
+
+    Hidden unit ``h`` has degree ``h mod (d - 1) + 1`` and sees inputs of
+    degree at most its own; output column ``j`` (degree ``j + 1``) sees hidden
+    units of lower degree. With one column there is nothing to condition on,
+    and both masks are zero.
+    """
+    d, hidden = int(n_events), int(hidden)
+    inputs = jnp.arange(1, d + 1)
+    units = jnp.arange(hidden) % max(d - 1, 1) + 1
+    mask_in = (units[:, None] >= inputs[None, :]) & (d > 1)
+    mask_out = inputs[:, None] > units[None, :]
+    return mask_in.astype(jnp.float32), mask_out.astype(jnp.float32)
+
+
+def autoregressive_context_width(n_events: int, hidden: int) -> int:
+    """Per-row context per block: a shift for every hidden unit and for every column's parameters."""
+    from ashlar.distributional import flow_parameter_count
+
+    return int(hidden) + int(n_events) * (flow_parameter_count() + 2)
+
+
+class AutoregressiveFlow(Distribution):
+    """A conditional masked autoregressive flow over ``d`` coordinates.
+
+    ``p(y | x) = Π_j p(y_j | y_<j, x)``. Each conditional pushes a standard
+    normal through ``y_j = μ_j + σ_j s_j(z_j)``, where ``s_j`` is a monotone
+    rational-quadratic spline (the ``flow`` head's spline) and ``μ_j``,
+    ``σ_j``, and the spline's knots come from a masked network (MADE) that
+    reads the columns before ``j`` and the row's context. So each column's
+    whole conditional shape, not only its location, can change with the
+    columns before it: curved, skewed, heteroscedastic, or tail dependence.
+    ``depth`` blocks stack, with the column order reversed in every other one.
+
+    ``context`` is ``batch_shape + (depth * autoregressive_context_width,)``,
+    one per row and member, from the trunk. The masked weights ``w_in``
+    ``(members, depth, hidden, d)`` and ``w_out`` ``(members, depth, d (S + 2),
+    hidden)`` are shared by every row and line up with the last batch axis,
+    the member axis of an estimator's mixture. Indexing a batch slices the
+    context only.
+
+    The density is exact and evaluated in one pass; a draw takes ``d`` passes,
+    one column at a time, and is reparameterized. Mean, variance, and
+    covariance are Monte Carlo estimates from ``MOMENT_DRAWS`` fixed draws, and
+    ``marginals()`` is an ``Empirical`` of those draws. With all parameters at
+    zero it is the standard normal.
+    """
+
+    context: jax.Array
+    w_in: jax.Array
+    w_out: jax.Array
+    n_events: int = field(static=True)
+    reparameterized: ClassVar[bool] = True
+    shared_parameters: ClassVar[bool] = True
+
+    def __init__(self, context, w_in, w_out, n_events: int):
+        context = jnp.asarray(context, dtype=jnp.float32)
+        w_in = jnp.asarray(w_in, dtype=jnp.float32)
+        w_out = jnp.asarray(w_out, dtype=jnp.float32)
+        d = int(n_events)
+        if w_in.ndim != 4 or w_in.shape[-1] != d:
+            raise ShapeError(f"w_in must be (members, depth, hidden, {d}); received {w_in.shape}.")
+        members, depth, hidden = w_in.shape[:3]
+        width = autoregressive_context_width(d, hidden)
+        if context.ndim < 1 or context.shape[-1] != depth * width or (context.ndim > 1 and context.shape[-2] != members):
+            raise ShapeError(
+                f"context must be (..., {members}, {depth * width}) for {members} members and {depth} blocks; "
+                f"received {context.shape}."
+            )
+        if w_out.shape != (members, depth, width - hidden, hidden):
+            raise ShapeError(f"w_out must be {(members, depth, width - hidden, hidden)}; received {w_out.shape}.")
+        self.context, self.w_in, self.w_out, self.n_events = context, w_in, w_out, d
+
+    @property
+    def batch_shape(self):
+        return self.context.shape[:-1]
+
+    @property
+    def event_shape(self):
+        return (self.n_events,)
+
+    @property
+    def depth(self) -> int:
+        return int(self.w_in.shape[1])
+
+    @property
+    def hidden(self) -> int:
+        return int(self.w_in.shape[2])
+
+    def _index(self, index):
+        return AutoregressiveFlow(self.context[index], self.w_in, self.w_out, self.n_events)
+
+    def _conditioner(self, block: int, context, inputs):
+        """Spline parameters, shift, and scale of every column in block order, from the columns before it."""
+        from ashlar.distributional import flow_parameter_count
+
+        d, hidden, spline = self.n_events, self.hidden, flow_parameter_count()
+        mask_in, mask_out = autoregressive_masks(d, hidden)
+        width = autoregressive_context_width(d, hidden)
+        part = context[..., block * width : (block + 1) * width]
+        w_in = self.w_in[:, block] * mask_in
+        w_out = self.w_out[:, block] * jnp.repeat(mask_out, spline + 2, axis=0)
+        units = jnp.tanh(jnp.einsum("...kd,khd->...kh", inputs, w_in) + part[..., :hidden])
+        out = jnp.einsum("...kh,koh->...ko", units, w_out) + part[..., hidden:]
+        out = out.reshape(out.shape[:-1] + (d, spline + 2))
+        scale = jax.nn.softplus(out[..., spline + 1] + _SOFTPLUS_ONE) + 1e-3
+        return out[..., :spline], out[..., spline], scale
+
+    def _aligned(self, value):
+        value = jnp.asarray(value, dtype=self.context.dtype)
+        batch = jnp.broadcast_shapes(value.shape[:-1], self.batch_shape)
+        context = jnp.broadcast_to(self.context, batch + self.context.shape[-1:])
+        return context, jnp.broadcast_to(value, batch + (self.n_events,))
+
+    def inverse(self, value):
+        """Map ``value`` to the base noise, with ``log|det dz/dy|``. One network pass per block."""
+        from ashlar.distributional import flow_inverse
+
+        context, value = self._aligned(value)
+        logdet = jnp.zeros(value.shape[:-1], dtype=value.dtype)
+        for block in reversed(range(self.depth)):
+            flip = block % 2 == 1
+            ordered = jnp.flip(value, axis=-1) if flip else value
+            splines, shift, scale = self._conditioner(block, context, ordered)
+            base, spline_logdet = flow_inverse(splines, (ordered - shift) / scale)
+            logdet = logdet + jnp.sum(spline_logdet - jnp.log(scale), axis=-1)
+            value = jnp.flip(base, axis=-1) if flip else base
+        return value, logdet
+
+    def forward(self, noise):
+        """Push standard-normal ``noise`` through the flow, one column at a time."""
+        from ashlar.distributional import flow_forward
+
+        context, value = self._aligned(noise)
+        for block in range(self.depth):
+            flip = block % 2 == 1
+            base = jnp.flip(value, axis=-1) if flip else value
+            ordered = jnp.zeros_like(base)
+            for column in range(self.n_events):
+                splines, shift, scale = self._conditioner(block, context, ordered)
+                step = shift[..., column] + scale[..., column] * flow_forward(splines[..., column, :], base[..., column])
+                ordered = ordered.at[..., column].set(step)
+            value = jnp.flip(ordered, axis=-1) if flip else ordered
+        return value
+
+    def log_prob(self, value):
+        base, logdet = self.inverse(value)
+        return jnp.sum(-0.5 * (math.log(2 * math.pi) + jnp.square(base)), axis=-1) + logdet
+
+    def sample(self, key, sample_shape=()):
+        shape = tuple(sample_shape) + self.batch_shape + self.event_shape
+        return self.forward(jax.random.normal(key, shape, dtype=self.context.dtype))
+
+    def _moments(self):
+        """Mean and covariance from ``MOMENT_DRAWS`` fixed draws, in chunks so memory stays flat."""
+        keys = jax.random.split(jax.random.PRNGKey(0), MOMENT_DRAWS // _MOMENT_CHUNK)
+        d = self.n_events
+        zero = (
+            jnp.zeros(self.batch_shape + (d,), dtype=self.context.dtype),
+            jnp.zeros(self.batch_shape + (d, d), dtype=self.context.dtype),
+        )
+
+        def step(totals, key):
+            draws = self.sample(key, (_MOMENT_CHUNK,))
+            first = totals[0] + jnp.sum(draws, axis=0)
+            second = totals[1] + jnp.einsum("n...i,n...j->...ij", draws, draws)
+            return (first, second), None
+
+        (first, second), _ = jax.lax.scan(step, zero, keys)
+        mean = first / MOMENT_DRAWS
+        covariance = second / MOMENT_DRAWS - mean[..., :, None] * mean[..., None, :]
+        return mean, covariance
+
+    def mean(self):
+        return self._moments()[0]
+
+    def covariance(self):
+        return self._moments()[1]
+
+    def variance(self):
+        return jnp.maximum(jnp.diagonal(self.covariance(), axis1=-2, axis2=-1), 0.0)
+
+    def marginals(self):
+        draws = self.sample(jax.random.PRNGKey(0), (MOMENT_DRAWS,))
+        return Empirical(jnp.moveaxis(draws, 0, -1))
+
+
+def joint_flow_distribution(raw, n_events: int) -> AutoregressiveFlow:
+    """The ``multivariate_flow`` head's distribution from its output ``(context, w_in, w_out)``."""
+    context, w_in, w_out = raw
+    return AutoregressiveFlow(context, w_in, w_out, n_events)
+
+
+_SOFTPLUS_ONE = math.log(math.expm1(1.0 - 1e-3))  # softplus(raw + this) + 1e-3 is 1 at raw = 0
 
 
 class LogNormal(Distribution):

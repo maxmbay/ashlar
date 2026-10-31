@@ -32,7 +32,7 @@ everything before it and scored on the 28 days after it; one fit per model
 and origin.
 
     JAX_PLATFORMS=cpu python examples/joint_demand.py            # fit and score
-    JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4 and TabM joint models
+    JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4, TabM, and flow joint models
     JAX_PLATFORMS=cpu python examples/joint_demand.py report     # tables
     JAX_PLATFORMS=cpu python examples/joint_demand.py figure     # docs/images/joint-demand.png
 """
@@ -69,7 +69,12 @@ DRAWS = 4000
 FIT = {"max_epochs": 60, "patience": 8, "split": "temporal", "validation_size": 0.15}
 METHODS = ("joint", "joint marginals, independent", "independent heads", "independent + static correlation")
 # Added after the first four had run, to ask whether a richer joint model closes the gap to the static correlation.
-EXTRA = {"joint, rank 4": {"head_kwargs": {"rank": 4}}, "joint, TabM": {"backbone": "tabm"}}
+# The flow came later still, with the multivariate_flow task.
+EXTRA = {
+    "joint, rank 4": {"head_kwargs": {"rank": 4}},
+    "joint, TabM": {"backbone": "tabm"},
+    "joint flow": {"task": "multivariate_flow"},
+}
 
 
 def load_matrix() -> np.ndarray:
@@ -142,7 +147,14 @@ def _crps(draws: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def _scores(name, dist, y, capacities, key) -> dict:
-    draws = np.asarray(dist.sample(key, (DRAWS,)), dtype=np.float64)  # (draws, rows, clients)
+    # (draws, rows, clients), 128 rows at a time so a flow's draws stay in memory.
+    draws = np.concatenate(
+        [
+            np.asarray(dist[start : start + 128].sample(jax.random.fold_in(key, start), (DRAWS,)), dtype=np.float64)
+            for start in range(0, y.shape[0], 128)
+        ],
+        axis=1,
+    )
     total = draws.sum(axis=-1)
     observed = y.sum(axis=-1)
     low, high = np.quantile(total, [0.1, 0.9], axis=0)
@@ -242,7 +254,7 @@ def run_extra() -> None:
             if name in record["methods"]:
                 continue
             model = ASRRegressor(
-                task="multivariate_gaussian", cyclical=cyclical, random_state=split, **{**FIT, **params}
+                **{"task": "multivariate_gaussian", "cyclical": cyclical, "random_state": split, **FIT, **params}
             ).fit(_rows(frame, train), loads[train])
             print(f"origin day {origin}", flush=True)
             record["methods"][name] = _scores(
