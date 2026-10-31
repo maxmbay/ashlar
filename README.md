@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, a Poisson or negative binomial for counts, a hurdle for targets that are often zero, or a joint distribution over several targets. Calibration makes its intervals hold the coverage they promise.
+Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, a Poisson or negative binomial for counts, a hurdle for targets that are often zero, or a joint distribution over several targets. Calibration makes its intervals hold the coverage they promise. A label can also say what was observed instead of an exact value, such as a sale capped by a sold-out shelf, a range, or only a weekly total. The model trains on the probability of what was observed, so it learns the demand, not the sales.
 
 It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
 
@@ -116,6 +116,8 @@ y = observed.censored(sales, sold_out)   # a sold-out day says demand >= sales
 model = ASRRegressor(task="negative_binomial").fit(X, y)
 model.predict_quantiles(X_new, [0.9])    # the 90% quantile of demand, not of sales
 ```
+
+![Sales against true demand at quiet, average, and busy stores, and the fits to sales, to censored sales, and to the true demand.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/sold-out-demand.png)
 
 On simulated store-days where a third of the days sell out, the censored negative binomial matches a model trained on the true demand, which no shop has: the same log-likelihood, and a 90% quantile that is above the true demand on 90.9% of days. The same head fitted to sales as if they were demand manages 79.5%, and LightGBM's quantile regression on sales 73.0%. Stocking each day's 75% quantile costs 1.1% more than stocking the true one, against 7.9% for the fit on sales. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#labels-that-say-what-was-observed) has the tables.
 

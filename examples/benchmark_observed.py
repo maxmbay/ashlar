@@ -45,6 +45,7 @@ days, and the 80% interval.
 
     JAX_PLATFORMS=cpu python examples/benchmark_observed.py           # both
     JAX_PLATFORMS=cpu python examples/benchmark_observed.py totals    # one
+    JAX_PLATFORMS=cpu python examples/benchmark_observed.py figure    # docs/images/sold-out-demand.png
 """
 
 from __future__ import annotations
@@ -280,10 +281,117 @@ def totals() -> None:
         print(f"| `{head}` | {fit} | " + " | ".join(cells) + " |")
 
 
+FIGURE_FITS = (
+    ("sales", "fit to sales"),
+    ("censored", "fit to censored sales"),
+    ("oracle", "fit to the true demand"),
+)
+
+
+def figure() -> None:
+    """``docs/images/sold-out-demand.png``: what the shop recorded, then three fits, under three conditions.
+
+    Seed 0, the negative binomial head, the same split as ``demand``. Each
+    panel averages the predicted mass over the held-out days of one
+    condition, over the true demand of those days.
+    """
+    import matplotlib.pyplot as plt
+
+    import figures as style
+
+    style._load_fonts()
+    seed = 0
+    frame, _mean, demand, sales, sold_out = store_days(seed)
+    train, test = np.arange(TRAIN), np.arange(TRAIN + CALIBRATE, ROWS)
+    labels = {
+        "sales": sales[train],
+        "censored": observed.censored(sales[train], sold_out[train]),
+        "oracle": demand[train],
+    }
+    models = {
+        key: ASRRegressor(task="negative_binomial", random_state=seed).fit(frame.iloc[train], labels[key])
+        for key, _title in FIGURE_FITS
+    }
+
+    # Thirds of the stores by their average demand in the training days.
+    store = frame["store"].astype(str).to_numpy()
+    average = pd.Series(demand[train]).groupby(store[train]).mean()
+    third = np.digitize(average.reindex(store).to_numpy(), average.quantile([1 / 3, 2 / 3]).to_numpy())
+    conditions = (("quiet stores", third == 0), ("average stores", third == 1), ("busy stores", third == 2))
+    share = float(np.mean(sold_out[test]))
+    print(f"held-out days sold out {share:.4f}", flush=True)
+
+    width, height = 16.4, 12.2
+    fig = plt.figure(figsize=(width, height), facecolor=style.WHITE)
+    fig.text(0.055, 0.982, "A sold-out day records the stock, not the demand.", fontproperties=style.TITLE,
+             color=style.INK, ha="left", va="top")
+    for offset, line in (
+        (0.947, f"Simulated daily demand at 50 stores, given the store, weekday, promotion, discount, and temperature. "
+                f"{share:.0%} of the days sold out."),
+        (0.918, "Each panel is the average predicted demand over the held-out days of that condition, with their demand "
+                "behind it. Only the last fit saw demand."),
+    ):
+        fig.text(0.055, offset, line, fontproperties=style.CLAIM, color=style.MUTED, ha="left", va="top")
+    fig.add_artist(plt.Line2D([0.055, 0.945], [0.893, 0.893], transform=fig.transFigure, color=style.HAIR,
+                              linewidth=1.05))
+
+    colors = {"sales": style.CLAY, "censored": style.TEAL, "oracle": style.MUTED}
+    rows = len(conditions)
+    for row, (label, mask) in enumerate(conditions):
+        rows_test = test[mask[test]]
+        x_group, truth, recorded = frame.iloc[rows_test], demand[rows_test], sales[rows_test]
+        top = int(np.ceil((np.quantile(truth, 0.995) + 2) / 10.0) * 10)
+        step = 1 if top <= 40 else 2
+        bins = np.arange(-0.5, top + step, step)
+        grid = np.arange(0, top + 1)
+        mass, cover = {}, {}
+        for key, _title in FIGURE_FITS:
+            dist = models[key].predict_dist(x_group)
+            mass[key] = np.asarray(
+                [np.mean(np.exp(np.asarray(dist.log_prob(np.full(len(truth), float(k)))))) for k in grid]
+            )
+            q90 = np.asarray(models[key].predict_quantiles(x_group, [0.9]))[:, 0]
+            cover[key] = float(np.mean(truth <= q90))
+        heights = np.histogram(truth, bins=bins, density=True)[0]
+        ceiling = 1.18 * max(heights.max(), max(values.max() for values in mass.values()))
+        print(f"{label} days {len(truth)} sold_out {np.mean(sold_out[rows_test]):.4f} "
+              + " ".join(f"{key}_q90 {value:.4f}" for key, value in cover.items()), flush=True)
+
+        panels = [("recorded", "sales (line), true demand (bars)")] + list(FIGURE_FITS)
+        for column, (key, title) in enumerate(panels):
+            ax = fig.add_axes([0.055 + column * 0.228, 0.075 + (rows - 1 - row) * 0.268, 0.195, 0.195])
+            style._style_plot(ax)
+            ax.hist(truth, bins=bins, density=True, color=style.HAIR, edgecolor=style.WHITE, linewidth=0.6, zorder=1)
+            if key == "recorded":
+                ax.hist(recorded, bins=bins, density=True, histtype="step", color=style.INK, linewidth=1.6, zorder=3)
+                note, tone = f"sold out on {np.mean(sold_out[rows_test]):.0%} of days", style.MUTED
+            else:
+                lit = key == "censored"
+                ax.plot(grid, mass[key], color=colors[key], linewidth=2.3 if lit else 1.8, zorder=3)
+                note = f"90% quantile covers {cover[key]:.0%}"
+                tone = style.TEAL if lit else (style.CLAY if key == "sales" else style.MUTED)
+            ax.set_xlim(-0.5, top)
+            ax.set_ylim(0, ceiling)
+            ax.set_yticks([])
+            ax.set_xticks(np.linspace(0, top, 5 if top % 4 == 0 else 3).round().astype(int))
+            style._ticks(ax)
+            if row == 0:
+                ax.text(0.0, 1.1, title, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                        ha="left", va="bottom")
+            if column == 0:
+                ax.text(-0.085, 0.5, label, transform=ax.transAxes, fontproperties=style.AXIS, color=style.INK,
+                        ha="center", va="center", rotation=90)
+            if row == rows - 1:
+                ax.set_xlabel("units a day", fontproperties=style.AXIS, color=style.INK, labelpad=9)
+            ax.text(0.98, 0.93, note, transform=ax.transAxes, fontproperties=style.TICK, color=tone, ha="right",
+                    va="top")
+    style._save(fig, "sold-out-demand.png")
+
+
 def main() -> None:
     chosen = sys.argv[1:] or ["demand", "totals"]
     for name in chosen:
-        {"demand": demand, "totals": totals}[name]()
+        {"demand": demand, "totals": totals, "figure": figure}[name]()
 
 
 if __name__ == "__main__":

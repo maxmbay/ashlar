@@ -32,6 +32,10 @@ From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py): simu
 
 The censored fit learns from sales what the oracle learns from the true demand: the same likelihood, the same coverage, and an order that costs as little. The fit on sales learns demand that is too low, so its 90% quantile is above the true demand on only 80% of days. Dropping the sold-out days is worse, because the days that remain are the slow ones. Calibration cannot rescue either, because the calibration days are censored too: the fit on sales, calibrated on sales, holds 70% of true demand in an interval that promises 80%. The order cost is what it costs to stock each day's 75% quantile when a lost sale costs three times a leftover unit, in percent above stocking the true quantile. A count's interval holds a little more than it promises, because it includes both end counts.
 
+![Sales against true demand at quiet, average, and busy stores, and the fits to sales, to censored sales, and to the true demand.](images/sold-out-demand.png)
+
+The figure is one seed of the same experiment, split into thirds of the stores by their average demand. The fit to sales puts its mass too low and its tail too short in every third, and its 90% quantile covers 77% to 81% of days. The censored fit and the fit to the true demand cover 88% to 94%; a count's 90% quantile covers at least 90% of its own distribution, and more at small counts. `python examples/benchmark_observed.py figure` draws it.
+
 ## Every kind of label
 
 | Builder | What it says about `Y` | Likelihood of a row |

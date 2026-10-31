@@ -10,7 +10,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - `calibrate` takes interval and censored rows, drawing each row's PIT uniformly over what its label allows.
 - Group totals train each group whole inside one minibatch and keep it on one side of an internal validation split. A split that cuts a group raises.
 - `Distribution.log_cdf`, `log_survival`, `log_cdf_left`, `log_survival_left`, `log_interval`, and `cdf_interval` on every univariate distribution, computed in log space so they stay finite far into the tails, and `convolve_normal` on the normal, mixture, and affine distributions.
-- `examples/benchmark_observed.py`: demand fitted from sales when a third of days sell out, and daily values fitted from weekly totals, each against the usual fits and an oracle. Its results are in [docs/benchmarks.md](docs/benchmarks.md#labels-that-say-what-was-observed).
+- `examples/benchmark_observed.py`: demand fitted from sales when a third of days sell out, and daily values fitted from weekly totals, each against the usual fits and an oracle. Its `figure` stage draws the README figure `docs/images/sold-out-demand.png`. Its results are in [docs/benchmarks.md](docs/benchmarks.md#labels-that-say-what-was-observed).
 
 ### Fixed
 
