@@ -600,6 +600,25 @@ In the 2% to 10% band the mean prediction is 5.1% to 5.3% for every model, befor
 - **It does not fix coverage by hour of day.** After calibration the joint normal still covers its total in 73.9% to 87.3% of the hours at each hour of the day, with 8 of the 24 hours outside 75% to 85%, and TabM 13, because one table pools every hour.
 - **The normal-based heads calibrate in 0.2 to 2.4 seconds per origin**, since the sum's PIT is exact for them. The flow reads every column and the sum from 4,000 joint draws per calibration hour: 115 seconds.
 
+### Training on other proper scores
+
+Does a training score that judges the eight loads as one outcome, rather than each load given the ones before it, get the total right without calibration? From `examples/joint_demand.py scored`, on the same 25 origins, splits, capacities, and draws as the calibration above: the rank-2 `joint` normal and `multivariate_flow`, each trained on the energy score alone (`objective="energy"`) and added to the log density (`objective={"nll": 1.0, "energy": 1.0}`), and the flow on the log density plus the variogram score (`{"nll": 1.0, "variogram": 1.0}`), each then calibrated as above. The log-density rows are the fits of the calibration table, and every model trains on 15% fewer hours than in the first tables, so its joint NLL is higher than theirs. Mean over the 25 origins (± standard error), before → after calibration. It ran on the same Mac, three origins at a time.
+
+| Model | Trained on | Joint NLL ↓ | CRPS of the total, kW ↓ | Total inside its 80% interval | Width of that interval, kW | Brier, total > 80th percentile ↓ |
+|---|---|---:|---:|---:|---:|---:|
+| `joint` | log density | 67.76 ± 0.33 | **2,995 ± 118** | 80.5% → 79.5% | 13,465 → 12,975 | 0.0487 → 0.0473 |
+| `joint` | energy | 69.49 ± 0.46 | 3,067 ± 129 | 70.8% → 79.6% | 11,078 → 13,435 | 0.0483 → 0.0483 |
+| `joint` | log density + energy | 67.93 ± 0.37 | 3,163 ± 152 | 79.0% → 78.6% | 13,670 → 13,469 | 0.0518 → 0.0489 |
+| `multivariate_flow` | log density | 67.34 ± 0.40 | 3,065 ± 141 | 74.8% → 80.4% | 11,862 → 13,759 | 0.0480 → **0.0466** |
+| `multivariate_flow` | energy | 70.80 ± 0.61 | 3,258 ± 155 | 64.7% → 79.1% | 9,852 → 13,853 | 0.0530 → 0.0498 |
+| `multivariate_flow` | log density + energy | **67.24 ± 0.41** | 3,120 ± 149 | 72.9% → 79.8% | 11,529 → 14,002 | 0.0500 → 0.0468 |
+| `multivariate_flow` | log density + variogram | 67.65 ± 0.44 | 3,084 ± 128 | 73.6% → 79.4% | 11,792 → 13,950 | 0.0494 → 0.0474 |
+
+- **The energy score alone makes the total worse.** Both models give the total a narrower interval than on the log density, and it holds fewer hours: 70.8% for the joint normal and 64.7% for the flow. Where the joint normal trained on it says P(total > capacity) is 2% to 10% (5.5% on average), the event happened 11.2% of the time, against 8.1% trained on the log density, and before calibration the flow's coverage by hour of day falls to between 50.6% and 77.9%, from between 61.1% and 87.1%. It also costs 1.7 nats of joint NLL for the normal and 3.5 for the flow, and the flow trained on it beats the log-density flow on joint NLL at none of the 25 origins. The energy score is far more sensitive to each column's own distribution than to how the columns move together (Pinson and Tastu, 2013; Scheuerer and Hamill, 2015), so it gives the dependence behind the total little to learn from; the models it trains come out sharper, and the 28 days ahead, which are not the weeks they trained on, punish that.
+- **Added to the log density, the scores tie it.** The flow on the log density plus the energy score has the best joint NLL, 67.24 against 67.34, but beats the log-density flow at only 14 of 25 origins, and at 9 on the total's CRPS and 8 on the Brier score before calibration. Before calibration its total holds 72.9%, no closer to 80% than the log-density flow's 74.8%. The variogram score beats the log-density flow at 7, 11, and 8 of 25 origins on the three scores. On the joint normal, adding the energy score changes coverage by 1.5 points and loses on the total's CRPS (3,163 against 2,995).
+- **Calibration does what the training scores do not.** After `calibrate`, every model's total is inside its 80% interval in 78.6% to 80.4% of hours, whatever it trained on, and the best Brier score after calibration is still the flow trained on its log density (0.0466), tied with the blend (0.0468).
+- **The scores make the flow slow to train**: its fits take 71 to 83 seconds per origin, against 14 seconds on the log density, since every step draws 16 samples per row and a draw takes one pass per column. The joint normal's take 14 seconds against 12.
+
 ## Member uncertainty
 
 From the same script, stage `uncertainty`. The model is `tabm_piecewise(task="gaussian")`, a TabM backbone with 32 members, and `predict_uncertainty(X_test, n_samples=200)`. Two tests per table:

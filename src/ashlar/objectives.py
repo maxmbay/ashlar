@@ -10,8 +10,9 @@ from __future__ import annotations
 import math
 
 import jax.numpy as jnp
+import numpy as np
 
-from ashlar.errors import ShapeError
+from ashlar.errors import AshlarError, ShapeError
 from ashlar.predict import mean_logits, mean_probabilities, positive_scale
 from ashlar.weights import weighted_mean
 
@@ -331,6 +332,182 @@ def joint_member_distribution(family: str, raw, n_events: int, components: int |
     if family == "mixture":
         return joint_mixture_distribution(raw, n_events, MIXTURE_COMPONENTS if components is None else int(components))
     return joint_normal_distribution(raw, n_events)
+
+
+# The proper scores a joint head trains on, alone or blended: its log density, and two read from draws.
+SCORES = ("nll", "energy", "variogram")
+# Reparameterized draws per row and member when a score is estimated from draws; a mixture splits them over its components.
+SCORE_DRAWS = 16
+# The variogram score's order. Scheuerer and Hamill (2015) found 0.5 the most sensitive to a wrong correlation.
+VARIOGRAM_ORDER = 0.5
+# Under the root of a squared distance, so a gradient stays finite where two values meet.
+_DISTANCE_FLOOR = 1e-12
+# Under the variogram's |a|^order, the same for its difference of two columns, on the standardized scale.
+_VARIOGRAM_FLOOR = 1e-6
+
+
+def score_weights(objective) -> dict | None:
+    """``{score: weight}`` of an objective given by name or as a blend; ``None`` for a callable.
+
+    ``None`` is the log density alone, ``{"nll": 1.0}``. A name from
+    ``SCORES`` is that score alone, and a dict blends them with non-negative
+    weights. The variogram score compares only differences between columns,
+    so it is proper but not strictly proper, and it trains only in a blend
+    with ``nll`` or ``energy``.
+    """
+    if objective is None:
+        return {"nll": 1.0}
+    if callable(objective):
+        return None
+    if isinstance(objective, str):
+        weights = {objective: 1.0}
+    elif isinstance(objective, dict):
+        weights = dict(objective)
+    else:
+        raise AshlarError(
+            f"objective is a callable, a score name ({', '.join(SCORES)}), or a blend {{name: weight}}; received {objective!r}."
+        )
+    unknown = sorted(str(name) for name in weights if name not in SCORES)
+    if unknown:
+        raise AshlarError(f"objective scores are {', '.join(SCORES)}; received {', '.join(unknown)}.")
+    try:
+        weights = {name: float(value) for name, value in weights.items()}
+    except (TypeError, ValueError) as exc:
+        raise AshlarError(f"each score's weight is a number; received {objective!r}.") from exc
+    if any(not math.isfinite(value) or value < 0.0 for value in weights.values()) or not any(weights.values()):
+        raise AshlarError(f"score weights must be finite and non-negative, and one must be positive; received {objective!r}.")
+    weights = {name: value for name, value in weights.items() if value > 0.0}
+    if "variogram" in weights and not ({"nll", "energy"} & set(weights)):
+        raise AshlarError(
+            "the variogram score compares only differences between columns, so it cannot place them on its own: "
+            "a shift of every column leaves it unchanged. Blend it with 'nll' or 'energy', "
+            "such as {'energy': 1.0, 'variogram': 1.0}."
+        )
+    return weights
+
+
+def _distance(a, b):
+    """Euclidean distance over the last axis, with a floor under the root so its gradient stays finite."""
+    return jnp.sqrt(jnp.sum(jnp.square(a - b), axis=-1) + _DISTANCE_FLOOR)
+
+
+def score_draws(dist, key, draws: int = SCORE_DRAWS):
+    """Reparameterized draws for a score, grouped by mixture component, and each component's probability.
+
+    Returns ``points`` of shape ``(components, n) + batch_shape + event_shape``
+    and ``probabilities`` of shape ``batch_shape + (components,)``. A
+    ``Mixture`` is drawn from every component, ``n = max(2, ceil(draws /
+    components))`` each, rather than through its discrete choice, so a score's
+    gradient reaches the component probabilities. Any other distribution is
+    one component with ``n = draws``.
+    """
+    from ashlar.distributions import Mixture
+
+    if isinstance(dist, Mixture):
+        count = int(dist.logits.shape[-1])
+        each = max(2, -(-int(draws) // count))
+        points = dist.components.sample(key, (each,))
+        axis = 1 + len(dist.batch_shape)
+        return jnp.moveaxis(points, axis, 0), jnp.exp(dist.logits)
+    points = dist.sample(key, (max(2, int(draws)),))
+    return points[None], jnp.ones(tuple(dist.batch_shape) + (1,), dtype=points.dtype)
+
+
+def energy_score(points, probabilities, y):
+    """Unbiased estimate of the energy score ``E‖X − y‖ − ½ E‖X − X′‖``, shape ``batch``.
+
+    ``points`` and ``probabilities`` come from ``score_draws``; ``y``
+    broadcasts against ``batch + (d,)``. The first term averages each
+    component's distance to ``y`` and weights the components. The second
+    averages every pair of draws from two components, and only pairs of
+    distinct draws within one, so ``E‖X − X′‖`` is estimated without bias
+    (Gneiting and Raftery, 2007). Strictly proper; with one column it is
+    the CRPS.
+    """
+    count, n = int(points.shape[0]), int(points.shape[1])
+    if n < 2:
+        raise ShapeError("an unbiased energy score needs at least two draws per component.")
+    weight = jnp.moveaxis(probabilities, -1, 0)
+    first = jnp.sum(weight * jnp.mean(_distance(points, y), axis=1), axis=0)
+    flat = points.reshape((count * n,) + tuple(points.shape[2:]))
+    left, right = np.triu_indices(count * n, k=1)
+    same = (left // n) == (right // n)
+    scale = np.where(same, 2.0 / (n * (n - 1)), 2.0 / (n * n)).astype(np.float32)
+    pair = weight[left // n] * weight[right // n] * scale.reshape((-1,) + (1,) * (weight.ndim - 1))
+    second = jnp.sum(pair * _distance(flat[left], flat[right]), axis=0)
+    return first - 0.5 * second
+
+
+def variogram_score(points, probabilities, y, order: float = VARIOGRAM_ORDER):
+    """Unbiased estimate of the variogram score of ``order``, averaged over pairs of columns, shape ``batch``.
+
+    ``mean over i < j of (γ(y_i − y_j) − E γ(X_i − X_j))²``, with
+    ``γ(a) = (a² + ε)^(order / 2)``, ``|a|^order`` with a small ``ε`` so the
+    gradient stays finite (Scheuerer and Hamill, 2015). The expectation is
+    the component-weighted mean of the draws; the variance that mean's
+    error adds to the square is subtracted, so the estimate has no bias.
+    It is proper for any ``γ``, but blind to a shift of every column, so
+    ``score_weights`` blends it with a strictly proper score.
+    """
+    d = int(points.shape[-1])
+    left, right = np.triu_indices(d, k=1)
+    batch = jnp.broadcast_shapes(tuple(points.shape[2:-1]), tuple(jnp.shape(y))[:-1])
+    if left.size == 0:
+        return jnp.zeros(batch, dtype=points.dtype)
+
+    def gamma(values):
+        return jnp.power(jnp.square(values[..., left] - values[..., right]) + _VARIOGRAM_FLOOR, 0.5 * float(order))
+
+    n = int(points.shape[1])
+    drawn = gamma(points)
+    weight = jnp.moveaxis(probabilities, -1, 0)[..., None]
+    expected = jnp.sum(weight * jnp.mean(drawn, axis=1), axis=0)
+    noise = jnp.sum(jnp.square(weight) * jnp.var(drawn, axis=1, ddof=1), axis=0) / n
+    return jnp.mean(jnp.square(gamma(jnp.asarray(y, dtype=points.dtype)) - expected) - noise, axis=-1)
+
+
+def make_joint_score_objective(
+    n_events: int,
+    family: str = "normal",
+    weights: dict | None = None,
+    *,
+    components: int | None = None,
+    draws: int = SCORE_DRAWS,
+):
+    """A blend of proper scores of a joint head: mean over members, weighted over rows.
+
+    ``weights`` maps ``nll``, ``energy``, and ``variogram`` (see
+    ``score_weights``) to their weights, on the standardized ``(batch,
+    event)`` target, so each column counts the same whatever its units. The
+    energy and variogram scores are estimated without bias from ``draws``
+    fresh reparameterized draws of every member's distribution on every
+    call, so the gradient is unbiased too. Such an objective takes ``key``
+    and is marked ``stochastic``, which tells the training loop to pass one.
+    """
+    weights = dict(score_weights(None) if weights is None else weights)
+    sampled = bool(weights.get("energy") or weights.get("variogram"))
+
+    def objective(raw, y, sample_weight, key=None):
+        context = raw[0] if family == "flow" else raw
+        if context.ndim != 3:
+            raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
+        target = _target_events(y, int(n_events))[:, None, :]
+        dist = joint_member_distribution(family, raw, int(n_events), components)
+        losses = 0.0
+        if weights.get("nll"):
+            losses = losses - weights["nll"] * dist.log_prob(target)
+        if sampled:
+            if key is None:
+                raise AshlarError("the energy and variogram scores are read from draws and need a key.")
+            points, probabilities = score_draws(dist, key, draws)
+            if weights.get("energy"):
+                losses = losses + weights["energy"] * energy_score(points, probabilities, target)
+            if weights.get("variogram"):
+                losses = losses + weights["variogram"] * variogram_score(points, probabilities, target)
+        return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
+
+    objective.stochastic = sampled
+    return objective
 
 
 # Quasi-random points per row when a joint head trains on coarse cells.
