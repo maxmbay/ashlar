@@ -255,7 +255,8 @@ def stage_localize(results):
         x, y = loader()
         rows = out.setdefault(name, {"rows": int(len(y)), "shift_column": shift_column, "runs": {}})
         for seed in SEEDS:
-            if str(seed) in rows["runs"]:
+            # A run saved before coverage was kept per bin of disagreement runs again.
+            if "in_range_bins" in rows["runs"].get(str(seed), {}):
                 continue
             # Train and calibrate below the column's 80th percentile; test inside and above it.
             column = x[shift_column].to_numpy(np.float64)
@@ -265,16 +266,23 @@ def stage_localize(results):
             x_out, y_out = x[~inside].reset_index(drop=True), y[~inside]
             started = time.perf_counter()
             model = tabm_piecewise(task="gaussian", random_state=seed).fit(x_fit, y_fit)
-            run = {}
+            run, intervals = {}, {}
+            held_out = (("in_range", x_in, y_in), ("above_range", x_out, y_out))
             for label, calibrate in (("raw", None), ("pooled", {}), ("members", {"localize": "members"})):
                 if calibrate is not None:
                     model.calibrate(x_cal, y_cal, n_samples=N_DRAWS, seed=seed, **calibrate)
-                for where, xs, ys in (("in_range", x_in, y_in), ("above_range", x_out, y_out)):
+                for where, xs, ys in held_out:
                     interval = model.predict_interval(xs, 0.8, n_samples=N_DRAWS, seed=seed, calibrated=calibrate is not None)
+                    intervals[label, where] = interval
                     run[f"{label}_{where}"] = _interval(interval[:, 0], interval[:, 1], ys)
             run["edges"] = model.calibration_["by"]["members"]
-            bins = model._row_groups(x_out, model.calibration_, None)
-            run["above_range_bins"] = {str(k): int(v) for k, v in zip(*np.unique(bins, return_counts=True))}
+            # Each held-out row's bin of member disagreement, "0" the lowest, and every calibration's coverage per bin.
+            for where, xs, ys in held_out:
+                bins = model._row_groups(xs, model.calibration_, None)
+                run[f"{where}_bins"] = {str(k): int(v) for k, v in zip(*np.unique(bins, return_counts=True))}
+                for label in ("raw", "pooled", "members"):
+                    interval = intervals[label, where]
+                    run[f"{label}_{where}_by_bin"] = _by_group(interval[:, 0], interval[:, 1], ys, bins)
             run["seconds"] = time.perf_counter() - started
             rows["runs"][str(seed)] = run
             print(name, seed, {k: round(v["coverage"], 3) for k, v in run.items() if isinstance(v, dict) and "coverage" in v}, flush=True)
@@ -474,6 +482,21 @@ def report_groups():
             for where in ("in_range", "above_range"):
                 cells += [_mean_sd([r[f"{label}_{where}"]["coverage"] for r in runs], 3), _mean_sd([r[f"{label}_{where}"]["width"] for r in runs], 3)]
             print(f"| {label} | " + " | ".join(cells) + " |")
+        print()
+        if not all("in_range_bins" in r for r in runs):
+            continue
+        # Coverage within each bin of member disagreement ("0" the lowest), over the runs where it has 50 rows.
+        bins = sorted({key for r in runs for where in ("in_range", "above_range") for key in r[f"{where}_bins"]}, key=int)
+        print("| Calibration | Rows | " + " | ".join(f"Bin {key}" for key in bins) + " |\n|---|---|" + "---:|" * len(bins))
+        for where in ("in_range", "above_range"):
+            shares = [np.mean([r[f"{where}_bins"].get(key, 0) / sum(r[f"{where}_bins"].values()) for r in runs]) for key in bins]
+            print(f"| share of rows | {where} | " + " | ".join(f"{share:.0%}" for share in shares) + " |")
+            for label in ("raw", "pooled", "members"):
+                cells = []
+                for key in bins:
+                    have = [r[f"{label}_{where}_by_bin"][key]["coverage"] for r in runs if key in r[f"{label}_{where}_by_bin"]]
+                    cells.append(_mean_sd(have, 3) if have else "—")
+                print(f"| {label} | {where} | " + " | ".join(cells) + " |")
         print()
 
 
