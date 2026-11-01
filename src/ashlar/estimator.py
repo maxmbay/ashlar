@@ -2225,6 +2225,21 @@ class ASRModel(BaseEstimator):
             lambda part, calibration, _rows: self._calibrated_quantiles(part, levels, n_samples, seed, calibration, target),
         )
 
+    def predict_order(self, X, under: float, over: float, **kwargs):
+        """The cost-optimal order per row when a unit short costs ``under`` and a unit over costs ``over``.
+
+        The ``under / (under + over)`` quantile (the newsvendor's critical
+        ratio), from ``predict_quantiles``, which takes the other keyword
+        arguments. After ``calibrate`` it is the calibrated quantile, so the
+        share of new rows whose outcome it covers holds at the critical
+        ratio: a cost-optimal order with a service level that holds.
+        ``ashlar.decide`` has the costs, tail risks, and the objective that
+        trains through them.
+        """
+        from ashlar.decide import critical_ratio
+
+        return self.predict_quantiles(X, [critical_ratio(under, over)], **kwargs)[..., 0]
+
     def _calibrated_quantiles(self, X, levels, n_samples: int, seed: int, calibration, target):
         if self.task in JOINT_TASKS:
             spec, tables = self._joint_tables(target, calibration)

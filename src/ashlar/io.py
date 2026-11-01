@@ -23,6 +23,11 @@ def dump_ref(obj):
         return {str(key): dump_ref(value) for key, value in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [dump_ref(value) for value in obj]
+    config = getattr(obj, "ashlar_config", None)
+    if callable(config) and not isinstance(obj, type):
+        # A configured callable object, such as ashlar.decide's objectives: rebuilt from its class and settings.
+        kind = type(obj)
+        return {"__callable__": f"{kind.__module__}:{kind.__qualname__}", "__kwargs__": dump_ref(config())}
     module = getattr(obj, "__module__", None)
     qualname = getattr(obj, "__qualname__", None)
     if not module or not qualname or module == "__main__":
@@ -34,11 +39,13 @@ def dump_ref(obj):
 
 
 def load_ref(value):
-    if isinstance(value, dict) and set(value) == {"__callable__"}:
+    if isinstance(value, dict) and set(value) in ({"__callable__"}, {"__callable__", "__kwargs__"}):
         module_name, qualname = value["__callable__"].split(":", 1)
         current = importlib.import_module(module_name)
         for part in qualname.split("."):
             current = getattr(current, part)
+        if "__kwargs__" in value:
+            return current(**load_ref(value["__kwargs__"]))
         return current
     if isinstance(value, dict):
         return {key: load_ref(item) for key, item in value.items()}
