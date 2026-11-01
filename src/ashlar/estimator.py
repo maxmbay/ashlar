@@ -76,10 +76,16 @@ from ashlar.calibrate import (
     check_coverage,
     cqr_calibration,
     cqr_margin,
+    draw_interval,
+    draw_quantiles,
     interval_levels,
+    joint_calibration,
+    joint_targets,
     pit_calibration,
     pit_values,
+    recalibrated_cdf,
     recalibrated_levels,
+    target_spec,
 )
 from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
 from ashlar import observed
@@ -298,6 +304,62 @@ def _jit_observed_pit():
 
         _OBSERVED_PIT = eqx.filter_jit(observed.randomized_pit)
     return _OBSERVED_PIT
+
+
+_CDF = None
+
+
+def _jit_cdf():
+    global _CDF
+    if _CDF is None:
+        import equinox as eqx
+
+        _CDF = eqx.filter_jit(lambda dist, value: dist.cdf(value))
+    return _CDF
+
+
+def _chunks(dist, size: int):
+    """``(start, dist[start : start + size])`` over the rows of ``dist``."""
+    rows = int(dist.batch_shape[0])
+    for start in range(0, rows, int(size)):
+        yield start, dist[start : start + int(size)]
+
+
+def _projected(dist, spec):
+    """The exact distribution of a weighted-sum target, or ``None`` when it has to be read from draws."""
+    if "weights" not in spec:
+        return None
+    try:
+        return dist.project(jnp.asarray(spec["weights"], dtype=jnp.float32))
+    except NotImplementedError:
+        return None
+
+
+def _target_values(spec, values) -> np.ndarray:
+    """A joint target of ``values`` shaped ``(..., columns)``: shape ``(...)``."""
+    values = np.asarray(values, dtype=np.float64)
+    if "weights" in spec:
+        return values @ np.asarray(spec["weights"], dtype=np.float64)
+    result = np.asarray(spec["function"](values), dtype=np.float64)
+    if result.shape != values.shape[:-1]:
+        raise ShapeError(
+            f"a target function maps (..., columns) to (...), reducing the last axis; "
+            f"from shape {values.shape} it returned {result.shape}."
+        )
+    if not np.isfinite(result).all():
+        raise AshlarError("the target function returned a value that is not finite.")
+    return result
+
+
+def _thresholds(threshold, shape) -> np.ndarray:
+    values = np.asarray(threshold, dtype=np.float64)
+    try:
+        values = np.broadcast_to(values, shape)
+    except ValueError as exc:
+        raise ShapeError(f"threshold must be one number or broadcast to {shape}; received shape {values.shape}.") from exc
+    if np.isnan(values).any():
+        raise AshlarError("threshold must not be NaN.")
+    return values
 
 
 class ASRModel(BaseEstimator):
@@ -851,6 +913,7 @@ class ASRModel(BaseEstimator):
             raise AshlarError("the hurdle head models an exact zero or a positive amount: y must be non-negative.")
         y_train_model = self._fit_target_scale(y_train_model)
         self.calibration_ = None
+        self._calibration_functions = {}
         categorical = list(self._categorical_names(names, columns))
         encoder = FeatureEncoder.fit(
             train_frame,
@@ -1808,11 +1871,7 @@ class ASRModel(BaseEstimator):
 
         A flow's blocks are smaller, because every draw carries its member's spline parameters.
         """
-        dist = self.predict_dist(X)
-        rows = int(dist.batch_shape[0])
-        size = _FLOW_CHUNK_ROWS if self.task == "multivariate_flow" else 4096
-        for start in range(0, rows, size):
-            yield start, dist[start : start + size]
+        yield from _chunks(self.predict_dist(X), self._chunk_rows())
 
     def sample(self, X, n: int = 100, seed: int = 0):
         """``n`` draws per row from ``predict_dist(X)``, shape ``(n, rows)``, in the units of ``y``.
@@ -1994,7 +2053,13 @@ class ASRModel(BaseEstimator):
         return np.concatenate(pieces, axis=0)
 
     def predict_quantiles(
-        self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None
+        self,
+        X,
+        levels=QUANTILE_LEVELS,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
     ):
         """Quantiles per row, shape ``(rows, len(levels))``, in the units of ``y``.
 
@@ -2007,6 +2072,13 @@ class ASRModel(BaseEstimator):
         quantile head has its three trained levels, 0.1, 0.5, and 0.9,
         averaged across members, and no others.
 
+        A joint head gives each column's quantiles, ``(rows, columns,
+        len(levels))``. With ``target`` it gives the quantiles of one function
+        of the columns instead, ``(rows, len(levels))``: ``"sum"``, a weight
+        per column, or a named function of the last axis (see
+        ``calibrate``). A weighted sum is exact under the normal-based joint
+        heads; anything else is read from ``n_samples`` joint draws.
+
         After ``calibrate``, each level is first mapped to the nominal level
         that held that fraction of the calibration rows, and the quantile
         head's outer levels move out (or in) by the conformal margin at 80%.
@@ -2015,6 +2087,14 @@ class ASRModel(BaseEstimator):
         """
         self._univariate_dist("predict_quantiles")
         levels = tuple(float(level) for level in np.atleast_1d(levels))
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibrated)
+            if tables is None:
+                if spec is None:
+                    return self._quantiles(X, levels, n_samples, seed)
+                return self._joint_quantiles(X, spec, [levels], n_samples, seed)
+            return self._joint_quantiles(X, spec, [recalibrated_levels(table, levels) for table in tables], n_samples, seed)
+        self._no_target(target)
         calibration = self._calibration(calibrated)
         mean, std = self._target_affine()
         if self.task == "quantile":
@@ -2029,7 +2109,15 @@ class ASRModel(BaseEstimator):
             levels = recalibrated_levels(calibration, levels)
         return self._quantiles(X, levels, n_samples, seed)
 
-    def predict_interval(self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None):
+    def predict_interval(
+        self,
+        X,
+        coverage: float = 0.8,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
+    ):
         """Central interval per row, shape ``(rows, 2)``, in the units of ``y``.
 
         Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
@@ -2037,9 +2125,23 @@ class ASRModel(BaseEstimator):
         split-conformal interval: on rows exchangeable with the calibration
         rows it holds at least ``coverage`` of them. The quantile head gives
         only its 80% interval, calibrated or not.
+
+        A joint head gives each column's interval, ``(rows, columns, 2)``, or
+        with ``target`` the interval of that function of the columns, such as
+        ``target="sum"`` for the total, ``(rows, 2)``. See ``calibrate``.
         """
         self._univariate_dist("predict_interval")
         coverage = check_coverage(coverage)
+        nominal = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibrated)
+            if tables is None:
+                if spec is None:
+                    return self._quantiles(X, nominal, n_samples, seed)
+                return self._joint_quantiles(X, spec, [nominal], n_samples, seed, interval=True)
+            levels = [interval_levels(table, coverage) for table in tables]
+            return self._joint_quantiles(X, spec, levels, n_samples, seed, interval=True)
+        self._no_target(target)
         calibration = self._calibration(calibrated)
         if self.task == "quantile":
             outer = QUANTILE_LEVELS[2] - QUANTILE_LEVELS[0]
@@ -2048,26 +2150,92 @@ class ASRModel(BaseEstimator):
             values = self.predict_quantiles(X, calibrated=calibration is not None)
             return values[:, [0, 2]]
         if calibration is None:
-            levels = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
+            levels = nominal
         else:
             levels = interval_levels(calibration, coverage)
         return self._quantiles(X, levels, n_samples, seed)
 
-    def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0):
+    def predict_exceedance(
+        self, X, threshold, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None, target=None
+    ):
+        """``P(y > threshold)`` per row, shape ``(rows,)``.
+
+        ``threshold`` is one number or one per row. It is ``1 - cdf(threshold)``
+        of ``predict_dist(X)``. After ``calibrate`` the model's own
+        ``cdf(threshold)`` is replaced by the share of calibration rows whose
+        PIT was at most that much (``ashlar.calibrate.recalibrated_cdf``), so
+        an overconfident model's small probabilities move up and its large
+        ones down.
+
+        A joint head gives each column's probability, ``(rows, columns)``, with
+        a threshold per column or one for all, or with ``target`` the
+        probability that a function of the columns exceeds it, such as
+        ``target="sum"`` for P(total > capacity), ``(rows,)``. A weighted sum
+        is exact under the normal-based joint heads; anything else, and every
+        column of a flow, is read from ``n_samples`` joint draws.
+        """
+        self._univariate_dist("predict_exceedance")
+        if self.task == "quantile":
+            raise AshlarError("the quantile head has three levels, not a CDF, so it has no exceedance probability.")
+        dist = self.predict_dist(X)
+        rows = int(dist.batch_shape[0])
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibrated)
+            shape = (rows, int(self.n_events_)) if spec is None else (rows,)
+            below = self._joint_cdf(dist, spec, _thresholds(threshold, shape), n_samples, seed)
+            if tables is not None:
+                if spec is None:
+                    below = np.stack([recalibrated_cdf(table, below[:, index]) for index, table in enumerate(tables)], axis=1)
+                else:
+                    below = recalibrated_cdf(tables[0], below)
+            return 1.0 - below
+        self._no_target(target)
+        calibration = self._calibration(calibrated)
+        values = _thresholds(threshold, (rows,))
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = values[start : start + int(chunk.batch_shape[0])]
+            try:
+                pieces.append(np.asarray(_jit_cdf()(chunk, jnp.asarray(part, dtype=jnp.float32)), dtype=np.float64))
+            except NotImplementedError:
+                key, draw_key = jax.random.split(key)
+                draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                pieces.append(np.mean(draws <= part[None, :], axis=0))
+        below = np.concatenate(pieces) if pieces else np.zeros(0)
+        if calibration is not None:
+            below = recalibrated_cdf(calibration, below)
+        return 1.0 - below
+
+    def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0, target=None):
         """Split-conformal calibration on held-out rows. Returns ``self``.
 
         Pass rows the model was not fitted on. A density head stores each
         row's probability integral transform, ``predict_dist(X).cdf(y)``,
         spread uniformly over the jump at ``y`` for a count head. The quantile
         head stores how far each ``y`` falls outside its 80% interval.
-        Afterwards ``predict_interval`` and ``predict_quantiles`` use the
-        calibration, it is saved with the model, and ``fit`` clears it. See
-        ``ashlar.calibrate`` for the method. ``n_samples`` is only used for a
-        custom distribution without a CDF, whose PIT is then read from draws.
+        Afterwards ``predict_interval``, ``predict_quantiles``, and
+        ``predict_exceedance`` use the calibration, it is saved with the
+        model, and ``fit`` clears it. See ``ashlar.calibrate`` for the method.
+        ``n_samples`` is only used for a custom distribution without a CDF,
+        whose PIT is then read from draws.
+
+        A joint head is calibrated on each column's marginal and on functions
+        of its columns, one PIT table each: always their sum, and also
+        ``target``, which is ``"sum"``, a weight per column (that weighted
+        sum), a function of the last axis defined with ``def`` (``f(y)`` with
+        ``y`` shaped ``(..., columns)``, returning ``(...)``), or a list of
+        them. Pass the same ``target`` to ``predict_interval``,
+        ``predict_quantiles``, or ``predict_exceedance`` to read it. A weighted
+        sum is exact under the normal-based joint heads; a function, and
+        everything about a flow, is read from ``n_samples`` joint draws per
+        row. A saved model keeps a function's PIT table under its name; pass
+        the function again after ``load``.
         """
         self._univariate_dist("calibrate")
         if self.task in JOINT_TASKS:
-            raise AshlarError("calibrate reads one target column; a joint model's columns are calibrated together, not yet supported.")
+            return self._calibrate_joint(X, y, n_samples, seed, target)
+        self._no_target(target)
         if observed.is_observed(target_array(y)):
             return self._calibrate_observed(X, observed.as_observed(target_array(y)), seed)
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
@@ -2119,6 +2287,65 @@ class ASRModel(BaseEstimator):
         self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
         return self
 
+    def _calibrate_joint(self, X, y, n_samples: int, seed: int, target):
+        """One PIT table per column and per function of the columns, from the same rows and draws."""
+        d = int(self.n_events_)
+        values = self._joint_values(y)
+        targets = joint_targets(target, d)
+        dist = self.predict_dist(X)
+        if int(dist.batch_shape[0]) != values.shape[0]:
+            raise ShapeError(f"X has {int(dist.batch_shape[0])} rows and y has {values.shape[0]}.")
+        key = jax.random.PRNGKey(int(seed))
+        rng = np.random.default_rng(int(seed))
+        columns, pits = [], {name: [] for name in targets}
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = values[start : start + int(chunk.batch_shape[0])]
+            key, column_key, draw_key = jax.random.split(key, 3)
+            draws = None
+            if self.task == "multivariate_flow":
+                # A flow's marginals have no closed form: rank each column among joint draws.
+                draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                columns.append(np.stack([pit_values(draws[..., j], part[:, j], rng=rng) for j in range(d)], axis=1))
+            else:
+                value = jnp.asarray(part, dtype=jnp.float32)
+                columns.append(np.asarray(_jit_pit()(chunk.marginals(), value, column_key), dtype=np.float64))
+            for name, spec in targets.items():
+                key, pit_key = jax.random.split(key)
+                projected = _projected(chunk, spec)
+                if projected is not None:
+                    value = jnp.asarray(_target_values(spec, part), dtype=jnp.float32)
+                    pits[name].append(np.asarray(_jit_pit()(projected, value, pit_key), dtype=np.float64))
+                    continue
+                if draws is None:
+                    draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                pits[name].append(pit_values(_target_values(spec, draws), _target_values(spec, part), rng=rng))
+        self.calibration_ = joint_calibration(
+            np.concatenate(columns), {name: (spec, np.concatenate(pits[name])) for name, spec in targets.items()}
+        )
+        self._calibration_functions = {name: spec["function"] for name, spec in targets.items() if "function" in spec}
+        return self
+
+    def _joint_values(self, y) -> np.ndarray:
+        """A joint calibration's exact values, ``(rows, columns)``."""
+        d = int(self.n_events_)
+        array = target_array(y)
+        if observed.is_observed(array):
+            label = observed.as_observed(array)
+            if np.ndim(label) != 2 or np.shape(label)[1] != d:
+                raise ShapeError(f"this joint model has {d} columns; received a label of shape {np.shape(label)}.")
+            if not observed.is_exact(label).all():
+                raise AshlarError(
+                    "calibrate reads exact values on a joint model: where a cell is censored or an interval, "
+                    "a function of the columns has no single value. Calibrate on rows whose cells are all exact."
+                )
+            array = label["lower"]
+        values = np.asarray(array, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != d:
+            raise ShapeError(f"this joint model has {d} columns; y must be (rows, {d}), and received {values.shape}.")
+        if not np.isfinite(values).all():
+            raise AshlarError("calibration targets must be finite.")
+        return values
+
     def _calibration(self, calibrated: bool | None):
         calibration = getattr(self, "calibration_", None)
         if calibrated is None:
@@ -2126,6 +2353,102 @@ class ASRModel(BaseEstimator):
         if calibrated and calibration is None:
             raise AshlarError("this model has no calibration; call calibrate(X_holdout, y_holdout) first.")
         return calibration if calibrated else None
+
+    def _no_target(self, target):
+        if target is not None:
+            raise AshlarError("target is a function of a joint model's columns; this model has one target column.")
+
+    def _target(self, target) -> tuple[str, dict]:
+        """``(name, spec)`` of a joint target, with a function named by a string found among the calibrated ones."""
+        name, spec = target_spec(target, int(self.n_events_))
+        if "name" in spec:
+            function = getattr(self, "_calibration_functions", {}).get(name)
+            if function is None:
+                raise AshlarError(
+                    f"no function named {name!r} was calibrated in this session; a saved model keeps its PIT "
+                    f"table but not the function, so pass the function itself, target={name}."
+                )
+            spec = {"function": function}
+        return name, spec
+
+    def _joint_tables(self, target, calibrated):
+        """``(spec, tables)``: the target (``None`` for each column) and its PIT tables, ``None`` when uncalibrated."""
+        spec = None
+        if target is not None:
+            name, spec = self._target(target)
+        calibration = self._calibration(calibrated)
+        if calibration is None:
+            return spec, None
+        if calibration.get("kind") != "joint":
+            raise AshlarError("this calibration is not a joint model's; calibrate the model again.")
+        if spec is None:
+            return None, calibration["columns"]
+        table = calibration["targets"].get(name)
+        if table is None:
+            known = ", ".join(repr(key) for key in calibration["targets"])
+            raise AshlarError(
+                f"this model is calibrated on each column and on {known}, not on {name!r}. "
+                f"Calibrate with target={target!r} too, or pass calibrated=False for the raw head."
+            )
+        return spec, [table]
+
+    def _joint_quantiles(self, X, spec, levels, n_samples: int, seed: int, interval: bool = False):
+        """Quantiles at ``levels``, one tuple per output: per column ``(rows, columns, L)``, or of a target ``(rows, L)``.
+
+        With ``interval``, levels from draws are read as an interval's ends,
+        the order statistics that bracket them (``draw_interval``).
+        """
+        d = int(self.n_events_)
+        if spec is None and len(levels) != d:
+            raise ShapeError(f"one tuple of levels per column ({d}); received {len(levels)}.")
+        table = np.asarray(levels, dtype=np.float64)
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for _start, chunk in _chunks(self.predict_dist(X), self._chunk_rows()):
+            key, draw_key = jax.random.split(key)
+            if spec is None and self.task != "multivariate_flow":
+                # Every column's marginal at its own levels: q is (levels, 1, columns).
+                q = jnp.asarray(table.T[:, None, :], dtype=jnp.float32)
+                values = np.asarray(_jit_quantile()(chunk.marginals(), q), dtype=np.float64)
+                pieces.append(np.moveaxis(values, 0, -1))
+                continue
+            projected = None if spec is None else _projected(chunk, spec)
+            if projected is not None:
+                q = jnp.asarray(table[0][:, None], dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_quantile()(projected, q), dtype=np.float64).T)
+                continue
+            draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+            read = (lambda values, at: draw_interval(values, *at)) if interval else draw_quantiles
+            if spec is None:
+                pieces.append(np.stack([read(draws[..., j], table[j]) for j in range(d)], axis=1))
+            else:
+                pieces.append(read(_target_values(spec, draws), table[0]))
+        return np.concatenate(pieces, axis=0)
+
+    def _joint_cdf(self, dist, spec, threshold, n_samples: int, seed: int) -> np.ndarray:
+        """``P(Y <= threshold)`` per column ``(rows, columns)``, or of a target ``(rows,)``."""
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = threshold[start : start + int(chunk.batch_shape[0])]
+            key, draw_key = jax.random.split(key)
+            if spec is None and self.task != "multivariate_flow":
+                value = jnp.asarray(part, dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_cdf()(chunk.marginals(), value), dtype=np.float64))
+                continue
+            projected = None if spec is None else _projected(chunk, spec)
+            if projected is not None:
+                value = jnp.asarray(part, dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_cdf()(projected, value), dtype=np.float64))
+                continue
+            draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+            values = draws if spec is None else _target_values(spec, draws)
+            pieces.append(np.mean(values <= part[None], axis=0))
+        return np.concatenate(pieces, axis=0)
+
+    def _chunk_rows(self) -> int:
+        """Rows per block when reading draws or quantiles: fewer for a flow, whose draws carry its member's splines."""
+        return _FLOW_CHUNK_ROWS if self.task == "multivariate_flow" else 4096
 
     def _quantile_head_levels(self, X):
         """The quantile head's three levels averaged across members, standardized, ``(rows, 3)``."""

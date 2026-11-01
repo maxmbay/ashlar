@@ -25,6 +25,9 @@ Methods, with ``value`` broadcasting against ``batch_shape + event_shape``:
   precision and still differentiable.
 - ``marginals()``: the univariate marginal of every coordinate, with the event
   axis moved into the batch. A univariate distribution returns itself.
+- ``project(weights)``: for a joint outcome, the univariate distribution of
+  the weighted sum ``weights · Y``, such as the total, where it has a closed
+  form: the joint normal, a mixture of them, and an affine map of either.
 - ``log_cdf(value)`` and ``log_survival(value)``: ``log P(Y <= value)`` and
   ``log P(Y > value)``, computed in log space so a far tail stays finite.
   ``log_cdf_left`` and ``log_survival_left`` are ``log P(Y < value)`` and
@@ -200,6 +203,17 @@ class Distribution(Module):
         if self.event_shape:
             raise NotImplementedError(f"{type(self).__name__} does not expose its marginals.")
         return self
+
+    def project(self, weights) -> "Distribution":
+        """For a joint outcome, the distribution of the weighted sum ``weights · Y``, batch ``batch_shape``.
+
+        ``weights`` is one number per column, or broadcasts against
+        ``batch_shape + event_shape``. A weighted sum of jointly normal columns
+        is normal, so the joint normal, a mixture of them, and an affine map
+        of either have it in closed form; a flow does not, and its sum is read
+        from draws.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no closed form for a weighted sum of its columns.")
 
     def __getitem__(self, index):
         index = index if isinstance(index, tuple) else (index,)
@@ -514,6 +528,12 @@ class Mixture(Distribution):
         lower, upper = _bounds(lower, upper)
         return self._log_mix(self.components.log_box(self._expand(lower), self._expand(upper), points))
 
+    def project(self, weights):
+        """Each component's weighted sum, mixed with the same weights."""
+        if len(self.event_shape) != 1:
+            raise NotImplementedError("a weighted sum is for a joint outcome over one event axis.")
+        return Mixture(self.components.project(self._expand(jnp.asarray(weights, dtype=jnp.float32))), self.logits)
+
     def convolve_normal(self, scale):
         return Mixture(self.components.convolve_normal(self._expand(scale)), self.logits)
 
@@ -676,6 +696,13 @@ class AffineTransformed(Distribution):
     def convolve_normal(self, scale):
         return AffineTransformed(self.base.convolve_normal(jnp.asarray(scale, dtype=jnp.float32) / self.scale), self.loc, self.scale)
 
+    def project(self, weights):
+        """``weights · (loc + scale x)`` is ``weights · loc`` plus the base's sum with weights ``weights * scale``."""
+        if len(self.event_shape) != 1:
+            raise NotImplementedError("a weighted sum is for a joint outcome over one event axis.")
+        weights = jnp.asarray(weights, dtype=jnp.float32)
+        return AffineTransformed(self.base.project(weights * self.scale), jnp.sum(weights * self.loc, axis=-1), 1.0)
+
     def quantile(self, q):
         return self.loc + self.scale * self.base.quantile(q)
 
@@ -746,6 +773,14 @@ class Independent(Distribution):
     def covariance(self):
         variance = self.variance()
         return variance[..., :, None] * jnp.eye(variance.shape[-1], dtype=variance.dtype)
+
+    def project(self, weights):
+        """A weighted sum of independent normal columns is normal; other columns have no closed form."""
+        if not isinstance(self.base, Normal):
+            raise NotImplementedError(f"a weighted sum of independent {type(self.base).__name__} columns has no closed form.")
+        weights = jnp.asarray(weights, dtype=jnp.float32)
+        spread = jnp.sqrt(jnp.sum(jnp.square(weights * self.base.scale), axis=-1))
+        return Normal(jnp.sum(weights * self.base.loc, axis=-1), spread)
 
     def marginals(self):
         return self.base
@@ -940,6 +975,16 @@ class LowRankMultivariateNormal(Distribution):
 
     def marginals(self):
         return Normal(self.loc, jnp.sqrt(self.variance()))
+
+    def project(self, weights):
+        """``weights · Y`` is normal, with variance ``wᵀ D w + |Wᵀ w|²``."""
+        weights = jnp.asarray(weights, dtype=self.loc.dtype)
+        weights = jnp.broadcast_to(weights, jnp.broadcast_shapes(weights.shape, self.loc.shape))
+        variance = jnp.sum(jnp.square(weights) * self.cov_diag, axis=-1)
+        if self.rank:
+            factor = jnp.broadcast_to(self.cov_factor, weights.shape + (self.rank,))
+            variance = variance + jnp.sum(jnp.square(jnp.einsum("...d,...dr->...r", weights, factor)), axis=-1)
+        return Normal(jnp.sum(weights * self.loc, axis=-1), jnp.sqrt(variance))
 
     def log_box(self, lower, upper, points=None):
         """The GHK simulator (Geweke, Hajivassiliou, Keane), run on the ``rank`` shared factors.
