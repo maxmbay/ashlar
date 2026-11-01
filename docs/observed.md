@@ -36,6 +36,8 @@ The censored fit learns from sales what the oracle learns from the true demand: 
 
 The figure is one seed of the same experiment, split into thirds of the stores by their average demand. The fit to sales puts its mass too low and its tail too short in every third, and its 90% quantile covers 77% to 81% of days. The censored fit and the fit to the true demand cover 88% to 94%; a count's 90% quantile covers at least 90% of its own distribution, and more at small counts. `python examples/benchmark_observed.py figure` draws it.
 
+The same holds on real demand. FreshRetailNet-50K records the hourly sales of fresh food at 50,000 store and product pairs, with a flag for every hour out of stock, so a day that never ran out recorded its demand. On such days of 2,000 pairs, a stock drawn as in the simulation sells out on 31% of them. The `mixture` and `hurdle` heads fitted to the censored sales score within 0.005 nats of the same heads fitted to the true demand, and their orders cost about 4% more than the oracle's. A fit to sales costs 12% more, LightGBM's quantile regression on sales 13%, and a fit that drops the sold-out days 17% to 19%. [docs/benchmarks.md](benchmarks.md#sold-out-shelves-on-freshretailnet-50k) has the table.
+
 ## Every kind of label
 
 | Builder | What it says about `Y` | Likelihood of a row |
@@ -73,6 +75,46 @@ The `histogram` head has no mass past its edges at ±4 standard deviations, so i
 - `observed.log_likelihood(dist, lower, upper, ...)` and `observed.randomized_pit(dist, lower, upper, key)` take any `ashlar.distributions.Distribution`, so they also work in a custom objective. With `task="custom"`, the training `y` the objective receives is the `(rows, 6)` array of `observed.fields(label)`, or `(rows, columns, 6)` for a joint label.
 - A joint model's `log_prob(X, label)` and `score(X, label)` take a joint label. Its `calibrate` takes one only when every cell is exact, since a sum or another function of the columns has no single value where a cell is censored or an interval.
 
+## Survival times
+
+`observed.survival(time, event)` is a censored label for durations: where `event` is set the time is exact, and elsewhere the wait was still going at `time`. Fit the log of the time, so the `gaussian` head is a log-normal survival model whose location and spread both change with the row, and the `mixture` head a mixture of log-normals, for times whose shape no one family fits:
+
+```python
+y = observed.survival(np.log(days), died)
+model = ASRRegressor(task="mixture").fit(X, y)
+
+model.predict_exceedance(X_new, np.log(365.0))    # P(still alive after a year), per row
+np.exp(model.predict_quantiles(X_new, [0.5]))     # the median time, in days
+model.log_prob(X_test, y_test)                    # log-likelihood of each row, censored ones included
+```
+
+`entry=` is delayed entry, also called left truncation: a row is in the table only because its wait had already lasted `entry` when watching began, such as a drive that was three years old when the quarter's records start. The likelihood divides by `P(T >= entry)`, so the old drives that lasted long enough to be seen do not make the model think drives live longer than they do. The chance of lasting another 90 days is the survival at the age then over the survival at the age now:
+
+```python
+y = observed.survival(np.log(age_at_exit), failed, entry=np.log(age_at_entry))
+model = ASRRegressor(task="mixture").fit(X, y)
+model.predict_exceedance(X_new, np.log(age + 90)) / model.predict_exceedance(X_new, np.log(age))
+```
+
+`calibrate` takes survival labels without `entry`: a censored row's transform is drawn between `P(T < time)` and 1.
+
+From [`examples/benchmark_observed_real.py`](../examples/benchmark_observed_real.py), on three clinical tables of 1,904 to 8,873 patients, five random splits each, against XGBoost's accelerated failure time model with its error family, depth, and spread chosen from a grid of 42 fits:
+
+| Table | Model | NLL of the log time ↓ | Integrated Brier ↓ | Splits passing D-calibration | Concordance ↑ | CPU seconds |
+|---|---|---:|---:|---:|---:|---:|
+| SUPPORT | `mixture` | **1.732** | **0.1997** | 4 of 5 | 0.624 | 14 |
+| SUPPORT | XGBoost AFT, tuned | 1.874 | 0.2049 | 0 of 5 | 0.623 | 29 |
+| METABRIC | `mixture` | **1.061** | **0.1891** | 5 of 5 | 0.648 | 7 |
+| METABRIC | XGBoost AFT, tuned | 1.142 | 0.1992 | 5 of 5 | 0.645 | 21 |
+| GBSG | `mixture` | 1.168 | 0.1968 | 4 of 5 | 0.680 | 7 |
+| GBSG | XGBoost AFT, tuned | **1.158** | **0.1956** | 5 of 5 | 0.680 | 22 |
+
+The mixture, with no settings to choose, has the better likelihood and Brier score on SUPPORT and METABRIC, and AFT is a little ahead on GBSG, inside the spread across splits. They rank patients equally well. On SUPPORT, whose times no one family fits, AFT fails D-calibration on every split, and so does the `gaussian` head, a single log-normal; the mixture passes on 4 of 5. AFT's grid takes two to three times the CPU of the mixture's one fit, though one AFT fit at the setting the grid chose takes under a second.
+
+Drive failures with delayed entry went the other way. On Backblaze's records of 282,903 hard drives in the first quarter of 2024, of which 975 failed, Ashlar fitted the truncated age as above. XGBoost AFT and pycox's logistic hazard fitted the days each drive was watched, with its age on entry as a feature, the usual way around delayed entry. AFT ranked the drives better, with a concordance of 0.823 against the mixture's 0.809, and had the better likelihood, 0.0335 nats per drive against 0.0344. Their integrated Brier scores were within the spread across splits of each other. A likely reason is that the trees learn how the risk changes with age from the age itself, while the truncated likelihood has to get it from the shape of one lifetime distribution per drive. Ashlar can fit the workaround's form too, a survival label of the days watched with the age on entry among the features, though that was not part of this benchmark.
+
+[docs/benchmarks.md](benchmarks.md#observed-labels-on-real-data) has every model, with the Cox model and Kaplan-Meier, and the spread across splits.
+
 ## Daily values from weekly totals
 
 `observed.total(values, group)` says only the sum of each group's rows was recorded, with the sum on every row of the group. Rows are independent given their features, so a sum of normal rows is normal and a sum of Poisson rows is Poisson, and the head learns each row's own distribution from the sums. Each member of an ensemble sums its own rows, as it would score its own row.
@@ -97,6 +139,8 @@ From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py): 1,50
 The Poisson head learns from the totals almost all that the days would have taught it. The gaussian learns each day's mean, and the spread of the volatile days nearly right (1.41 against a true 1.5), but it puts 0.81 on the calm days, whose true spread is 0.5, so its intervals run a little wide. Spreading a total evenly teaches every day its week's average, which is wrong for each of them. A count's 80% interval holds more than 80% because it includes both end counts.
 
 What totals can teach is limited by what varies between groups. If every week holds one Monday, one Tuesday, and so on, every weekly sum contains the same weekday pattern, so the sums cannot tell a busy Monday from a busy Tuesday. The head learns the effects of features that change from week to week, and nothing about a pattern that repeats inside every group. The spread is harder to place than the mean, since a sum's variance blends its rows' variances.
+
+Real meter data show both sides. On the daily load of eight electricity clients over three years, a fit to each calendar week's total does not just miss the weekday pattern, it makes one up: every split of a week between its days fits the total equally well, and the one it settles on puts each weekday's load, as a share of the client's mean day, off by 12%. These clients' weekdays differ little, so a fit to each total spread evenly, which learns every weekday the same, is off by only 2.6%, and its daily means are closer. Readings taken at irregular intervals of 2 to 12 days start on any weekday, so they do pin the pattern down: fitted to them with `observed.total`, the head learns the days nearly as well as from the days themselves, with a CRPS of 19.0 MWh against 18.0 and weekday shares off by 2.9% against 2.0%. The same readings spread evenly get the means about right and the spread far too narrow: their 80% interval holds 47% of the held-out days. [docs/benchmarks.md](benchmarks.md#daily-loads-from-meter-readings) has the table.
 
 `fit` keeps each group whole: in one minibatch, with at least two of the largest groups per batch, and on one side of an internal validation split (a temporal split puts a cut group on the side of its first row; a grouped split must already keep each total inside one of its groups). A group's weight is the mean of its rows' weights. Each label records the number of rows its total covers, so a split that cuts a group, such as a shuffled `KFold`, raises instead of scoring part of a sum against the whole total; split with `GroupKFold` on the group ids.
 

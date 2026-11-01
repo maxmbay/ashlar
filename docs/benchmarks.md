@@ -24,6 +24,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Count heads](#count-heads)
 - [Hurdle head](#hurdle-head)
 - [Labels that say what was observed](#labels-that-say-what-was-observed)
+- [Observed labels on real data](#observed-labels-on-real-data)
 - [Joint demand across locations](#joint-demand-across-locations)
 - [Member uncertainty](#member-uncertainty)
 
@@ -535,6 +536,107 @@ Each joint head is fitted three ways: on the true log demand (the oracle), on lo
 - **Censoring product by product gets each product right but not the four together.** The per-product mixtures are 1.36 nats behind the censored joint normal, their quantile of the total covers 86% of days, and they expect every shelf to empty on 0.7% of days: four independent products seldom run out at once, and these four rush together.
 - **The joint normal is enough here.** The mixture's likelihood is no better, since on the log scale an 80% lift one day in six is a small departure from a normal, though its quantile of the total and its chance that every shelf empties are the closest to the truth. The flow learns the least from censored cells, 0.09 nats behind its own oracle, with a quantile of the total that covers 92%.
 - **A censored joint fit takes two to six times as long as one on exact values**, 12 to 48 seconds against 6 to 11, because each training row integrates over its sold-out products at 32 points.
+
+## Observed labels on real data
+
+From [`examples/benchmark_observed_real.py`](../examples/benchmark_observed_real.py): the questions of [the section above](#labels-that-say-what-was-observed), asked of real tables. The clinical tables and the drives carry their own censoring. For the sold-out shelves and the meter readings, the censoring or the grouping is applied to values that were recorded exactly, so every fit can still be scored against them. Each stage ran alone on the M3 Pro laptop of [How it was run](#how-it-was-run), beside a macOS background process that used up to one core, because two jobs at once make XGBoost's threads spin and multiply its CPU seconds. CPU seconds count every thread of the process. XGBoost 3.4.1, LightGBM 4.7.0, scikit-survival 0.28.0, pycox 0.3.0 on torch 2.15.0, and JAX 0.12. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments but a seed, and for the meter readings the weekday and the day of the year marked as cyclical.
+
+In short: censored sales and irregular meter readings teach the model nearly what the true values would have, as in the simulations, while weekly totals cannot place the load within the week. On survival, the `mixture` head, untuned, has a better likelihood than tuned XGBoost AFT on two clinical tables of three and ties on the third, but on drive failures with delayed entry the usual workaround of fitting the days watched, with the age as a feature, beats Ashlar's truncated likelihood.
+
+### Survival on three clinical tables
+
+SUPPORT (8,873 seriously ill hospital patients, 14 features, 68% died during follow-up), METABRIC (1,904 breast cancer patients, 9 features, 58%), and GBSG (2,232 breast cancer patients, 7 features, 57%), as pycox ships them from the DeepSurv repository. Five random splits of each, 80% to train and 20% to test, stratified by the event. Ashlar fits `observed.survival(np.log(time), event)` with the `gaussian` head, a log-normal survival model whose location and spread are both learned per row; with the `mixture` head; and with the `gaussian` fitted on 85% of the training rows and calibrated on the other 15%, its survival curve read from `predict_exceedance`. The baselines are XGBoost's accelerated failure time model, with its error family (normal, logistic, or extreme value), depth (3 or 6), and spread (0.5 to 4) chosen by likelihood on the same 15%, each of its 42 fits early stopped there; scikit-survival's Cox model with Breslow's baseline; and Kaplan-Meier, which ignores the features.
+
+- **Concordance** is Harrell's C of the predicted median time, or of the Cox model's risk score.
+- **Integrated Brier** is the Brier score of the survival curve, weighted by the inverse probability of censoring estimated from the test rows (as pycox does), averaged over 40 times between the 10th and 90th percentiles of the test times.
+- **D-calibration** (Haider et al., 2020): a calibrated model's `S(T)` is uniform over the test rows, a censored row spreading its weight over `[0, S(c)]`. The χ² statistic over ten equal bins, and the number of splits whose p-value is above 0.05.
+- **NLL** is of the log time: an event's log density, a censored row's log probability of lasting longer. Only the models with a density have one.
+
+| Table | Model | Concordance ↑ | Integrated Brier ↓ | D-calibration χ² ↓ | Splits passing D-calibration | NLL of the log time ↓ | CPU seconds |
+|---|---|---:|---:|---:|---:|---:|---:|
+| SUPPORT | Ashlar `gaussian` | 0.624 ± 0.008 | 0.2011 ± 0.0025 | 65.9 ± 21.0 | 0 of 5 | 1.825 ± 0.013 | 13.7 |
+| | Ashlar `mixture` | 0.624 ± 0.009 | **0.1997 ± 0.0032** | 11.9 ± 5.8 | 4 of 5 | **1.732 ± 0.017** | 14.2 |
+| | Ashlar `gaussian`, calibrated | 0.619 ± 0.006 | 0.2011 ± 0.0024 | 13.9 ± 8.6 | 2 of 5 | | 12.0 |
+| | XGBoost AFT | 0.623 ± 0.010 | 0.2049 ± 0.0033 | 46.9 ± 12.0 | 0 of 5 | 1.874 ± 0.010 | 29.1 |
+| | Cox | 0.577 ± 0.012 | 0.2165 ± 0.0021 | 4.9 ± 3.8 | 5 of 5 | | 0.2 |
+| | Kaplan-Meier | 0.500 | 0.2271 ± 0.0008 | 6.9 ± 5.4 | 5 of 5 | | 0.0 |
+| METABRIC | Ashlar `gaussian` | 0.648 ± 0.017 | 0.1934 ± 0.0084 | 8.9 ± 4.1 | 5 of 5 | 1.107 ± 0.058 | 4.7 |
+| | Ashlar `mixture` | 0.648 ± 0.013 | **0.1891 ± 0.0062** | 7.3 ± 1.9 | 5 of 5 | **1.061 ± 0.032** | 6.5 |
+| | Ashlar `gaussian`, calibrated | 0.645 ± 0.020 | 0.1912 ± 0.0059 | 16.3 ± 7.5 | 2 of 5 | | 5.3 |
+| | XGBoost AFT | 0.645 ± 0.013 | 0.1992 ± 0.0072 | 8.5 ± 6.0 | 5 of 5 | 1.142 ± 0.047 | 20.8 |
+| | Cox | 0.639 ± 0.017 | 0.1938 ± 0.0060 | 6.1 ± 2.6 | 5 of 5 | | 0.0 |
+| | Kaplan-Meier | 0.500 | 0.2177 ± 0.0030 | 6.3 ± 4.9 | 5 of 5 | | 0.0 |
+| GBSG | Ashlar `gaussian` | 0.678 ± 0.018 | 0.1975 ± 0.0085 | 12.7 ± 4.6 | 4 of 5 | 1.174 ± 0.046 | 5.3 |
+| | Ashlar `mixture` | 0.680 ± 0.025 | 0.1968 ± 0.0064 | 12.2 ± 10.1 | 4 of 5 | 1.168 ± 0.037 | 6.6 |
+| | Ashlar `gaussian`, calibrated | 0.687 ± 0.021 | **0.1930 ± 0.0089** | 13.4 ± 7.6 | 3 of 5 | | 5.0 |
+| | XGBoost AFT | 0.680 ± 0.016 | 0.1956 ± 0.0070 | 8.0 ± 4.5 | 5 of 5 | **1.158 ± 0.040** | 21.8 |
+| | Cox | 0.662 ± 0.017 | 0.2017 ± 0.0045 | 6.2 ± 3.0 | 5 of 5 | | 0.1 |
+| | Kaplan-Meier | 0.500 | 0.2228 ± 0.0018 | 5.1 ± 2.3 | 5 of 5 | | 0.0 |
+
+XGBoost's CPU seconds are for its grid of 42 fits. One fit at the setting the grid chose took 0.4 to 0.6 seconds. The grid chose different settings from split to split on SUPPORT (logistic errors with spread 1.5, or normal with 3) and on METABRIC (three settings in five splits), and normal errors with spread 1 on every GBSG split.
+
+- **The mixture has the better likelihood on two tables of three.** On SUPPORT its NLL is 0.14 nats below XGBoost AFT's (1.732 against 1.874), and on METABRIC 0.08 below (1.061 against 1.142); on GBSG AFT is 0.01 ahead, well inside the spread across splits. Its integrated Brier score is lower than AFT's on the same two tables, and about the same on GBSG.
+- **Ranking is a tie.** Ashlar's mixture and AFT are within 0.003 of each other in concordance on every table, against a spread of 0.01 to 0.02 across splits. Both rank better than the Cox model, by 0.05 on SUPPORT and by 0.01 to 0.02 on the others.
+- **A single log-normal does not fit SUPPORT.** The `gaussian` head passes D-calibration on no split there, and neither does AFT, whose one error family with one spread for every row is less flexible still. The mixture passes on 4 of 5. On METABRIC and GBSG every uncalibrated model passes on at least 4 splits of 5. Cox and Kaplan-Meier, whose baseline curves assume no shape, pass everywhere.
+- **Calibrating on 15% of the training rows helps D-calibration only where the head was wrong.** On SUPPORT it brings the `gaussian` from a D-calibration χ² of 65.9 to 13.9; on METABRIC and GBSG, with 230 to 270 calibration rows, it fails more splits than the uncalibrated head (2 and 3 passing of 5, against 5 and 4).
+- **Ashlar's one fit costs less than tuning AFT, and more than AFT once tuned.** Its 5 to 14 CPU seconds per fit are a quarter to a half of AFT's grid, and 10 to 25 times one AFT fit at the chosen setting. Without its grid AFT has no setting: its likelihood depends on the error family and the spread, which it does not learn.
+
+### Drive failures with delayed entry
+
+Backblaze's daily records of every hard drive in its data centers in the first quarter of 2024, one row per drive: 282,903 drives, 975 of which failed in the quarter, with a median age of 2.8 years on entry. The features are the drive's model (35 groups, with models of under 200 drives pooled as "other"), its size, and five SMART error counts on its first day in the quarter: reallocated, reported uncorrectable, and pending sectors, command timeouts, and offline uncorrectable sectors. The age comes from the power-on hours. A drive is in the table only because it was still running when the quarter began, or was installed during it, so its age at failure is truncated at its age on entry. Ashlar fits the log of the age with `observed.survival(np.log(exit_age), failed, entry=np.log(entry_age))`, with the `gaussian` and `mixture` heads, and reads each test drive's survival over the days watched as `S(entry + t) / S(entry)`. XGBoost's AFT model, tuned on the same grid as above, and pycox's logistic hazard (Gensheimer and Narasimhan, 2019), a neural network over 30 intervals of time, cannot read a truncated age. They fit the days each drive was watched, with its age on entry as a feature, the usual way around it, and Kaplan-Meier on those days is the baseline. Three random splits of the drives, 80% to train and 20% to test, with 15% of the training drives held out for XGBoost's and pycox's early stopping. Every model is scored on what happened to the test drives in the quarter: the concordance of the risk of failing within 80 days, the integrated Brier score from 10 to 80 days, D-calibration, and the NLL of the days watched, an event's density per day.
+
+| Model | Concordance ↑ | Integrated Brier × 1000 ↓ | D-calibration χ² ↓ | Splits passing D-calibration | NLL of the days watched ↓ | CPU seconds |
+|---|---:|---:|---:|---:|---:|---:|
+| Ashlar `gaussian` | 0.787 ± 0.032 | 1.799 ± 0.046 | 0.1 ± 0.1 | 3 of 3 | 0.0343 ± 0.0007 | 403 |
+| Ashlar `mixture` | 0.809 ± 0.023 | 1.832 ± 0.067 | 0.3 ± 0.3 | 3 of 3 | 0.0344 ± 0.0006 | 220 |
+| XGBoost AFT | **0.823 ± 0.013** | **1.785 ± 0.046** | 0.0 ± 0.0 | 3 of 3 | **0.0335 ± 0.0003** | 400 |
+| pycox logistic hazard | 0.812 ± 0.004 | 1.803 ± 0.058 | 0.3 ± 0.0 | 3 of 3 | | 11 |
+| Kaplan-Meier | 0.500 | 1.900 ± 0.048 | 0.0 ± 0.0 | 3 of 3 | | 0 |
+
+XGBoost's grid chose normal errors with spread 3 on two splits and spread 2 on the third, and one fit at its choice took 9.1 CPU seconds of the grid's 400. pycox's seconds are those of its fit, in a process of its own: on macOS, torch's OpenMP runtime hung in a process where XGBoost's had run.
+
+- **The usual workaround beat the truncated likelihood.** XGBoost AFT, fitted to the days watched with the age on entry as a feature, ranks the drives best, 0.823 against the mixture's 0.809, and has the better likelihood, 0.0335 nats per drive against Ashlar's 0.0343 and 0.0344, a gap a little larger than the spread across splits. pycox's network ranks them about as well as the mixture. Their integrated Brier scores, 1.785 to 1.832 thousandths, are within the spread across splits of one another, and all beat Kaplan-Meier's 1.900. A likely reason for the gap: the trees learn how the risk changes with age from the age itself, while Ashlar has to get it from the shape of one lifetime distribution per drive.
+- **D-calibration cannot tell these models apart.** With 0.3% of drives failing in the quarter, nearly every drive's survival over the days watched stays near 1, so each censored drive spreads its weight over all ten bins nearly evenly, and every model passes, Kaplan-Meier included.
+- **The mixture's fit takes 220 CPU seconds**, about half of AFT's grid and 24 times one AFT fit at the setting the grid chose; the `gaussian` took 403. pycox's network took 11.
+
+### Sold-out shelves on FreshRetailNet-50K
+
+FreshRetailNet-50K (Wang et al., 2025) holds 90 days of hourly sales of 50,000 store and product pairs of fresh food, with a flag for every hour out of stock. A day with no hour out of stock between 6:00 and 22:00 recorded its demand, and only those days are used. On them, 2,000 sampled series get a simulated stock, drawn as in [the simulation](#demand-when-shelves-sell-out): the series' mean demand on its training days, times a lognormal forecast error (sd 0.25) and a safety factor between 1.0 and 1.5. 31% of days sell out, losing 13% to 14% of demand, about as in the simulation. Days 0 to 59 train (about 70,000 series-days), days 60 to 69 calibrate (12,700), and days 70 to 89 test (24,500). The features are the store, the product and its three category levels, the city, the weekday, the discount, the holiday and activity flags, the weather, and the series' mean recorded sales on its training days. Three seeds, each its own sample of series and its own stock.
+
+The `mixture` and `hurdle` heads are each fitted four ways, as in the simulation, with LightGBM's quantile regression on sales as the tree baseline, and scored the same way against the true demand, with two changes. The NLL is of the true demand's bin, 1% of the mean demand wide, since some stocked days sold nothing and a density cannot score that atom. The order cost is in percent above the cost of the same head's oracle fit, the mixture's for LightGBM.
+
+| Head | Trained on | NLL ↓ | CRPS ↓ | Below the 90% quantile | Order cost above the oracle's ↓ | Calibrated 80% holds | CPU seconds |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `mixture` | true demand (oracle) | 5.368 ± 0.115 | 0.284 ± 0.010 | 82.4% ± 2.3% | | 73.2% ± 0.9% | 113 |
+| `mixture` | sales as demand | 6.290 ± 0.357 | 0.304 ± 0.011 | 67.9% ± 0.8% | 12.2% ± 1.0% | 58.1% ± 1.7% | 113 |
+| `mixture` | days not sold out | 6.765 ± 0.521 | 0.314 ± 0.002 | 65.5% ± 1.4% | 17.2% ± 4.5% | 59.4% ± 1.6% | 88 |
+| `mixture` | censored | 5.373 ± 0.112 | 0.294 ± 0.019 | 81.3% ± 4.2% | 4.0% ± 4.7% | 71.0% ± 2.8% | 119 |
+| `hurdle` | true demand (oracle) | 5.275 ± 0.041 | 0.283 ± 0.014 | 84.5% ± 2.9% | | 72.8% ± 0.7% | 109 |
+| `hurdle` | sales as demand | 5.583 ± 0.112 | 0.301 ± 0.010 | 72.1% ± 1.9% | 12.3% ± 2.1% | 59.5% ± 1.8% | 101 |
+| `hurdle` | days not sold out | 5.580 ± 0.092 | 0.312 ± 0.006 | 68.8% ± 1.6% | 19.0% ± 3.8% | 58.7% ± 2.7% | 85 |
+| `hurdle` | censored | 5.280 ± 0.020 | 0.291 ± 0.008 | 88.0% ± 2.3% | 4.4% ± 6.9% | 75.8% ± 1.4% | 111 |
+| LightGBM quantile | sales as demand | | | 67.0% ± 0.3% | 12.9% ± 1.5% | | 16 |
+
+- **The censored fit matches the oracle's likelihood**, within 0.005 nats for both heads, from sales alone, and its CRPS is within 4%. Its orders cost 4% more than the oracle's, with a wide spread across the three seeds, against 12% more for a fit to sales as demand, 13% for LightGBM's quantile regression on sales, and 17% to 19% for a fit that drops the sold-out days.
+- **Fitting sales learns demand that is too low**, as in the simulation: the 90% quantile of a fit to sales is above the true demand on 68% to 72% of days, and LightGBM's on 67%.
+- **Every fit holds less of the last 20 days than it promises, the oracle included.** The oracle's 90% quantile holds 82% to 85% of the test days, and its 80% interval, calibrated on days 60 to 69, holds 73%, so the last 20 days differ from the 70 before them. The censored fits track the oracle there (81% to 88%, and 71% to 76% after calibration); the other fits stay 13 to 15 points below it after calibration, since they are calibrated on capped sales.
+- **Censoring costs about what the oracle's fit costs**: 111 to 119 CPU seconds against 109 to 113.
+
+### Daily loads from meter readings
+
+The daily load of the eight electricity clients of [the joint demand benchmark](#joint-demand-across-locations), in MWh, from 2012 to 2014. The days are cut into four-week blocks that start on a Monday, and every fifth block is held out, so the 1,648 test client-days are spread between the 7,120 training ones. The features are the client, the weekday, the day of the year, and the time since the start. The `gaussian` head is fitted on the days themselves (the oracle) and on two kinds of totals: each calendar week's, Monday to Sunday (1,024 weekly totals), and meter readings at irregular intervals of 2 to 12 days, each with `observed.total` and with the total spread evenly over its days. Every week holds each weekday once, so weekly totals say nothing about how the load splits between weekdays; irregular readings do. Five seeds. Scored on the held-out days: NLL, the RMSE of the mean, CRPS, the share inside the uncalibrated 80% interval, and the weekday profile error, the root mean square over clients and weekdays of the error in each weekday's share of the client's mean load.
+
+| Trained on | NLL ↓ | RMSE, MWh ↓ | CRPS, MWh ↓ | 80% interval holds | Weekday profile error ↓ | CPU seconds |
+|---|---:|---:|---:|---:|---:|---:|
+| the days (oracle) | 4.949 ± 0.035 | 35.3 ± 0.2 | 18.0 ± 0.2 | 63.3% ± 0.9% | 2.0% ± 0.0% | 33 |
+| weekly totals | 5.468 ± 0.232 | 52.9 ± 5.9 | 29.7 ± 4.1 | 72.9% ± 7.1% | 11.9% ± 2.2% | 27 |
+| weekly totals spread evenly | 7.772 ± 0.887 | 34.7 ± 0.4 | 19.3 ± 0.3 | 42.6% ± 1.0% | 2.6% ± 0.0% | 32 |
+| irregular readings | **4.898 ± 0.046** | 36.4 ± 0.6 | 19.0 ± 0.5 | 90.4% ± 3.1% | 2.9% ± 0.3% | 31 |
+| irregular readings spread evenly | 6.276 ± 0.674 | 33.9 ± 0.3 | 18.4 ± 0.2 | 47.1% ± 0.8% | 2.5% ± 0.0% | 32 |
+
+- **From readings 2 to 12 days apart, the model learns the days nearly as well as from the days.** Its CRPS is 19.0 MWh against the oracle's 18.0, and its weekday profile is off by 2.9% against 2.0%. Its NLL is even a little lower, as it is less sure: its 80% interval holds 90% of the held-out days, the oracle's 63%, and the held-out blocks are not the training blocks.
+- **Weekly totals cannot place the load within the week, and the fit makes up a pattern.** Every way of splitting a week between its days fits the week's total equally well, and the fit settles on a weekday profile that is off by 11.9%, worse than the flat profile of a fit to the totals spread evenly (2.6%). Its RMSE is 52.9 MWh against the oracle's 35.3.
+- **Spreading a total evenly gets these means right and the spread wrong.** These clients' loads differ little between weekdays, so an even split is close to the truth: its RMSE matches the oracle's and its weekday profile is off by 2.5% to 2.6%. But a total spread over its days is much smoother than the days, so the model learns too small a spread: its 80% interval holds 43% to 47% of days, and its NLL is 6.3 to 7.8. In [the simulation](#daily-values-from-weekly-totals), where the days of a week differ, the even split gets the means wrong as well.
 
 ## Joint demand across locations
 
