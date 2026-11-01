@@ -549,6 +549,34 @@ Each joint head is fitted three ways: on the true log demand (the oracle), on lo
 - **The joint normal is enough here.** The mixture's likelihood is no better, since on the log scale an 80% lift one day in six is a small departure from a normal, though its quantile of the total and its chance that every shelf empties are the closest to the truth. The flow learns the least from censored cells, 0.09 nats behind its own oracle, with a quantile of the total that covers 92%.
 - **A censored joint fit takes two to six times as long as one on exact values**, 12 to 48 seconds against 6 to 11, because each training row integrates over its sold-out products at 32 points.
 
+### Cure, competing risks, and regimes
+
+From [`examples/benchmark_observed_more.py`](../examples/benchmark_observed_more.py), simulated tables of 6,000 rows with known truth, 4,500 to fit and 1,500 to score, three seeds, mean ± standard deviation. Every model is `ASRRegressor` with its defaults.
+
+A share of rows never have the event, 39.7% on average and rising with a feature, the others a log-normal time, censored at a random follow-up:
+
+| Model | NLL ↓ | Predicted never | Error of never per row ↓ | Error of `P(T > t)` ↓ | CPU seconds |
+|---|---:|---:|---:|---:|---:|
+| `gaussian`, `cure=True` | **0.999 ± 0.009** | 39.8% | **0.042 ± 0.005** | **0.028 ± 0.003** | 9.4 |
+| `gaussian` | 1.051 ± 0.005 | 0.0% | 0.397 | 0.045 ± 0.001 | 9.6 |
+| `mixture` | 1.009 ± 0.015 | 0.0% | 0.397 | 0.038 ± 0.014 | 10.1 |
+
+Two causes, each with its own log-normal time, censored at a random follow-up; the error is of the cumulative incidence `P(cause = c, T <= t)` at three times, averaged over rows and causes. The cause-specific fits are one censored `mixture` per cause, treating the other cause, and an event of unknown cause, as censored:
+
+| Model | All causes recorded ↓ | 30% of causes unrecorded ↓ | CPU seconds |
+|---|---:|---:|---:|
+| `chain`: `categorical`, then `gaussian` | **0.029 ± 0.005** | **0.029 ± 0.002** | 12 to 14 |
+| cause-specific `mixture`s | 0.033 ± 0.005 | 0.051 ± 0.007 | 23 to 27 |
+
+Two columns whose correlation is +0.9 in one regime and -0.9 in the other, the regime's share changing with a feature, each column censored at its own random limit; the NLL is of the true values, and the error is of `P(both > 1)` from 2,000 draws:
+
+| Model | Fitted to | NLL ↓ | Error of P(both > 1) ↓ | CPU seconds |
+|---|---|---:|---:|---:|
+| `multivariate_mixture` | censored label | **2.433 ± 0.033** | **0.0103** | 66 |
+| `multivariate_mixture` | true values (oracle) | 2.404 ± 0.026 | 0.0100 | 9 |
+| `multivariate_gaussian` | censored label | 2.745 ± 0.049 | 0.0175 | 25 |
+| `multivariate_gaussian` | true values (oracle) | 2.735 ± 0.026 | 0.0165 | 9 |
+
 ## Observed labels on real data
 
 From [`examples/benchmark_observed_real.py`](../examples/benchmark_observed_real.py): the questions of [the section above](#labels-that-say-what-was-observed), asked of real tables. The clinical tables and the drives carry their own censoring. For the sold-out shelves and the meter readings, the censoring or the grouping is applied to values that were recorded exactly, so every fit can still be scored against them. Each stage ran alone on the M3 Pro laptop of [How it was run](#how-it-was-run), beside a macOS background process that used up to one core, because two jobs at once make XGBoost's threads spin and multiply its CPU seconds. CPU seconds count every thread of the process. XGBoost 3.4.1, LightGBM 4.7.0, scikit-survival 0.28.0, pycox 0.3.0 on torch 2.15.0, and JAX 0.12. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments but a seed, and for the meter readings the weekday and the day of the year marked as cyclical.

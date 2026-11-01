@@ -235,8 +235,9 @@ def test_flow_and_histogram_intervals():
 def test_noise_widens_a_normal_and_each_mixture_component():
     convolved = Mixture(Normal(jnp.array([[0.0, 2.0]]), jnp.array([[1.0, 0.5]]))).convolve_normal(jnp.array([0.5]))
     assert np.allclose(convolved.components.scale, [[np.sqrt(1.25), np.sqrt(0.5)]])
+    # A count has no density to widen.
     with pytest.raises(NotImplementedError):
-        StudentT(0.0, 1.0, 3.0).convolve_normal(1.0)
+        Poisson(jnp.array([2.0])).convolve_normal(1.0)
 
 
 # ---------------------------------------------------------------- likelihood and PIT

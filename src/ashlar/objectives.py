@@ -64,6 +64,26 @@ def classification_objective(raw, y, sample_weight):
     return weighted_mean(-jnp.mean(chosen, axis=1), sample_weight)
 
 
+def make_candidate_objective(task: str):
+    """Negative log-probability of each row's set of classes: ``y`` is a ``(rows, classes)`` 0/1 mask.
+
+    ``raw`` is logits for ``classification`` and log-probabilities from the
+    cumulative logit for ``ordinal``. A row whose set holds every class adds
+    nothing.
+    """
+    import jax
+
+    def objective(raw, y, sample_weight):
+        if raw.ndim != 3:
+            raise ShapeError(f"class scores must have shape (batch, member, class); received {raw.shape}.")
+        log_prob = jax_log_softmax(raw) if task == "classification" else raw
+        allowed = jnp.where(jnp.asarray(y)[:, None, :] > 0, 0.0, -jnp.inf)
+        chosen = jax.nn.logsumexp(log_prob + allowed, axis=-1)
+        return weighted_mean(-jnp.mean(chosen, axis=1), sample_weight)
+
+    return objective
+
+
 def classification_accuracy(raw, y, sample_weight, *, policy: str = "mean_probabilities"):
     """Weighted accuracy. Higher is better.
 
@@ -621,6 +641,113 @@ def make_observed_objective(task: str, *, severity: str = "lognormal", truncated
 
 
 TOTAL_TASKS = ("gaussian", "normal", "poisson")
+# Heads whose sum over rows has no closed form: their totals are scored on a grid (``grid_total_log_likelihood``).
+GRID_TOTAL_TASKS = ("mixture", "flow", "histogram", "student_t", "negative_binomial", "poisson")
+# Points of the grid a total is convolved on, and how many of the sum's standard deviations it spans.
+GRID_POINTS = 512
+# A count's grid is longer, so its bins stay whole numbers for sums with a standard deviation up to 128.
+GRID_COUNT_POINTS = 2048
+GRID_SPAN = 16.0
+
+
+def grid_total_log_likelihood(dist, segment, num_segments: int, max_rows: int, observation, discrete: bool):
+    """Log-likelihood of each segment's observed sum of independent rows, by convolving the rows on a grid.
+
+    ``dist`` has batch ``(rows, members)`` and its rows are grouped into
+    adjacent segments by ``segment``; ``observation`` is ``(segments, 4)``:
+    each sum's ``lower``, ``upper``, ``truncate_lower``, and
+    ``truncate_upper`` on the head's own scale. Each row's distribution is
+    put on a grid of ``GRID_POINTS`` bins of one width per segment, its mass
+    in each bin from its CDF, centred on its own mean, so any head with a
+    CDF works. The width spreads the grid over ``GRID_SPAN`` standard
+    deviations of the sum, so each row gets about ``GRID_POINTS /
+    (GRID_SPAN √rows)`` bins per standard deviation of its own; a count's
+    grid has ``GRID_COUNT_POINTS`` bins, each a whole number wide. The rows of a
+    segment are convolved by multiplying their discrete Fourier transforms;
+    with ``discrete`` (a count), the bins are whole numbers and the mass of
+    an exact total is exact up to the grid's span. An exact continuous total
+    scores the sum's mass in its bin over the bin's width; an interval scores
+    the CDF between its ends, read linearly within a bin; an exact continuous
+    total reads the sum's density linearly between bin centres. ``max_rows`` is the
+    largest segment, a static size. Returns ``(segments, members)``.
+    """
+    import jax
+
+    rows = int(segment.shape[0])
+    members = int(dist.batch_shape[-1])
+    points = GRID_COUNT_POINTS if discrete else GRID_POINTS
+    half = points // 2
+    frozen = jax.lax.stop_gradient(dist)
+    mean = frozen.mean()
+    variance = jnp.maximum(frozen.variance(), 1e-12)
+    spread = jnp.sqrt(jax.ops.segment_sum(variance, segment, num_segments=num_segments))
+    width = GRID_SPAN * spread / points
+    if discrete:
+        width = jnp.maximum(jnp.ceil(width), 1.0)
+    width = jnp.maximum(width, 1e-6)
+    row_width = width[segment]
+    centre = row_width * jnp.round(mean / row_width)
+    edges = centre[..., None] + row_width[..., None] * (jnp.arange(points + 1, dtype=jnp.float32) - half - 0.5)
+    if discrete:
+        edges = jnp.floor(edges + 0.5) - 0.5 + 1e-3
+    cdf = dist.cdf(jnp.moveaxis(edges, -1, 0))
+    mass = jnp.moveaxis(jnp.clip(cdf[1:] - cdf[:-1], 0.0, 1.0), 0, -1)
+    # Each segment's rows side by side, a point mass at the centre for the slots past its end.
+    index = jnp.arange(rows)
+    first = jax.ops.segment_min(index, segment, num_segments=num_segments)
+    size = jax.ops.segment_sum(jnp.ones_like(index), segment, num_segments=num_segments)
+    slot = jnp.clip(first, 0, rows - 1)[:, None] + jnp.arange(int(max_rows))[None, :]
+    live = jnp.arange(int(max_rows))[None, :] < size[:, None]
+    gathered = mass[jnp.clip(slot, 0, rows - 1)]
+    delta = jax.nn.one_hot(half, points, dtype=mass.dtype)
+    gathered = jnp.where(live[..., None, None], gathered, delta)
+    spectrum = jnp.prod(jnp.fft.rfft(gathered, axis=-1), axis=1)
+    circular = jnp.fft.irfft(spectrum, n=points, axis=-1)
+    # Bin i of the sum is the offset i - half from the sum of the centres.
+    shift = (jnp.arange(points) - half + int(max_rows) * half) % points
+    pmf = jnp.clip(circular[..., shift], 0.0, None)
+    total_centre = jax.ops.segment_sum(centre, segment, num_segments=num_segments)
+    cumulative = jnp.concatenate([jnp.zeros(pmf.shape[:-1] + (1,), pmf.dtype), jnp.cumsum(pmf, axis=-1)], axis=-1)
+    cumulative = cumulative / jnp.maximum(cumulative[..., -1:], 1e-30)
+    seg_width = width
+
+    def position(value):
+        return (value[:, None] - total_centre) / seg_width + half + 0.5
+
+    def cdf_at(value):
+        finite = jnp.isfinite(value)
+        t = position(jnp.where(finite, value, 0.0))
+        low = jnp.clip(jnp.floor(t), 0, points - 1).astype(jnp.int32)
+        frac = jnp.clip(t - low, 0.0, 1.0)
+        below = jnp.take_along_axis(cumulative, low[..., None], axis=-1)[..., 0]
+        above = jnp.take_along_axis(cumulative, (low + 1)[..., None], axis=-1)[..., 0]
+        inside = jnp.where(t <= 0, 0.0, jnp.where(t >= points, 1.0, below + frac * (above - below)))
+        return jnp.where(finite[:, None], inside, jnp.where(value[:, None] > 0, 1.0, 0.0))
+
+    lower, upper, truncate_lower, truncate_upper = (observation[:, index] for index in range(4))
+    exact = lower == upper
+    if discrete:
+        lower = jnp.where(jnp.isfinite(lower), jnp.round(lower) - 0.5, lower)
+        upper = jnp.where(jnp.isfinite(upper), jnp.round(upper) + 0.5, upper)
+        truncate_lower = jnp.where(jnp.isfinite(truncate_lower), jnp.round(truncate_lower) - 0.5, truncate_lower)
+        truncate_upper = jnp.where(jnp.isfinite(truncate_upper), jnp.round(truncate_upper) + 0.5, truncate_upper)
+        coarse = jnp.log(jnp.maximum(cdf_at(upper) - cdf_at(lower), 1e-30))
+        result = coarse
+    else:
+        # The density between bin centres, read linearly: bin i's centre sits at position i + 0.5.
+        t = position(jnp.where(exact, lower, 0.0)) - 0.5
+        left = jnp.clip(jnp.floor(t), 0, points - 2).astype(jnp.int32)
+        frac = jnp.clip(t - left, 0.0, 1.0)
+        inside = (t >= 0) & (t <= points - 1)
+        near = jnp.take_along_axis(pmf, left[..., None], axis=-1)[..., 0]
+        far = jnp.take_along_axis(pmf, (left + 1)[..., None], axis=-1)[..., 0]
+        density = (near + frac * (far - near)) / seg_width
+        point = jnp.log(jnp.maximum(jnp.where(inside, density, 0.0), 1e-30))
+        span = cdf_at(jnp.where(exact, jnp.inf, upper)) - cdf_at(jnp.where(exact, -jnp.inf, lower))
+        coarse = jnp.log(jnp.maximum(span, 1e-30))
+        result = jnp.where(exact[:, None], point, coarse)
+    truncation = cdf_at(truncate_upper) - cdf_at(truncate_lower)
+    return result - jnp.log(jnp.maximum(truncation, 1e-30))
 
 
 def sum_distribution(dist, segment, num_segments: int, live):
@@ -646,7 +773,7 @@ def sum_distribution(dist, segment, num_segments: int, live):
     raise ShapeError(f"a total over rows needs normal or Poisson rows; received {type(dist).__name__}.")
 
 
-def make_total_objective(task: str, *, truncated: bool = False, noisy: bool = False):
+def make_total_objective(task: str, *, truncated: bool = False, noisy: bool = False, max_rows: int | None = None):
     """Mean member negative log-likelihood when some observations are totals over groups of rows.
 
     ``y`` is ``(batch, 7)``: the six ``ashlar.observed.fields`` on the head's
@@ -655,10 +782,17 @@ def make_total_objective(task: str, *, truncated: bool = False, noisy: bool = Fa
     its weight sits on its first row. Each observation scores the
     distribution of the sum of its rows, so a row of its own scores itself.
     Each member sums its own rows, and members are averaged as elsewhere.
+
+    With ``max_rows``, the largest group, the sum is convolved on a grid
+    (``grid_total_log_likelihood``), for a head whose sum has no closed form;
+    a row of its own still scores its own likelihood exactly.
     """
     import jax
 
     from ashlar.observed import log_likelihood
+
+    if max_rows is not None:
+        return _grid_total_objective(task, truncated=truncated, max_rows=int(max_rows))
 
     def objective(raw, y, sample_weight):
         y = jnp.asarray(y, dtype=jnp.float32)
@@ -681,6 +815,58 @@ def make_total_objective(task: str, *, truncated: bool = False, noisy: bool = Fa
             column[4] if noisy else None,
         )
         losses = jnp.where(live, losses, 0.0)
+        return weighted_mean(jnp.mean(losses, axis=1), weight)
+
+    return objective
+
+
+def segment_layout(start, sample_weight):
+    """Each row's observation, each observation's weight, and its first row, from the flags on first rows."""
+    import jax
+
+    rows = start.shape[0]
+    segment = jnp.clip(jnp.cumsum(start.astype(jnp.int32)) - 1, 0, rows - 1)
+    weight = jax.ops.segment_sum(jnp.where(start, jnp.asarray(sample_weight, dtype=jnp.float32), 0.0), segment, num_segments=rows)
+    size = jax.ops.segment_sum(jnp.ones((rows,), jnp.int32), segment, num_segments=rows)
+    return segment, weight, size
+
+
+def grid_totals(dist, y, segment, size, max_rows: int, truncated: bool):
+    """``(observations, members)`` log-likelihoods of totals on a grid, and of a row of its own exactly.
+
+    ``y`` holds the six ``ashlar.observed.fields`` per row and a flag on the
+    first row of each observation, as ``make_total_objective`` reads them.
+    """
+    import jax
+
+    from ashlar.observed import log_likelihood
+
+    rows = y.shape[0]
+    start = y[:, 6] > 0
+    fields = jnp.where(start[:, None], y[:, :4], 0.0)
+    observation = jax.ops.segment_sum(fields, segment, num_segments=rows)
+    if not truncated:
+        observation = observation.at[:, 2].set(-jnp.inf).at[:, 3].set(jnp.inf)
+    discrete = dist.support == "nonnegative_integer"
+    summed = grid_total_log_likelihood(dist, segment, rows, max_rows, observation, discrete)
+    own = log_likelihood(
+        dist,
+        y[:, 0:1],
+        y[:, 1:2],
+        y[:, 2:3] if truncated else None,
+        y[:, 3:4] if truncated else None,
+    )
+    own = jax.ops.segment_sum(jnp.where(start[:, None], own, 0.0), segment, num_segments=rows)
+    return jnp.where((size == 1)[:, None], own, summed)
+
+
+def _grid_total_objective(task: str, *, truncated: bool, max_rows: int):
+    def objective(raw, y, sample_weight):
+        y = jnp.asarray(y, dtype=jnp.float32)
+        segment, weight, size = segment_layout(y[:, 6] > 0, sample_weight)
+        live = (weight > 0)[:, None]
+        values = grid_totals(member_distribution(task, raw), y, segment, size, max_rows, truncated)
+        losses = jnp.where(live, -values, 0.0)
         return weighted_mean(jnp.mean(losses, axis=1), weight)
 
     return objective
