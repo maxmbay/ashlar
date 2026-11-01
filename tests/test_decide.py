@@ -14,7 +14,6 @@ from ashlar.decide import (
     exceedance,
     expected_utility,
     newsvendor_cost,
-    newsvendor_objective,
     newsvendor_order,
 )
 from ashlar.distributions import LowRankMultivariateNormal, Normal
@@ -61,38 +60,13 @@ def test_gradient_of_the_order_reaches_the_parameters():
     np.testing.assert_allclose(d_scale, [stats.norm.ppf(0.9)], rtol=1e-3)
 
 
-def test_newsvendor_objective_trains_saves_and_orders(tmp_path):
+def test_predict_order_is_the_critical_ratio_quantile():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(600, 3)).astype(np.float32)
     y = np.exp(0.5 * X[:, 0] + 0.5 * rng.standard_gamma(2.0, size=600))
-    objective = newsvendor_objective("gaussian", 9, 1)
-    model = ASRRegressor(task="gaussian", objective=objective, max_epochs=3, random_state=0).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=3, random_state=0).fit(X, y)
     order = model.predict_order(X[:50], 9, 1)
+    assert order.shape == (50,)
     np.testing.assert_allclose(order, model.predict_quantiles(X[:50], [0.9])[:, 0])
-    model.save(tmp_path / "m")
-    loaded = ASRRegressor.load(tmp_path / "m")
-    assert repr(loaded.objective) == repr(objective)
-    np.testing.assert_allclose(loaded.predict_order(X[:50], 9, 1), order, rtol=1e-5)
-    with pytest.raises(AshlarError):
-        newsvendor_objective("quantile", 9, 1)
-    with pytest.raises(AshlarError):
-        newsvendor_objective("mixture", 9, 1, nll=0.0, cost=0.0)
-
-
-@pytest.mark.slow
-def test_training_on_the_cost_fixes_a_misspecified_head():
-    """A symmetric head on a skewed target orders badly from its likelihood; the cost moves its 0.9 quantile."""
-    rng = np.random.default_rng(0)
-
-    def data(n):
-        X = rng.normal(size=(n, 4)).astype(np.float32)
-        scale = 0.4 + 0.3 * np.tanh(X[:, 1])
-        return X, np.exp(0.5 * X[:, 0] + scale * rng.standard_gamma(2.0, size=n))
-
-    X, y = data(4000)
-    X_test, y_test = data(10000)
-    costs = {}
-    for name, objective in (("nll", None), ("cost", newsvendor_objective("gaussian", 9, 1, nll=0.0))):
-        model = ASRRegressor(task="gaussian", objective=objective, max_epochs=30, random_state=0).fit(X, y)
-        costs[name] = float(np.mean(newsvendor_cost(y_test, model.predict_order(X_test, 9, 1), 9, 1)))
-    assert costs["cost"] < 0.9 * costs["nll"]
+    model.calibrate(X[400:], y[400:])
+    np.testing.assert_allclose(model.predict_order(X[:50], 9, 1), model.predict_quantiles(X[:50], [0.9])[:, 0])

@@ -195,6 +195,27 @@ jax.grad(q90)(batch.numeric_raw)  # how each row's 90% quantile moves with each 
 
 `numeric_raw` is in the units of `X`, missing cells as NaN; a missing cell is filled with the training median, so its gradient is 0. Categories are looked up on the host and have no gradient. `model.dist_from_raw(raw)` turns the network's raw output (`forward_raw`) into the distribution, for code that changes the network's output itself.
 
+## Deciding from the distribution
+
+Most predictions end in a number someone acts on: an order, a capacity, a reserve. `ashlar.decide` reads it off any `Distribution`, and every function is traceable JAX, so it also runs inside `jax.jit` and `jax.grad`.
+
+```python
+from ashlar import decide
+
+model.predict_order(X_new, under=9, over=1)        # newsvendor: a unit short costs 9, a unit left over 1
+dist = model.predict_dist(X_new)
+decide.newsvendor_order(dist, 9, 1)               # the same: the 9 / (9 + 1) = 0.9 quantile
+decide.newsvendor_cost(y, order, 9, 1)            # the realised cost per row
+decide.exceedance(dist, 500.0)                    # P(y > 500)
+decide.cvar(dist, 0.95)                           # the mean outcome above the 95% quantile
+decide.exceedance(joint_dist, 1200.0, weights=[1, 1, 1])  # P(total > capacity) on a joint head
+decide.best_action(dist, candidates, cost, jax.random.key(0))  # any cost, by draws
+```
+
+`predict_order(X, under, over)` is `predict_quantiles` at the critical ratio `under / (under + over)`, so after `calibrate` it is the calibrated quantile: the share of new rows whose demand it covers holds at the critical ratio, a cost-optimal order with a service level that holds. `cvar` integrates the quantile function, exactly up to quadrature; `expected_utility` and `best_action` work from draws and take any utility or cost.
+
+**Training on the decision's cost was tried and is not shipped.** A head trained on its likelihood plus the newsvendor cost of its own order (the critical-ratio quantile of its member mixture, differentiated through the quantile's implicit gradient) did not order better than the same head trained on its likelihood alone. On a skewed target with a 9:1 cost, the likelihood-trained mixture's plug-in order already costs 0.7% more than the true quantile's, and the blend cost 0.3% more than the plug-in, short of the 1% gain issue #32 set as the bar. On hourly bike rentals the blend's gain was under 1% at every cost ratio from 1:1 to 19:1. It helps only a misspecified head, and there `calibrate` gets most of the way: a normal head on the skewed target orders 59% above the oracle, 25% after `calibrate`, 1.4% when trained on the cost alone, at a heavy price in likelihood. The objective and the results are in `examples/benchmark_decide.py` and [benchmarks.md](benchmarks.md#decisions-from-the-distribution).
+
 ## Explaining the distribution
 
 `model.explain(X, target)` attributes one number per row, read off the predictive distribution, to the features. The number can be a quantile, the spread, the width of an interval, or a tail probability, so it answers questions a mean cannot: which features widen this row's interval, and what drives its 95% quantile.

@@ -2,9 +2,13 @@
 
 Most users of a predictive distribution act on one number: an order, a
 capacity, a reserve, a threshold. This module turns a ``Distribution`` (from
-``predict_dist`` or ``forward_dist``) into that number, and gives an
-objective that trains a head on its likelihood plus the realised cost of the
-decision it will be used for.
+``predict_dist`` or ``forward_dist``) into that number.
+
+Training a head on its likelihood plus the realised cost of the decision was
+tried and not shipped: on the newsvendor kill test of issue #32 it did not
+beat the likelihood-trained mixture's plug-in order by the 1% the issue
+asked for (``examples/benchmark_decide.py`` keeps the objective and the
+results).
 
 Everything here is traceable JAX on the distribution object, so it composes
 with ``jax.jit`` and ``jax.grad``.
@@ -18,9 +22,6 @@ with ``jax.jit`` and ``jax.grad``.
 - ``cvar(dist, level)``: the mean of the outcome above its ``level`` quantile.
 - ``expected_utility(dist, utility, key)`` and ``best_action(dist, actions,
   cost, key)``: any utility or cost, by Monte Carlo over draws.
-- ``newsvendor_objective(task, under, over)``: the head's negative
-  log-likelihood plus ``cost`` times the newsvendor cost of the mixture's
-  order, for ``objective=`` on a univariate continuous head.
 
 ``ASRModel.predict_order(X, under, over)`` is the order from a fitted model;
 after ``calibrate`` it is the calibrated quantile, so the share of rows whose
@@ -37,7 +38,6 @@ import jax.numpy as jnp
 
 from ashlar.errors import AshlarError
 
-DECISION_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t")
 CVAR_POINTS = 64
 
 
@@ -112,58 +112,3 @@ def best_action(dist, actions, cost: Callable, key, n: int = 1000):
     costs = jax.vmap(lambda action: jnp.mean(cost(action[None, :], draws), axis=0))(grid)
     choice = jnp.argmin(costs, axis=0)
     return jnp.take_along_axis(grid, choice[None, :], axis=0)[0], costs
-
-
-def newsvendor_objective(task: str, under: float, over: float, *, nll: float = 1.0, cost: float = 1.0):
-    """A training objective: ``nll`` times the head's loss plus ``cost`` times the newsvendor cost.
-
-    Pass it as ``objective=`` to a univariate continuous head (``gaussian``,
-    ``mixture``, ``flow``, ``histogram``, ``student_t``)::
-
-        model = ASRRegressor(task="mixture", objective=newsvendor_objective("mixture", under=9, over=1))
-
-    The cost is that of ordering the critical-ratio quantile of the members'
-    equal-weight mixture, the distribution ``predict_dist`` returns, on the
-    standardized target, so its gradient reaches the parameters through the
-    quantile's implicit gradient. The model stays a full distribution; with
-    ``nll=0`` it is trained for the decision alone. The cost is divided by
-    ``under + over``, so it is the pinball loss at the critical ratio and its
-    size does not depend on the scale of the costs. A model trained on it
-    saves and loads like any other.
-    """
-    return NewsvendorObjective(task, under, over, nll=nll, cost=cost)
-
-
-class NewsvendorObjective:
-    """``objective(raw, y, sample_weight)`` for ``newsvendor_objective``; see there."""
-
-    def __init__(self, task: str, under: float, over: float, *, nll: float = 1.0, cost: float = 1.0):
-        from ashlar.objectives import make_distribution_objective
-
-        if task not in DECISION_TASKS:
-            raise AshlarError(f"decision training needs a univariate continuous head: {', '.join(DECISION_TASKS)}.")
-        self.ratio = critical_ratio(under, over)
-        nll, cost = float(nll), float(cost)
-        if nll < 0.0 or cost < 0.0 or not (math.isfinite(nll) and math.isfinite(cost)) or nll + cost == 0.0:
-            raise AshlarError("nll= and cost= must be finite and non-negative, and one must be positive.")
-        self.task, self.under, self.over, self.nll, self.cost = task, float(under), float(over), nll, cost
-        self._likelihood = make_distribution_objective(task)
-
-    def ashlar_config(self) -> dict:
-        return {"task": self.task, "under": self.under, "over": self.over, "nll": self.nll, "cost": self.cost}
-
-    def __repr__(self) -> str:
-        return f"newsvendor_objective({self.task!r}, under={self.under}, over={self.over}, nll={self.nll}, cost={self.cost})"
-
-    def __call__(self, raw, y, sample_weight):
-        from ashlar.distributions import Mixture, head_distribution
-        from ashlar.weights import weighted_mean
-
-        target = jnp.asarray(y, dtype=raw.dtype).reshape(-1)
-        order = Mixture(head_distribution(self.task, raw)).quantile(self.ratio)
-        ratio = self.ratio
-        pinball = ratio * jnp.maximum(target - order, 0.0) + (1.0 - ratio) * jnp.maximum(order - target, 0.0)
-        loss = self.cost * weighted_mean(pinball, sample_weight)
-        if self.nll > 0.0:
-            loss = loss + self.nll * self._likelihood(raw, y, sample_weight)
-        return loss

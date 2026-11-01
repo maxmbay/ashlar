@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -45,6 +46,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import jax.numpy as jnp
 import lightgbm
 import numpy as np
 from scipy import stats
@@ -53,7 +55,10 @@ from sklearn.model_selection import train_test_split
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ashlar import ASRRegressor
-from ashlar.decide import critical_ratio, newsvendor_cost, newsvendor_objective
+from ashlar.decide import critical_ratio, newsvendor_cost
+from ashlar.errors import AshlarError
+
+DECISION_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t")
 
 KILL_COSTS = (9.0, 1.0)
 BIKE_COSTS = ((1.0, 1.0), (3.0, 1.0), (9.0, 1.0), (19.0, 1.0))
@@ -78,6 +83,60 @@ def _objective(task, kind, under, over):
     if kind == "hybrid":
         return newsvendor_objective(task, under, over)
     return newsvendor_objective(task, under, over, nll=0.0)
+
+
+# ---------------------------------------------------------------- the objective tried
+
+
+def newsvendor_objective(task: str, under: float, over: float, *, nll: float = 1.0, cost: float = 1.0):
+    """A training objective: ``nll`` times the head's loss plus ``cost`` times the newsvendor cost.
+
+    Pass it as ``objective=`` to a univariate continuous head (``gaussian``,
+    ``mixture``, ``flow``, ``histogram``, ``student_t``)::
+
+        model = ASRRegressor(task="mixture", objective=newsvendor_objective("mixture", under=9, over=1))
+
+    The cost is that of ordering the critical-ratio quantile of the members'
+    equal-weight mixture, the distribution ``predict_dist`` returns, on the
+    standardized target, so its gradient reaches the parameters through the
+    quantile's implicit gradient. The model stays a full distribution; with
+    ``nll=0`` it is trained for the decision alone. The cost is divided by
+    ``under + over``, so it is the pinball loss at the critical ratio and its
+    size does not depend on the scale of the costs. 
+    """
+    return NewsvendorObjective(task, under, over, nll=nll, cost=cost)
+
+
+class NewsvendorObjective:
+    """``objective(raw, y, sample_weight)`` for ``newsvendor_objective``; see there."""
+
+    def __init__(self, task: str, under: float, over: float, *, nll: float = 1.0, cost: float = 1.0):
+        from ashlar.objectives import make_distribution_objective
+
+        if task not in DECISION_TASKS:
+            raise AshlarError(f"decision training needs a univariate continuous head: {', '.join(DECISION_TASKS)}.")
+        self.ratio = critical_ratio(under, over)
+        nll, cost = float(nll), float(cost)
+        if nll < 0.0 or cost < 0.0 or not (math.isfinite(nll) and math.isfinite(cost)) or nll + cost == 0.0:
+            raise AshlarError("nll= and cost= must be finite and non-negative, and one must be positive.")
+        self.task, self.under, self.over, self.nll, self.cost = task, float(under), float(over), nll, cost
+        self._likelihood = make_distribution_objective(task)
+
+    def __repr__(self) -> str:
+        return f"newsvendor_objective({self.task!r}, under={self.under}, over={self.over}, nll={self.nll}, cost={self.cost})"
+
+    def __call__(self, raw, y, sample_weight):
+        from ashlar.distributions import Mixture, head_distribution
+        from ashlar.weights import weighted_mean
+
+        target = jnp.asarray(y, dtype=raw.dtype).reshape(-1)
+        order = Mixture(head_distribution(self.task, raw)).quantile(self.ratio)
+        ratio = self.ratio
+        pinball = ratio * jnp.maximum(target - order, 0.0) + (1.0 - ratio) * jnp.maximum(order - target, 0.0)
+        loss = self.cost * weighted_mean(pinball, sample_weight)
+        if self.nll > 0.0:
+            loss = loss + self.nll * self._likelihood(raw, y, sample_weight)
+        return loss
 
 
 # ---------------------------------------------------------------- kill
