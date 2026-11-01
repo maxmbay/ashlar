@@ -22,6 +22,7 @@ from sklearn.base import BaseEstimator
 
 from ashlar._compat import renamed
 from ashlar._version import __version__
+from ashlar.chain import ChainHead, chain_columns, column_start, resolve_columns
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
 from ashlar.heads import (
@@ -139,6 +140,7 @@ _HEADS = {
     "multivariate_flow": MultivariateFlowHead,
     "hurdle": HurdleHead,
     "tree": TreeHead,
+    "chain": ChainHead,
 }
 _ORDINAL_HEADS = {"ordinal", "softmax"}
 _TASK_HEAD = {"regression": "point", "classification": "logits", "normal": "normal", "ordinal": "ordinal", "tree": "tree"}
@@ -155,13 +157,16 @@ _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
 DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
-JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow")
+JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow", "chain")
+# Joint tasks whose marginals and moments are read from draws: no closed form.
+_DRAWN_JOINT = ("multivariate_flow", "chain")
 _SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
 _TASK_HEAD["multivariate_mixture"] = "multivariate_mixture"
 _TASK_HEAD["multivariate_flow"] = "multivariate_flow"
-_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow"}
+_TASK_HEAD["chain"] = "chain"
+_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow", "chain": "chain"}
 # Rows per block when reading a flow's draws, which take one network pass per column.
 _FLOW_CHUNK_ROWS = 128
 # Points × rows × members × columns × components per block when scoring a joint label.
@@ -665,6 +670,13 @@ class ASRModel(BaseEstimator):
         if self.task == "custom" and (head is None or not callable(self.objective) or self.point_fn is None):
             raise AshlarError("a custom task requires a head class, an objective function, and point_fn.")
         self._scores()
+        if self.task == "chain":
+            chain_columns((self.head_kwargs or {}).get("columns"))
+            if self._scores() != {"nll": 1.0}:
+                raise AshlarError(
+                    "a chain trains on its exact joint log-likelihood, objective=None: the energy and variogram "
+                    "scores need reparameterized draws, and a count or a class has none."
+                )
         if self.task not in _LABELED_TASKS and self.class_weight is not None:
             raise AshlarError(
                 "class_weight is only applied for classification and ordinal classification, and it is a loss multiplier, not a sampler."
@@ -865,6 +877,16 @@ class ASRModel(BaseEstimator):
         if self.n_events is not None and int(self.n_events) not in columns:
             raise ShapeError(f"n_events={self.n_events} does not match a label with {columns.pop()} columns.")
         coarse = any(not observed.is_exact(part).all() for part in labels)
+        if coarse and self.task == "chain":
+            columns = chain_columns((self.head_kwargs or {}).get("columns"))
+            fixed = [index for index, column in enumerate(columns[:-1]) if column.kind != "categorical"]
+            for part in labels:
+                if fixed and not observed.is_exact(part[:, fixed]).all():
+                    raise AshlarError(
+                        "a chain conditions each column on the ones before it, so a cell before the last column must be "
+                        "exact, unless its column is categorical, whose classes a range sums over. Put a censored or "
+                        "interval column last."
+                    )
         if coarse and self.task == "multivariate_flow" and int((self.head_kwargs or {}).get("depth", 1)) != 1:
             raise AshlarError(
                 "the joint flow trains on coarse cells with one autoregressive block, head_kwargs={'depth': 1}; "
@@ -1292,7 +1314,7 @@ class ASRModel(BaseEstimator):
                             "the energy and variogram scores compare draws with a value, and a censored or interval "
                             "cell has none; a joint label with coarse cells trains on its likelihood, objective='nll'."
                         )
-                    return make_joint_observed_objective(n_events, family, components=components)
+                    return make_joint_observed_objective(n_events, family, components=components, columns=self._chain_columns())
                 # Every cell exact: the scores of the values themselves, the first field.
                 exact = self._joint_objective(n_events, scores)
 
@@ -1335,11 +1357,14 @@ class ASRModel(BaseEstimator):
     def _joint_objective(self, n_events: int, scores: dict):
         family, components = _JOINT_FAMILY[self.task], self._mixture_components()
         if scores == {"nll": 1.0}:
-            return make_joint_objective(n_events, family, components=components)
+            return make_joint_objective(n_events, family, components=components, columns=self._chain_columns())
         return make_joint_score_objective(n_events, family, scores, components=components)
 
     def _head_kwargs_for_fit(self, y_encoded, n_classes: int) -> dict:
         kwargs = dict(self.head_kwargs or {})
+        if self.task == "chain":
+            kwargs.update(self._chain_kwargs(y_encoded))
+            return kwargs
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
         if observed.is_observed(y_encoded):
@@ -1377,6 +1402,8 @@ class ASRModel(BaseEstimator):
 
     def _head_kwargs_for_load(self) -> dict:
         kwargs = dict(self.head_kwargs or {})
+        if self.task == "chain":
+            kwargs["columns"] = [column.to_json() for column in self._chain_columns()]
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
         if self.task == "tree":
@@ -1387,6 +1414,29 @@ class ASRModel(BaseEstimator):
 
     def _severity(self) -> str:
         return str((self.head_kwargs or {}).get("severity", "lognormal"))
+
+    def _chain_columns(self):
+        """A chain's columns, resolved from the training values once fitted; ``None`` for the other tasks."""
+        if self.task != "chain":
+            return None
+        resolved = getattr(self, "chain_columns_", None)
+        if resolved is not None:
+            return resolved
+        return chain_columns((self.head_kwargs or {}).get("columns"))
+
+    def _chain_kwargs(self, y_encoded) -> dict:
+        """The chain head's columns, resolved from the training values, and each column's starting bias."""
+        if observed.is_observed(y_encoded):
+            label = observed.as_observed(y_encoded)
+            values = np.where(observed.is_exact(label), label["lower"], np.nan)
+        else:
+            values = np.asarray(y_encoded, dtype=np.float64)
+        columns = resolve_columns(chain_columns((self.head_kwargs or {}).get("columns")), values)
+        self.chain_columns_ = columns
+        return {
+            "columns": [column.to_json() for column in columns],
+            "start": [np.asarray(column_start(column, values[:, index])).tolist() for index, column in enumerate(columns)],
+        }
 
     def _mixture_components(self) -> int | None:
         """The joint mixture's component count, as its head reads it; ``None`` for the other tasks."""
@@ -1545,7 +1595,18 @@ class ASRModel(BaseEstimator):
         self.target_std_ = float(std) if np.ndim(std) == 0 else np.asarray(std, dtype=np.float64)
         return self._apply_target_scale(array)
 
+    def _raw_chain_columns(self):
+        """Mean 0 and scale 1 for a chain's columns that are read raw: counts, amounts, and classes."""
+        if self.task != "chain" or self.target_mean_ is None:
+            return
+        raw = np.asarray([not column.scaled for column in chain_columns((self.head_kwargs or {}).get("columns"))])
+        if raw.size != np.size(self.target_mean_):
+            raise ShapeError(f"the chain names {raw.size} columns; y has {np.size(self.target_mean_)}.")
+        self.target_mean_ = np.where(raw, 0.0, np.atleast_1d(self.target_mean_)).astype(np.float64)
+        self.target_std_ = np.where(raw, 1.0, np.atleast_1d(self.target_std_)).astype(np.float64)
+
     def _apply_target_scale(self, y):
+        self._raw_chain_columns()
         if not self.standardize_target or self.target_mean_ is None:
             return y
         if observed.is_observed(y):
@@ -1865,8 +1926,8 @@ class ASRModel(BaseEstimator):
         raw = self._raw_from_frame(X)
         if self.task in HURDLE_TASKS:
             point = np.asarray(hurdle_distribution(raw, self._severity()).mean().mean(axis=1))
-        elif self.task == "multivariate_flow":
-            # Monte Carlo means of each member's flow, averaged: the mean of the joint mixture.
+        elif self.task in _DRAWN_JOINT:
+            # Monte Carlo means of each member's flow or chain, averaged: the mean of the joint mixture.
             point = np.concatenate(
                 [
                     np.asarray(self._joint_components(_raw_rows(raw, start, _FLOW_CHUNK_ROWS)).mean().mean(axis=1))
@@ -2109,7 +2170,9 @@ class ASRModel(BaseEstimator):
 
     def _joint_components(self, raw):
         """Each member's joint distribution on the standardized target, batch ``(rows, members)``."""
-        return joint_member_distribution(_JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components())
+        return joint_member_distribution(
+            _JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components(), columns=self._chain_columns()
+        )
 
     def _dist_chunks(self, X):
         """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory.
@@ -2247,7 +2310,7 @@ class ASRModel(BaseEstimator):
         grid = box_points(int(points), d)
         # A flow's step holds its masked network's hidden units for every point, about eight times a column's cells.
         width = int(points) * int(self.core_.head.k) * d * (self._mixture_components() or 1)
-        width *= 8 if self.task == "multivariate_flow" else 1
+        width *= 8 if self.task in _DRAWN_JOINT else 1
         size = max(8, min(4096, _BOX_CHUNK_CELLS // width))
         dist = self.predict_dist(X)
         rows = int(dist.batch_shape[0])
@@ -2279,7 +2342,7 @@ class ASRModel(BaseEstimator):
         pieces = []
         key = jax.random.PRNGKey(int(seed))
         for _start, dist in self._dist_chunks(X):
-            if self.task == "multivariate_flow":
+            if self.task in _DRAWN_JOINT:
                 key, draw_key = jax.random.split(key)
                 draws = np.asarray(dist.sample(draw_key, (int(n_samples),)), dtype=np.float64)
                 pieces.append(np.moveaxis(np.quantile(draws, levels, axis=0), 0, -1))
@@ -2779,8 +2842,8 @@ class ASRModel(BaseEstimator):
             part = values[start : start + int(chunk.batch_shape[0])]
             key, column_key, draw_key = jax.random.split(key, 3)
             draws = None
-            if self.task == "multivariate_flow":
-                # A flow's marginals have no closed form: rank each column among joint draws.
+            if self.task in _DRAWN_JOINT:
+                # A flow's or a chain's marginals have no closed form: rank each column among joint draws.
                 draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
                 columns.append(np.stack([pit_values(draws[..., j], part[:, j], rng=rng) for j in range(d)], axis=1))
             else:
@@ -2894,7 +2957,7 @@ class ASRModel(BaseEstimator):
         pieces = []
         for _start, chunk in _chunks(self.predict_dist(X), self._chunk_rows()):
             key, draw_key = jax.random.split(key)
-            if spec is None and self.task != "multivariate_flow":
+            if spec is None and self.task not in _DRAWN_JOINT:
                 # Every column's marginal at its own levels: q is (levels, 1, columns).
                 q = jnp.asarray(table.T[:, None, :], dtype=jnp.float32)
                 values = np.asarray(_jit_quantile()(chunk.marginals(), q), dtype=np.float64)
@@ -2920,7 +2983,7 @@ class ASRModel(BaseEstimator):
         for start, chunk in _chunks(dist, self._chunk_rows()):
             part = threshold[start : start + int(chunk.batch_shape[0])]
             key, draw_key = jax.random.split(key)
-            if spec is None and self.task != "multivariate_flow":
+            if spec is None and self.task not in _DRAWN_JOINT:
                 value = jnp.asarray(part, dtype=jnp.float32)
                 pieces.append(np.asarray(_jit_cdf()(chunk.marginals(), value), dtype=np.float64))
                 continue
@@ -2936,7 +2999,7 @@ class ASRModel(BaseEstimator):
 
     def _chunk_rows(self) -> int:
         """Rows per block when reading draws or quantiles: fewer for a flow, whose draws carry its member's splines."""
-        return _FLOW_CHUNK_ROWS if self.task == "multivariate_flow" else 4096
+        return _FLOW_CHUNK_ROWS if self.task in _DRAWN_JOINT else 4096
 
     def _quantile_head_levels(self, X):
         """The quantile head's three levels averaged across members, standardized, ``(rows, 3)``."""
@@ -3597,6 +3660,8 @@ def _json_class_weight(class_weight):
 
 def _saved_head_kwargs(estimator):
     payload = dict(estimator.head_kwargs or {})
+    if estimator.task == "chain":
+        payload["columns"] = [column.to_json() for column in estimator._chain_columns()]
     edge_prior = getattr(estimator, "edge_prior_", None)
     if edge_prior is not None and estimator.task == "tree":
         payload["edge_prior"] = [float(value) for value in np.asarray(edge_prior, dtype=np.float64).tolist()]
