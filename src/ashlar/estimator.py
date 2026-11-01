@@ -62,6 +62,7 @@ from ashlar.objectives import (
     joint_member_distribution,
     make_joint_objective,
     make_joint_observed_objective,
+    make_joint_score_objective,
     make_observed_objective,
     make_ordinal_expectation_objective,
     make_total_objective,
@@ -71,6 +72,7 @@ from ashlar.objectives import (
     make_ordinal_histogram_objective,
     ordinal_objective,
     regression_objective,
+    score_weights,
 )
 from ashlar.calibrate import (
     check_coverage,
@@ -393,6 +395,17 @@ class ASRModel(BaseEstimator):
     backbone:
         ``residual_mlp``, ``tabm``, or an Equinox class with
         ``__init__(d_in, *, key, **kwargs)`` and attributes ``k`` and ``d_out``.
+    objective:
+        ``None`` (default) trains on the task's own loss. A callable
+        ``objective(raw, y, sample_weight)`` replaces it, and ``custom``
+        needs one; a callable with ``stochastic = True`` is also passed a
+        fresh ``key=`` on every step. A joint head also takes proper scores by name:
+        ``"nll"``, its log density (the default); ``"energy"``, the energy
+        score; or a blend such as ``{"nll": 1.0, "energy": 1.0}``, which
+        may include ``"variogram"``, the variogram score of order 0.5. The
+        energy and variogram scores are estimated from 16 fresh
+        reparameterized draws per row on every step, on the standardized
+        columns. See ``ashlar.objectives.make_joint_score_objective``.
     prediction_policy:
         Classification: ``mean_probabilities`` (default) or ``mean_logits``.
         Ordinal: ``mean_probabilities``, the mean of the member class probabilities.
@@ -622,8 +635,9 @@ class ASRModel(BaseEstimator):
             raise AshlarError(
                 f"task {self.task!r} uses the { _TASK_HEAD[self.task]!r} head; received head {head!r}."
             )
-        if self.task == "custom" and (head is None or self.objective is None or self.point_fn is None):
-            raise AshlarError("a custom task requires a head class, an objective, and point_fn.")
+        if self.task == "custom" and (head is None or not callable(self.objective) or self.point_fn is None):
+            raise AshlarError("a custom task requires a head class, an objective function, and point_fn.")
+        self._scores()
         if self.task not in _LABELED_TASKS and self.class_weight is not None:
             raise AshlarError(
                 "class_weight is only applied for classification and ordinal classification, and it is a loss multiplier, not a sampler."
@@ -1237,17 +1251,28 @@ class ASRModel(BaseEstimator):
         return weight
 
     def _objective(self, class_values=None, n_events: int = 1):
-        if self.objective is not None:
+        scores = self._scores()
+        if scores is None:
             return self.objective
         if self._observing():
             spec = self._observed_spec
             if spec.get("joint"):
                 family, components = _JOINT_FAMILY[self.task], self._mixture_components()
                 if spec.get("coarse"):
+                    if scores != {"nll": 1.0}:
+                        raise AshlarError(
+                            "the energy and variogram scores compare draws with a value, and a censored or interval "
+                            "cell has none; a joint label with coarse cells trains on its likelihood, objective='nll'."
+                        )
                     return make_joint_observed_objective(n_events, family, components=components)
-                # Every cell exact: the joint density of the values themselves, the first field.
-                density = make_joint_objective(n_events, family, components=components)
-                return lambda raw, y, sample_weight: density(raw, y[..., 0], sample_weight)
+                # Every cell exact: the scores of the values themselves, the first field.
+                exact = self._joint_objective(n_events, scores)
+
+                def objective(raw, y, sample_weight, **kwargs):
+                    return exact(raw, y[..., 0], sample_weight, **kwargs)
+
+                objective.stochastic = getattr(exact, "stochastic", False)
+                return objective
             if spec.get("totals"):
                 return make_total_objective(self.task, truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy")))
             return make_observed_objective(
@@ -1258,7 +1283,7 @@ class ASRModel(BaseEstimator):
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
         if self.task in JOINT_TASKS:
-            return make_joint_objective(n_events, _JOINT_FAMILY[self.task], components=self._mixture_components())
+            return self._joint_objective(n_events, scores)
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
@@ -1268,6 +1293,22 @@ class ASRModel(BaseEstimator):
         if class_values is None:
             raise AshlarError("expectation_weight needs the ordered class values from the training labels.")
         return make_ordinal_expectation_objective(np.asarray(class_values, dtype=np.float64), weight)
+
+    def _scores(self) -> dict | None:
+        """``{score: weight}`` of a built-in objective, or ``None`` for a custom callable. See ``score_weights``."""
+        scores = score_weights(self.objective)
+        if scores is not None and self.objective is not None and self.task not in JOINT_TASKS:
+            raise AshlarError(
+                f"objective={self.objective!r} names proper scores for a joint head ({', '.join(JOINT_TASKS)}); "
+                f"task {self.task!r} trains on its own loss, or on a callable objective."
+            )
+        return scores
+
+    def _joint_objective(self, n_events: int, scores: dict):
+        family, components = _JOINT_FAMILY[self.task], self._mixture_components()
+        if scores == {"nll": 1.0}:
+            return make_joint_objective(n_events, family, components=components)
+        return make_joint_score_objective(n_events, family, scores, components=components)
 
     def _head_kwargs_for_fit(self, y_encoded, n_classes: int) -> dict:
         kwargs = dict(self.head_kwargs or {})

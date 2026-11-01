@@ -40,12 +40,20 @@ and scores the same model before and after on the same 28 days: the total's
 day. ``shard=i/n`` runs every n-th origin from the i-th, so several
 processes can share a machine; ``calibrated_report`` reads every shard.
 
+The ``scored`` stage asks the same question of training instead: on the
+same splits, the rank-2 normal and the flow trained on the energy score,
+alone or added to the log density, and the flow on the log density plus the
+variogram score (``objective=...``), each also calibrated as above.
+``scored_report`` sets them beside the log-density fits of ``calibrated``.
+
     JAX_PLATFORMS=cpu python examples/joint_demand.py            # fit and score
     JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4, TabM, and flow joint models
     JAX_PLATFORMS=cpu python examples/joint_demand.py report     # tables
     JAX_PLATFORMS=cpu python examples/joint_demand.py figure     # docs/images/joint-demand.png
     JAX_PLATFORMS=cpu python examples/joint_demand.py calibrated shard=0/3   # fit, calibrate, and score
     JAX_PLATFORMS=cpu python examples/joint_demand.py calibrated_report
+    JAX_PLATFORMS=cpu python examples/joint_demand.py scored shard=0/3       # train on other proper scores
+    JAX_PLATFORMS=cpu python examples/joint_demand.py scored_report
 """
 
 from __future__ import annotations
@@ -95,6 +103,15 @@ CALIBRATED = {
     "joint flow": {"task": "multivariate_flow"},
 }
 CALIBRATED_RESULTS = DATA_DIR / "joint-demand-calibrated-{shard}.json"
+# The scored stage: the same splits and calibration, with the joint heads trained on other proper scores.
+SCORED = {
+    "joint, energy": {"objective": "energy"},
+    "joint, NLL + energy": {"objective": {"nll": 1.0, "energy": 1.0}},
+    "joint flow, energy": {"task": "multivariate_flow", "objective": "energy"},
+    "joint flow, NLL + energy": {"task": "multivariate_flow", "objective": {"nll": 1.0, "energy": 1.0}},
+    "joint flow, NLL + variogram": {"task": "multivariate_flow", "objective": {"nll": 1.0, "variogram": 1.0}},
+}
+SCORED_RESULTS = DATA_DIR / "joint-demand-scored-{shard}.json"
 
 
 def load_matrix() -> np.ndarray:
@@ -441,11 +458,20 @@ def _shard(arguments) -> tuple[int, int]:
 
 def run_calibrated() -> None:
     """Fit on the training weeks but the last 15%, calibrate on those, and score before and after."""
+    _run_held_out(CALIBRATED, CALIBRATED_RESULTS)
+
+
+def run_scored() -> None:
+    """The ``SCORED`` models on the splits of ``run_calibrated``, calibrated and scored the same way."""
+    _run_held_out(SCORED, SCORED_RESULTS)
+
+
+def _run_held_out(models: dict, pattern: Path) -> None:
     index, count = _shard(sys.argv[2:])
     matrix = load_matrix()
     columns = clients(matrix)
     frame, loads, day = table(matrix, columns)
-    path = Path(str(CALIBRATED_RESULTS).format(shard=f"{index}of{count}"))
+    path = Path(str(pattern).format(shard=f"{index}of{count}"))
     results = json.loads(path.read_text()) if path.exists() else {}
     cyclical = {"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25}
     for split, origin in enumerate(ORIGIN_DAYS):
@@ -460,7 +486,7 @@ def run_calibrated() -> None:
         x_cal, y_cal = _rows(frame, held), loads[held]
         x_test, y_test = _rows(frame, test), loads[test]
         hour = np.asarray(x_test["hour"]).astype(int)
-        for name, params in CALIBRATED.items():
+        for name, params in models.items():
             if name in record["methods"]:
                 continue
             print(f"origin day {origin}: {name}, {fit.sum()} fit hours, {held.sum()} calibration hours", flush=True)
@@ -540,6 +566,71 @@ def calibrated_report() -> None:
         print(f"  fit {seconds:.0f} s, calibrate {calibrate_seconds:.1f} s per origin")
 
 
+def _held_out(pattern: str) -> dict:
+    results = {}
+    for path in sorted(DATA_DIR.glob(pattern)):
+        for origin, record in json.loads(path.read_text()).items():
+            results.setdefault(origin, {"methods": {}})["methods"].update(record["methods"])
+    return results
+
+
+def scored_report() -> None:
+    """Each head trained on each score, against its log-density fit from ``calibrated``, on the same splits."""
+    results = _held_out("joint-demand-calibrated-*.json")
+    for origin, record in _held_out("joint-demand-scored-*.json").items():
+        results.setdefault(origin, {"methods": {}})["methods"].update(record["methods"])
+    splits = [results[str(origin)] for origin in ORIGIN_DAYS if str(origin) in results]
+    order = ["joint", *(name for name in SCORED if name.startswith("joint,")), "joint flow"]
+    order += [name for name in SCORED if name.startswith("joint flow,")]
+    methods = [name for name in order if splits and all(name in split["methods"] for split in splits)]
+    print(f"{len(splits)} forecast origins; methods {methods}")
+
+    def mean(method, *keys):
+        values = []
+        for split in splits:
+            value = split["methods"][method]
+            for key in keys:
+                value = value[key]
+            values.append(value)
+        return float(np.mean(values)), float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
+
+    print("| Model | Joint NLL ↓ | CRPS of the total, kW ↓ | Total in its 80% interval | after calibration | Width, kW | Brier, total > 80th pct ↓ | after calibration |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for method in methods:
+        nll, nll_se = mean(method, "joint_nll")
+        crps, crps_se = mean(method, "total_crps")
+        cells = [
+            f"{nll:.2f} ± {nll_se:.2f}",
+            f"{crps:,.0f} ± {crps_se:,.0f}",
+            f"{mean(method, 'before', 'total_coverage_80')[0]:.1%}",
+            f"{mean(method, 'after', 'total_coverage_80')[0]:.1%}",
+            f"{mean(method, 'before', 'total_width_80')[0]:,.0f} → {mean(method, 'after', 'total_width_80')[0]:,.0f}",
+            f"{mean(method, 'before', 'brier_0.8')[0]:.4f}",
+            f"{mean(method, 'after', 'brier_0.8')[0]:.4f}",
+        ]
+        print(f"| {method} | " + " | ".join(cells) + " |")
+    for method in methods:
+        base = "joint flow" if method.startswith("joint flow") else "joint"
+        if method == base or base not in methods:
+            continue
+        wins = {
+            key: sum(split["methods"][method][key] < split["methods"][base][key] for split in splits)
+            for key in ("joint_nll", "total_crps")
+        }
+        brier = sum(split["methods"][method]["before"]["brier_0.8"] < split["methods"][base]["before"]["brier_0.8"] for split in splits)
+        print(f"{method} beats {base} at {wins['joint_nll']} (joint NLL), {wins['total_crps']} (total CRPS), {brier} (Brier 0.8) of {len(splits)} origins")
+    for method in methods:
+        p = np.concatenate([split["methods"][method]["before"]["p_0.8"] for split in splits])
+        event = np.concatenate([split["methods"][method]["before"]["event_0.8"] for split in splits])
+        band = (p >= 0.02) & (p < 0.10)
+        by_hour = np.mean([split["methods"][method]["before"]["coverage_by_hour"] for split in splits], axis=0)
+        seconds = np.mean([split["methods"][method]["fit_seconds"] for split in splits])
+        print(
+            f"{method}: where P(total > 80th pct) is 2-10% (n={band.sum()}), mean {p[band].mean():.3f}, happened {event[band].mean():.3f}; "
+            f"coverage by hour {by_hour.min():.1%} to {by_hour.max():.1%}; fit {seconds:.0f} s per origin"
+        )
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
     {
@@ -549,4 +640,6 @@ if __name__ == "__main__":
         "figure": figure,
         "calibrated": run_calibrated,
         "calibrated_report": calibrated_report,
+        "scored": run_scored,
+        "scored_report": scored_report,
     }[command]()

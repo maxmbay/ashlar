@@ -111,6 +111,20 @@ Each column and each function keeps its own table of probability integral transf
 
 On the electricity loads of [the joint demand benchmark](benchmarks.md#calibrating-the-total), calibration puts the total's 80% interval at 79.5% to 80.5% of hours for every joint model tried, from 68.6% to 88.6% before, and makes P(total > capacity) more reliable where a model was off: where independent heads said 2% to 10%, the event happened 12.6% of the time before and 7.5% after. One table for every row cannot fix an error that changes from row to row, such as coverage that varies with the hour of the day.
 
+### Training on other proper scores
+
+A joint head trains on its log density by default. `objective` trains it on other proper scores, alone or added to the log density:
+
+```python
+ASRRegressor(task="multivariate_flow", objective="energy")                    # the energy score alone
+ASRRegressor(task="multivariate_flow", objective={"nll": 1.0, "energy": 1.0})  # added to the log density
+ASRRegressor(task="multivariate_gaussian", objective={"nll": 1.0, "variogram": 1.0})
+```
+
+The log density scores each column given the ones before it. The energy score, `E‖X − y‖ − ½ E‖X − X′‖`, scores the whole outcome as one point, so it also rewards getting a total or another function of the columns right; with one column it is the CRPS. The variogram score of order 0.5 compares `|y_i − y_j|^0.5` for every pair of columns with what the model expects of it, so it is sensitive to how the columns move together. A shift of every column leaves it unchanged, so it cannot place the columns on its own, and it trains only in a blend with `"nll"` or `"energy"`.
+
+Both are estimated without bias from 16 reparameterized draws per row, fresh at every step, on the standardized columns, so each column counts the same whatever its units. A mixture is drawn from every component, weighted by the component probabilities, so the gradient reaches those probabilities without a discrete draw. Validation reads the same draws every epoch, so epochs compare on equal terms. The draws make a step of the flow, which takes one pass per column to draw, about one and a half times as slow.
+
 ## Dependence that is not a correlation
 
 A joint normal can only say how strongly columns move together on a straight line. `task="multivariate_mixture"` takes the same `y` and predicts a mixture of joint normals, five by default (`head_kwargs={"components": 5, "rank": 2}`), each with its own weight, location, and low-rank covariance for every row. It fits dependence that comes in regimes, such as a rush day when every column jumps together and an ordinary day when they barely move, which a single normal averages into one correlation. Its `log_prob` is exact, a draw picks a component and then draws from it, and its marginals are mixtures of normals with exact quantiles.
