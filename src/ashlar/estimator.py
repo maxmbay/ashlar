@@ -113,7 +113,7 @@ from ashlar.distributions import (
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
-from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
+from ashlar.preprocess import NUMERIC_SCALINGS, EncodedBatch, FeatureEncoder, frame_columns, target_array
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
 from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer, pack_units
@@ -1656,6 +1656,58 @@ class ASRModel(BaseEstimator):
         )
         return self.core_(transformed, categorical, category_index, set_tokens, set_mask, key=None)
 
+    def encode(self, X) -> EncodedBatch:
+        """Host-encode a frame for the traceable path: ``forward_raw`` and ``forward_dist``.
+
+        Returns an ``EncodedBatch`` whose ``numeric_raw`` is still in the
+        units of ``X``, NaNs included; imputation and scaling run inside JAX.
+        Categories become one-hot columns, learned-embedding indices, and set
+        tokens here, on the host, so gradients reach numeric columns only.
+        """
+        self._require_fitted()
+        return self.encoder_.transform(self._with_cyclical(X))
+
+    def forward_dist(
+        self,
+        numeric_raw,
+        categorical_onehot,
+        category_index=None,
+        set_tokens=None,
+        set_mask=None,
+        *,
+        policy: str | None = None,
+    ):
+        """``predict_dist`` from encoded arrays, traceable end to end.
+
+        ``predict_dist(X)`` encodes the frame on the host, so ``jax.grad``
+        cannot reach ``X`` through it. This takes the arrays from
+        ``encode(X)`` instead and runs imputation, scaling, the core, and the
+        head inside JAX, so ``jax.grad``, ``jax.jit``, and ``jax.vmap`` see the
+        whole path from raw numeric values to the ``Distribution``::
+
+            batch = model.encode(X)
+            def q90(numeric):
+                dist = model.forward_dist(numeric, batch.categorical_onehot, batch.category_index,
+                                          batch.set_tokens, batch.set_mask)
+                return dist.quantile(0.9).sum()
+            jax.grad(q90)(batch.numeric_raw)  # d q90 / d x, in the units of X
+
+        A NaN cell is imputed with the training median, so its gradient is 0.
+        """
+        raw = self.forward_raw(numeric_raw, categorical_onehot, category_index, set_tokens, set_mask)
+        return self.dist_from_raw(raw, policy)
+
+    def explain(self, X, target="quantile", **kwargs):
+        """Attribute a quantile, the spread, an interval's width, or a tail probability to the features.
+
+        Shorthand for ``ashlar.explain.explain(self, X, target, **kwargs)``;
+        see there for targets, methods, and baselines.
+        """
+        from ashlar.explain import explain
+
+        self._require_distribution("explain")
+        return explain(self, X, target, **kwargs)
+
     def forward_transformed(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
         """Point predictions from raw numeric values, keeping JAX arrays."""
         raw = self.forward_raw(
@@ -1886,6 +1938,15 @@ class ASRModel(BaseEstimator):
         - ``custom``: whatever ``dist_fn(raw)`` returns.
         """
         return self._dist_from_raw(self._raw_from_frame(X), policy)
+
+    def dist_from_raw(self, raw, policy: str | None = None):
+        """The ``Distribution`` for raw head outputs, such as ``forward_raw``'s.
+
+        Traceable: no host round trip, so it composes with ``jax.grad`` and
+        ``jax.jit``. ``predict_dist(X)`` is ``dist_from_raw`` of the core's
+        output on ``X``; ``forward_dist`` is the same from encoded arrays.
+        """
+        return self._dist_from_raw(raw, policy)
 
     def _dist_from_raw(self, raw, policy: str | None = None):
         task = self.task
