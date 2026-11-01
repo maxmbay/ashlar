@@ -166,6 +166,36 @@ model.predict(X_new)      # the mean, zeros included
 
 Its `log_prob` is a log probability at zero and a log density elsewhere, the usual likelihood of a mixed outcome, so compare it only with another model of the same kind; CRPS compares it with anything. Quantiles at or below the share of zeros are exactly 0, and an 80% interval that reaches down to 0 contains every zero, so it can hold more than 80% of rows even after calibration.
 
+## Outcomes of different kinds, chained
+
+The joint heads above model columns of one kind, continuous values. Many tables record several outcomes of different kinds about each row: how many claims a policy made and what they cost, whether a customer churned and when, which part failed and after how long. `task="chain"` predicts them together, with a head of its own kind for each column, each conditioned on the columns before it:
+
+```
+p(claims, cost, type | x) = p(claims | x) · p(cost | claims, x) · p(type | claims, cost, x)
+```
+
+```python
+from ashlar import ASRRegressor
+
+model = ASRRegressor(
+    task="chain",
+    head_kwargs={"columns": ["negative_binomial", "hurdle", {"kind": "categorical"}]},
+).fit(X, Y)                                   # Y is (rows, 3): claim count, cost, claim type code
+
+model.log_prob(X_new, Y_new)                  # exact joint log-likelihood per row
+draws = model.sample(X_new, n=1000)           # (1000, rows, 3): coherent draws, one column at a time
+
+def total_cost(y):
+    return y[..., 1]
+
+model.calibrate(X_holdout, Y_holdout, target=total_cost)
+model.predict_interval(X_new, 0.9, target=total_cost)
+```
+
+A column's kind is any one-column head that has a likelihood: `poisson` and `negative_binomial` (with `"zero_inflated": True` in a dict), `hurdle` (with `"severity": "gamma"`), `categorical` (codes `0, 1, 2, ...`; the class count comes from the training values, or `"classes": n`), and the continuous `gaussian`, `mixture`, `flow`, `histogram`, and `student_t`, which are standardized column by column; counts, amounts, and classes stay in their own units. Each column's head reads the row's hidden state and the values of the columns before it, as observed in training and as drawn in a draw, through a small network of its own (`head_kwargs={"hidden": 32}`), so the cost of a claim can depend on how many claims there were, and its spread as well as its mean. The joint log-likelihood is the sum of the columns' conditional log-likelihoods, a mass for a count or a class and a density for an amount or a value, so it is exact. A question about several columns, such as the total cost of a policy, is read from the joint draws, as for the flow, and `calibrate` calibrates each column and any function of them the same way ([calibrating the columns and the total](#calibrating-the-columns-and-the-total)). Order the columns so that the ones that drive the others come first.
+
+A chain takes a [joint label](observed.md#several-products-that-sell-out-together) too. A categorical column's cell can be a range of classes, `observed.interval(-inf, inf)` for a class that was not recorded, and the likelihood sums over the classes it allows; the last column's cell can be censored or an interval. Every other cell must be exact, because the columns after it condition on its value. That is enough for a censored time with an unknown cause, the competing-risks model in [docs/observed.md](observed.md).
+
 ## JAX transforms
 
 A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, `LowRankMultivariateNormal`, and `AutoregressiveFlow`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.

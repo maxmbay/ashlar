@@ -16,6 +16,7 @@
 | Several columns that move together | `multivariate_gaussian` | A joint normal with a learned low-rank covariance, so totals and joint events come out right. |
 | Several columns that move together in a few distinct ways, such as a day when everything spikes at once | `multivariate_mixture` | Five joint normals with learned weights (`head_kwargs={"components": 5}`), each with its own location and low-rank covariance. |
 | Several columns whose dependence is curved, skewed, or heavier in the tails | `multivariate_flow` | An autoregressive flow: each column's whole conditional shape can change with the columns before it. |
+| Several columns of different kinds, such as a claim count and its cost, or a cause and a time | `chain` | One head per column, each of its own kind, each reading the columns before it: `head_kwargs={"columns": ["negative_binomial", "hurdle"]}`. |
 
 ```python
 from ashlar import ASRRegressor

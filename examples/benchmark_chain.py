@@ -4,8 +4,10 @@ freMTPL2 (from the R package CASdatasets) holds 677,991 motor policies with
 their exposure in years, their number of claims, and, in a second table, the
 cost of every claim. Each policy here has two outcomes: ``N``, its number of
 claims (capped at 4, as is usual for this table), and ``S``, its average
-cost per claim, 0 when it had none. Policies with claims but no recorded
-cost are dropped (about 9,000). The features are the driver's age, the
+cost per claim, 0 when it had none; 3.7% of policies had a claim. A
+policy's count is its number of recorded costs, and a policy with claims but
+no recorded cost would be dropped, though the current CASdatasets table has
+none. The features are the driver's age, the
 bonus-malus level, the vehicle's power, age, brand, and fuel, the area, the
 region, the log of the population density, and the exposure.
 
