@@ -249,14 +249,39 @@ def stage_groups(results):
 # ---------------------------------------------------------------- stage: localize
 
 
+# How each localize run calibrates: not at all, once, per bin of member disagreement, and by a score scaled by it.
+LOCALIZE_LABELS = ("raw", "pooled", "members", "scaled")
+
+
+def _scaled_intervals(model, x_cal, y_cal, held_out, seed, coverage=0.8):
+    """The interval of a conformity score scaled by the members' spread, ``|y - median| / epistemic``, per held-out set.
+
+    The other way to localize: where a bin's table stops at the largest disagreement the calibration rows showed,
+    this interval keeps widening with the members' spread past it.
+    """
+
+    def centre_and_spread(xs):
+        median = model.predict_quantiles(xs, [0.5], n_samples=N_DRAWS, seed=seed, calibrated=False)[:, 0]
+        spread = np.asarray(model.predict_uncertainty(xs)["epistemic"], dtype=np.float64)
+        return median, np.maximum(spread, 1e-12)
+
+    median, spread = centre_and_spread(x_cal)
+    margin = _conformal(np.abs(np.asarray(y_cal, dtype=np.float64) - median) / spread, coverage)
+    out = {}
+    for where, xs, _ys in held_out:
+        median, spread = centre_and_spread(xs)
+        out[where] = np.stack([median - margin * spread, median + margin * spread], axis=1)
+    return out
+
+
 def stage_localize(results):
     out = results.setdefault("localize", {})
     for name, (loader, shift_column) in _chosen(UNCERTAINTY_TABLES).items():
         x, y = loader()
         rows = out.setdefault(name, {"rows": int(len(y)), "shift_column": shift_column, "runs": {}})
         for seed in SEEDS:
-            # A run saved before coverage was kept per bin of disagreement runs again.
-            if "in_range_bins" in rows["runs"].get(str(seed), {}):
+            # A run saved before the scaled score and the coverage per bin of disagreement runs again.
+            if "scaled_in_range" in rows["runs"].get(str(seed), {}):
                 continue
             # Train and calibrate below the column's 80th percentile; test inside and above it.
             column = x[shift_column].to_numpy(np.float64)
@@ -276,11 +301,15 @@ def stage_localize(results):
                     intervals[label, where] = interval
                     run[f"{label}_{where}"] = _interval(interval[:, 0], interval[:, 1], ys)
             run["edges"] = model.calibration_["by"]["members"]
+            scaled = _scaled_intervals(model, x_cal, y_cal, held_out, seed)
+            for where, _xs, ys in held_out:
+                intervals["scaled", where] = scaled[where]
+                run[f"scaled_{where}"] = _interval(scaled[where][:, 0], scaled[where][:, 1], ys)
             # Each held-out row's bin of member disagreement, "0" the lowest, and every calibration's coverage per bin.
             for where, xs, ys in held_out:
                 bins = model._row_groups(xs, model.calibration_, None)
                 run[f"{where}_bins"] = {str(k): int(v) for k, v in zip(*np.unique(bins, return_counts=True))}
-                for label in ("raw", "pooled", "members"):
+                for label in LOCALIZE_LABELS:
                     interval = intervals[label, where]
                     run[f"{label}_{where}_by_bin"] = _by_group(interval[:, 0], interval[:, 1], ys, bins)
             run["seconds"] = time.perf_counter() - started
@@ -477,13 +506,15 @@ def report_groups():
         runs = list(table["runs"].values())
         print(f"### {name}, shift on {table['shift_column']}, {len(runs)} splits\n")
         print("| Calibration | In range | Width | Above range | Width |\n|---|---:|---:|---:|---:|")
-        for label in ("raw", "pooled", "members"):
+        for label in LOCALIZE_LABELS:
+            if f"{label}_in_range" not in runs[0]:
+                continue
             cells = []
             for where in ("in_range", "above_range"):
                 cells += [_mean_sd([r[f"{label}_{where}"]["coverage"] for r in runs], 3), _mean_sd([r[f"{label}_{where}"]["width"] for r in runs], 3)]
             print(f"| {label} | " + " | ".join(cells) + " |")
         print()
-        if not all("in_range_bins" in r for r in runs):
+        if not all("scaled_in_range" in r for r in runs):
             continue
         # Coverage within each bin of member disagreement ("0" the lowest), over the runs where it has 50 rows.
         bins = sorted({key for r in runs for where in ("in_range", "above_range") for key in r[f"{where}_bins"]}, key=int)
@@ -491,7 +522,7 @@ def report_groups():
         for where in ("in_range", "above_range"):
             shares = [np.mean([r[f"{where}_bins"].get(key, 0) / sum(r[f"{where}_bins"].values()) for r in runs]) for key in bins]
             print(f"| share of rows | {where} | " + " | ".join(f"{share:.0%}" for share in shares) + " |")
-            for label in ("raw", "pooled", "members"):
+            for label in LOCALIZE_LABELS:
                 cells = []
                 for key in bins:
                     have = [r[f"{label}_{where}_by_bin"][key]["coverage"] for r in runs if key in r[f"{label}_{where}_by_bin"]]
