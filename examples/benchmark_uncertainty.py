@@ -1,6 +1,6 @@
 """Benchmarks for calibrated intervals, the count heads, and member uncertainty.
 
-Three stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
+Five stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
 
 - ``calibration``: 80% and 90% intervals before and after ``calibrate``, for
   the default mixture and the quantile head, beside LightGBM quantile
@@ -18,7 +18,9 @@ Three stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
 - ``localize``: the shift test of ``uncertainty`` with a calibration slice.
   Does ``calibrate(..., localize="members")``, which calibrates rows in bins
   of member disagreement, keep the 80% interval on rows past the training
-  range better than one calibration of every row?
+  range better than one calibration of every row? Beside them, an interval
+  scaled by the members' spread, and each interval's coverage within each
+  bin of member disagreement.
 
 Every table is a public GitHub mirror. Three seeds, 0, 1, and 2. A finished
 seed is skipped on a rerun.
