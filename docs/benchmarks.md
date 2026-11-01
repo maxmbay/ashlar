@@ -384,6 +384,23 @@ Conformal calibration is not Ashlar's alone: the same step brings LightGBM's qua
 
 A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated mixture covers between 77.6% and 82.2% on single splits.
 
+### Coverage within groups
+
+One calibration holds 80% over all rows, not necessarily within each kind of row. From the same script, stage `groups`, on the same tables and splits, with one column of each table as the groups: California by distance to the ocean, diamonds by cut, abalone by sex, taxi tips by the taxi's color (yellow or green), and bike rentals by hour of day. The column is also a feature of each table. The model is `ASRRegressor(task="mixture", random_state=seed)`, scored within each group with at least 50 test rows before calibration, after one calibration of every calibration row, and after `calibrate(X_cal, y_cal, groups=column)`, which gives each group with at least 100 calibration rows a table of its own. Calibration and test rows are each 20% of the table, so a group has about as many of one as of the other. A group's coverage is its mean over the three splits; the last column is the group furthest from 80% on each split, averaged over the splits. Unlike the rest of this script, this stage ran on the M3 Pro laptop of [How it was run](#how-it-was-run), beside other jobs.
+
+| Table, groups | Groups (test rows each) | Raw | One calibration | Per group | Furthest group on a split, points from 80%: one calibration → per group |
+|---|---|---:|---:|---:|---:|
+| California, distance to the ocean | 4 (454 to 1,824) | 75.4% to 76.4% | 79.7% to 80.6% | 79.8% to 82.1% | 2.4 → 2.3 |
+| Diamonds, cut | 5 (321 to 4,328) | 76.6% to 79.8% | 77.3% to 80.3% | 77.8% to 82.3% | 3.3 → 3.0 |
+| Abalone, sex | 3 (267 to 294) | 77.6% to 80.9% | 78.3% to 81.6% | 79.3% to 81.8% | 4.2 → 3.3 |
+| Taxi tips, taxi color | 2 (189 and 1,087) | 89.4% to 93.8% | 79.7% to 82.0% | 79.9% to 80.0% | 5.7 → 3.5 |
+| Bike rentals, hour of day | 24 (131 to 153) | 69.0% to 83.8% | 72.0% to 86.6% | 72.0% to 82.4% | 8.8 → 13.1 |
+
+- **On four of the five tables one calibration already holds within every group.** After it, every group of California, diamonds, abalone, and taxi tips holds 77.3% to 82.0% of its rows, and a table per group leaves the furthest group about where it was. The clearest gain is the 189 green taxis, 82.0% → 79.9%.
+- **Hour of day on bike rentals is the exception.** One calibration leaves the night hours too wide (85.1% at 3:00 and 86.6% at 4:00) and some busy hours too narrow (72.8% at 14:00, 73.9% at 7:00), with 5 of the 24 hours outside 75% to 85%. A table per hour brings those four to 80.3%, 81.0%, 75.1%, and 78.7%, and leaves 1 hour outside: 23:00, at 72.0% both ways, which moves by 7 points from split to split.
+- **A table per group is noisier, since it has fewer rows.** Each hour has about 145 calibration rows, so its own conformal level misses by about 3 points either way, and on a single split the furthest hour is 13.1 points from 80% after calibrating per hour, against 8.8 after one calibration. Averaged over the three splits, the hours are 3.6 points from 80% (root mean square) after one calibration, more than the 1.9 that 145 test rows per hour explain, and 2.7 after one per hour, which their calibration and test rows explain by chance alone. A group needs several hundred calibration rows before its table is reliably closer than one table of every row on a single split, unless one calibration is far off for it; `min_group_rows` (100 by default) is the floor below which a group reads the table of every row.
+- Calibrating per group widens an interval only where a group needed it: the bike rentals' 80% interval goes from 72.4 to 74.8 rentals on average, and the other four tables' widths change by under 1%. Over all rows the per-group tables hold 79.0% to 80.6%, as one calibration does (78.6% to 80.3%).
+
 ## Count heads
 
 From the same script, stage `counts`. Four count targets, each split 80/20 three times. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments; `gaussian` and `mixture` see the count as a number. LightGBM is early-stopped with the Poisson objective, and scored as a Poisson with that mean. CRPS and coverage are from 400 draws per row; NLL is the negative log mass of the count that happened, so it is only defined for the models that give a mass.
@@ -597,12 +614,30 @@ In the 2% to 10% band the mean prediction is 5.1% to 5.3% for every model, befor
 - **Calibration puts the total's 80% interval at 80% for every model**, 79.5% to 80.5% after, from 68.6% to 88.6% before. It widens the independent heads' interval by 29%, since their errors move together and they do not know it, and narrows TabM's by 19%. Each client's own interval lands between 74.7% and 82.0%, from between 57.9% and 89.8%.
 - **It makes P(total > capacity) more reliable where a model was off.** Where the independent heads said 2% to 10%, the event happened 12.6% of the time, and 7.5% after calibration; the flow goes from 9.8% to 5.4%. TabM was already reliable in that band, and calibration moved it the wrong way, to 8.3%.
 - **The event scores improve on average, not origin by origin.** The mean Brier score and log loss fall for most models, the most for the independent heads (log loss at the 95th percentile from 0.118 to 0.098), but calibration lowers each score at only 10 to 16 of the 25 origins: the gain comes from the origins where a model was far off. One map of the PIT corrects the average error, not which hours are risky. After calibration the four models' event scores differ by at most 0.002 in Brier score and 0.008 in log loss, inside the noise of the origins, as in the tables above.
-- **It does not fix coverage by hour of day.** After calibration the joint normal still covers its total in 73.9% to 87.3% of the hours at each hour of the day, with 8 of the 24 hours outside 75% to 85%, and TabM 13, because one table pools every hour.
+- **It does not fix coverage by hour of day.** After calibration the joint normal still covers its total in 73.9% to 87.3% of the hours at each hour of the day, with 8 of the 24 hours outside 75% to 85%, and TabM 13, because one table pools every hour. A table per hour does fix it ([below](#calibrating-per-hour-of-day)).
 - **The normal-based heads calibrate in 0.2 to 2.4 seconds per origin**, since the sum's PIT is exact for them. The flow reads every column and the sum from 4,000 joint draws per calibration hour: 115 seconds.
+
+### Calibrating per hour of day
+
+One table of every calibration hour holds the total at 80% on average, not at each hour of the day. From `examples/joint_demand.py by_hour`, on the same 25 origins, splits, capacities, and draws as the calibration above: the rank-2 `joint` normal and `multivariate_flow`, fitted as there, calibrated on every calibration hour and then with `model.calibrate(X_cal, Y_cal, groups="hour", min_group_rows=50)`, which gives each hour of the day tables of its own. The calibration weeks hold 56 to 161 days, so every hour has its own table at every origin. The last column is the share of test hours whose eight loads are inside the 80% joint highest-density region ([`predict_region`](distributions.md#calibrating-the-columns-and-the-total)), calibrated the same way. An hour's coverage is over its 700 test hours, 28 at each origin. Calibrating took 7.5 seconds per origin for the joint normal and 152 for the flow, region included. It ran on the same Mac, three origins at a time, beside other jobs.
+
+| Model | Calibration | Total inside its 80% interval | Lowest hour | Highest hour | Hours outside 75% to 85% | Width of that interval, kW | Eight loads inside the 80% region |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `joint` | none | 80.5% | 74.1% | 89.4% | 8 | 13,465 | 61.3% |
+| `joint` | every row | 79.5% | 73.9% | 87.3% | 8 | 12,975 | 78.9% |
+| `joint` | per hour | 79.4% | 73.4% | 84.3% | 2 | 13,258 | 78.5% |
+| `multivariate_flow` | none | 74.8% | 61.1% | 87.1% | 15 | 11,862 | 53.4% |
+| `multivariate_flow` | every row | 80.4% | 67.4% | 90.6% | 10 | 13,759 | 78.1% |
+| `multivariate_flow` | per hour | 80.8% | 77.0% | 83.4% | 0 | 13,738 | 78.1% |
+
+The fits, and the calibration of every row, reproduce the table above exactly.
+
+- **A table per hour holds the total near 80% at every hour.** After one calibration the hours spread more than 5 points either way, 8 of them outside 75% to 85% for the joint normal and 10 for the flow, so they need a calibration of their own. With a table per hour the flow's hours hold 77.0% to 83.4%, none outside, at the same mean width. The joint normal's over-covered hours come down to at most 84.3%, 2 hours stay just under 75%, and its interval widens by 2%. Tables of 56 to 161 rows are enough here, since one table is far off for many hours.
+- **Calibration holds the joint region near 80% too.** Before calibration the 80% region holds the eight loads in 61.3% of hours for the joint normal and 53.4% for the flow: both models are far more overconfident about the eight loads together than about their total, whose raw interval holds 80.5% and 74.8%. Calibrating on the model's probability of an outcome denser than the one seen takes the region to 78.9% and 78.1%, and a table per hour leaves it there. The calibration weeks come before the 28 test days rather than among them, so the conformal guarantee holds only approximately, and the region lands 1 to 2 points short.
 
 ### Training on other proper scores
 
-Does a training score that judges the eight loads as one outcome, rather than each load given the ones before it, get the total right without calibration? From `examples/joint_demand.py scored`, on the same 25 origins, splits, capacities, and draws as the calibration above: the rank-2 `joint` normal and `multivariate_flow`, each trained on the energy score alone (`objective="energy"`) and added to the log density (`objective={"nll": 1.0, "energy": 1.0}`), and the flow on the log density plus the variogram score (`{"nll": 1.0, "variogram": 1.0}`), each then calibrated as above. The log-density rows are the fits of the calibration table, and every model trains on 15% fewer hours than in the first tables, so its joint NLL is higher than theirs. Mean over the 25 origins (± standard error), before → after calibration. It ran on the same Mac, three origins at a time.
+Does a training score that judges the eight loads as one outcome, rather than each load given the ones before it, get the total right without calibration? From `examples/joint_demand.py scored`, on the same 25 origins, splits, capacities, and draws as [calibrating the total](#calibrating-the-total): the rank-2 `joint` normal and `multivariate_flow`, each trained on the energy score alone (`objective="energy"`) and added to the log density (`objective={"nll": 1.0, "energy": 1.0}`), and the flow on the log density plus the variogram score (`{"nll": 1.0, "variogram": 1.0}`), each then calibrated as above. The log-density rows are the fits of the calibration table, and every model trains on 15% fewer hours than in the first tables, so its joint NLL is higher than theirs. Mean over the 25 origins (± standard error), before → after calibration. It ran on the same Mac, three origins at a time.
 
 | Model | Trained on | Joint NLL ↓ | CRPS of the total, kW ↓ | Total inside its 80% interval | Width of that interval, kW | Brier, total > 80th percentile ↓ |
 |---|---|---:|---:|---:|---:|---:|
@@ -644,3 +679,34 @@ These fits are slow on 4 CPU cores (about an hour per split), so this section ha
 - **In range, the noise ranks errors slightly better than the member spread.** Aleatoric beats epistemic on all three tables, by 0.02 to 0.04 in Spearman. On rows like the training rows most of the error is noise, and the noise head already sizes it.
 - **Out of range, the member spread rises most.** Above the training range the mean epistemic grows 2.5 times on California, 4 times on diamonds and 1.6 times on bike rentals, against 1.5, 2.1 and 1.5 times for the aleatoric part. That is the signal `epistemic` exists for: the members agree on what they saw and drift apart on what they did not.
 - **It flags a shift; it does not size the error.** On diamonds above 80th-percentile carat the RMSE grows 21 times and the epistemic part only 4 times. Use the spread to find rows to distrust, not as an interval. Calibrated intervals (above) are for exchangeable rows, and these rows are not.
+
+### Calibrating where the members disagree
+
+Does a calibration that knows how much the members disagree hold the interval past the training range? From the same script, stage `localize`: the shift test above with a calibration slice. On each table the model trains on 60% of the rows at or below the 80th percentile of the shift column, calibrates on 20%, and is scored on the other 20% (in range) and on every row above the 80th percentile (above range), three times (seeds 0, 1, 2). The model is `tabm_piecewise(task="gaussian")` again, and four 80% intervals are scored:
+
+- *raw*: the model's own.
+- *one calibration*: `calibrate(X_cal, y_cal)`.
+- *members*: `calibrate(X_cal, y_cal, localize="members")`, a table for each of five equal-count bins of the members' share of the predictive spread. The bins' edges come from the calibration rows, so a row past the largest edge reads the top bin's table.
+- *scaled*, for comparison and not part of Ashlar: the median ± q times the member spread (`epistemic`), with q the conformal quantile of |y − median| / `epistemic` over the calibration rows (normalized conformal prediction). This interval keeps widening with the spread past anything the calibration rows showed.
+
+Each cell is a mean over the three splits. The last two columns score each bin of member disagreement on its own, on the splits where it has at least 50 rows: the range over the five bins in range, and the top bin above the range, which holds 82% of the rows above the range on California, 84% on diamonds, and 26% on bike rentals. It ran on the M3 Pro laptop of [How it was run](#how-it-was-run), one process per table, beside other jobs.
+
+| Table, shift column | Calibration | In range | Above range | Width above range | In range, over the five bins | Above range, top bin |
+|---|---|---:|---:|---:|---:|---:|
+| California, $100k, median income | raw | 86.0% | 64.5% | 1.448 | 84.6% to 86.7% | 65.0% |
+| | one calibration | 81.3% | 59.0% | 1.275 | 79.6% to 82.4% | 59.5% |
+| | members | 81.2% | 58.8% | 1.269 | 79.7% to 82.6% | 59.4% |
+| | scaled | 81.3% | 77.2% | 2.121 | 64.9% to 92.6% | 80.4% |
+| Diamonds, $1,000, carat | raw | 89.6% | 15.8% | 1.543 | 86.3% to 92.2% | 8.9% |
+| | one calibration | 80.3% | 11.7% | 1.151 | 75.4% to 85.3% | 6.3% |
+| | members | 80.3% | 11.0% | 1.042 | 79.0% to 81.9% | 5.5% |
+| | scaled | 79.7% | 18.6% | 2.293 | 59.8% to 93.9% | 13.9% |
+| Bike rentals per hour, temperature | raw | 88.0% | 79.9% | 122.9 | 86.9% to 89.2% | 78.0% |
+| | one calibration | 80.3% | 70.8% | 99.0 | 78.5% to 81.7% | 69.7% |
+| | members | 79.9% | 70.4% | 98.5 | 77.9% to 82.0% | 68.6% |
+| | scaled | 80.2% | 74.3% | 111.6 | 62.7% to 91.6% | 85.1% |
+
+- **`localize="members"` evens out coverage across the bins where one calibration leaves it uneven.** In range on diamonds, one calibration covers 75.4% of the rows the members agree on most and 85.3% of those they disagree on most; a table per bin puts every bin between 79.0% and 81.9%, with an interval 2% wider on average. On California and bike rentals one calibration already holds every bin between 78.5% and 82.4%, and the bins change little.
+- **No calibration on rows in range holds the interval above it.** The members flag those rows: most of California's and diamonds' fall in the top bin. But the top bin's table comes from rows in range, whose errors are smaller, so the rows above the range keep the coverage of one calibration, 59.4% on California and 5.5% on diamonds. Calibrating also narrows an interval that was too wide in range, and that costs coverage above it: California's 64.5% before calibration falls to 59.0% after one calibration, and bike rentals' 79.9% to 70.8%.
+- **Scaling by the member spread trades coverage in range for coverage above it.** Above the range the scaled interval covers 77.2% of California's rows, with an interval 1.7 times as wide as one calibration's, and 74.3% of bike rentals'. In range it still covers 80% on average, but only 59.8% to 64.9% of the rows the members agree on most and 91.6% to 93.9% of those they disagree on most. In range most of the error is noise, which the member spread does not measure (the ranking table above), so an interval sized by the spread alone is too narrow where the members agree and too wide where they do not. Ashlar does not ship it.
+- **On diamonds nothing reaches the rows above the range.** The scaled interval, twice as wide as one calibration's, covers 18.6% of them. The members drift apart there, but the error grows far more (the RMSE 21 times, the member spread 4 times, in the shift table above), so no interval sized by their disagreement holds it. Use the spread to flag those rows, as above.

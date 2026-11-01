@@ -1,6 +1,6 @@
 """Benchmarks for calibrated intervals, the count heads, and member uncertainty.
 
-Three stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
+Five stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
 
 - ``calibration``: 80% and 90% intervals before and after ``calibrate``, for
   the default mixture and the quantile head, beside LightGBM quantile
@@ -12,6 +12,15 @@ Three stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
 - ``uncertainty``: ``predict_uncertainty`` from a 32-member TabM. Does the
   members' disagreement rank the rows by error, and does it grow on rows
   outside the training range?
+- ``groups``: the calibration tables again, each with a group column. Does
+  the 80% interval hold within every group after ``calibrate``, and after
+  ``calibrate(..., groups=column)``, which calibrates each group on its own?
+- ``localize``: the shift test of ``uncertainty`` with a calibration slice.
+  Does ``calibrate(..., localize="members")``, which calibrates rows in bins
+  of member disagreement, keep the 80% interval on rows past the training
+  range better than one calibration of every row? Beside them, an interval
+  scaled by the members' spread, and each interval's coverage within each
+  bin of member disagreement.
 
 Every table is a public GitHub mirror. Three seeds, 0, 1, and 2. A finished
 seed is skipped on a rerun.
@@ -106,6 +115,14 @@ COUNT_TABLES = {
     "taxi_pickups": taxi_pickups,
     "abalone_rings": abalone_rings,
 }
+# The column whose groups each calibration table is scored within, and calibrated by in the groups stage.
+GROUP_COLUMNS = {
+    "california": "ocean_proximity",
+    "diamonds_price": "cut",
+    "abalone": "sex",
+    "taxi_tip": "color",
+    "bike_count": "hr",
+}
 UNCERTAINTY_TABLES = {
     # The column held back above its 80th percentile for the shift test.
     "california": (california, "median_income"),
@@ -180,6 +197,126 @@ def stage_calibration(results):
             run["lightgbm_cal_0.8"] = _interval(raw[:, 0] - margin, raw[:, 1] + margin, y_test)
             rows["runs"][str(seed)] = run
             print(name, seed, {k: round(v["coverage"], 3) for k, v in run.items() if isinstance(v, dict)}, flush=True)
+            _save(results)
+
+
+# ---------------------------------------------------------------- stage: groups
+
+
+def _by_group(lo, hi, y, groups, min_rows=50):
+    """Coverage and width within each group with at least ``min_rows`` test rows."""
+    out = {}
+    for key in sorted(set(groups.tolist()), key=str):
+        rows = groups == key
+        if rows.sum() >= min_rows:
+            out[str(key)] = {**_interval(lo[rows], hi[rows], y[rows]), "rows": int(rows.sum())}
+    return out
+
+
+def stage_groups(results):
+    out = results.setdefault("groups", {})
+    for name, loader in _chosen(CALIBRATION_TABLES).items():
+        x, y = loader()
+        column = GROUP_COLUMNS[name]
+        rows = out.setdefault(name, {"rows": int(len(y)), "column": column, "runs": {}})
+        for seed in SEEDS:
+            if str(seed) in rows["runs"]:
+                continue
+            x_train, x_cal, x_test, y_train, y_cal, y_test = _three_way(x, y, seed)
+            groups = x_test[column].to_numpy()
+            run = {"calibration_rows": {str(k): int(v) for k, v in x_cal[column].value_counts().items()}}
+            started = time.perf_counter()
+            model = ASRRegressor(task="mixture", random_state=seed).fit(x_train, y_train)
+            raw = model.predict_interval(x_test, 0.8, n_samples=N_DRAWS, seed=seed, calibrated=False)
+            run["raw"] = _by_group(raw[:, 0], raw[:, 1], y_test, groups)
+            model.calibrate(x_cal, y_cal, n_samples=N_DRAWS, seed=seed)
+            pooled = model.predict_interval(x_test, 0.8, n_samples=N_DRAWS, seed=seed)
+            run["pooled"] = _by_group(pooled[:, 0], pooled[:, 1], y_test, groups)
+            run["pooled_all"] = _interval(pooled[:, 0], pooled[:, 1], y_test)
+            model.calibrate(x_cal, y_cal, n_samples=N_DRAWS, seed=seed, groups=column)
+            grouped = model.predict_interval(x_test, 0.8, n_samples=N_DRAWS, seed=seed)
+            run["grouped"] = _by_group(grouped[:, 0], grouped[:, 1], y_test, groups)
+            run["grouped_all"] = _interval(grouped[:, 0], grouped[:, 1], y_test)
+            run["own_tables"] = sorted(model.calibration_["groups"])
+            run["seconds"] = time.perf_counter() - started
+            rows["runs"][str(seed)] = run
+            spread = {
+                key: (min(v["coverage"] for v in run[key].values()), max(v["coverage"] for v in run[key].values()))
+                for key in ("raw", "pooled", "grouped")
+            }
+            print(name, seed, {key: tuple(round(v, 3) for v in value) for key, value in spread.items()}, flush=True)
+            _save(results)
+
+
+# ---------------------------------------------------------------- stage: localize
+
+
+# How each localize run calibrates: not at all, once, per bin of member disagreement, and by a score scaled by it.
+LOCALIZE_LABELS = ("raw", "pooled", "members", "scaled")
+
+
+def _scaled_intervals(model, x_cal, y_cal, held_out, seed, coverage=0.8):
+    """The interval of a conformity score scaled by the members' spread, ``|y - median| / epistemic``, per held-out set.
+
+    The other way to localize: where a bin's table stops at the largest disagreement the calibration rows showed,
+    this interval keeps widening with the members' spread past it.
+    """
+
+    def centre_and_spread(xs):
+        median = model.predict_quantiles(xs, [0.5], n_samples=N_DRAWS, seed=seed, calibrated=False)[:, 0]
+        spread = np.asarray(model.predict_uncertainty(xs)["epistemic"], dtype=np.float64)
+        return median, np.maximum(spread, 1e-12)
+
+    median, spread = centre_and_spread(x_cal)
+    margin = _conformal(np.abs(np.asarray(y_cal, dtype=np.float64) - median) / spread, coverage)
+    out = {}
+    for where, xs, _ys in held_out:
+        median, spread = centre_and_spread(xs)
+        out[where] = np.stack([median - margin * spread, median + margin * spread], axis=1)
+    return out
+
+
+def stage_localize(results):
+    out = results.setdefault("localize", {})
+    for name, (loader, shift_column) in _chosen(UNCERTAINTY_TABLES).items():
+        x, y = loader()
+        rows = out.setdefault(name, {"rows": int(len(y)), "shift_column": shift_column, "runs": {}})
+        for seed in SEEDS:
+            # A run saved before the scaled score and the coverage per bin of disagreement runs again.
+            if "scaled_in_range" in rows["runs"].get(str(seed), {}):
+                continue
+            # Train and calibrate below the column's 80th percentile; test inside and above it.
+            column = x[shift_column].to_numpy(np.float64)
+            inside = column <= np.quantile(column, 0.8)
+            xi, yi = x[inside].reset_index(drop=True), y[inside]
+            x_fit, x_cal, x_in, y_fit, y_cal, y_in = _three_way(xi, yi, seed)
+            x_out, y_out = x[~inside].reset_index(drop=True), y[~inside]
+            started = time.perf_counter()
+            model = tabm_piecewise(task="gaussian", random_state=seed).fit(x_fit, y_fit)
+            run, intervals = {}, {}
+            held_out = (("in_range", x_in, y_in), ("above_range", x_out, y_out))
+            for label, calibrate in (("raw", None), ("pooled", {}), ("members", {"localize": "members"})):
+                if calibrate is not None:
+                    model.calibrate(x_cal, y_cal, n_samples=N_DRAWS, seed=seed, **calibrate)
+                for where, xs, ys in held_out:
+                    interval = model.predict_interval(xs, 0.8, n_samples=N_DRAWS, seed=seed, calibrated=calibrate is not None)
+                    intervals[label, where] = interval
+                    run[f"{label}_{where}"] = _interval(interval[:, 0], interval[:, 1], ys)
+            run["edges"] = model.calibration_["by"]["members"]
+            scaled = _scaled_intervals(model, x_cal, y_cal, held_out, seed)
+            for where, _xs, ys in held_out:
+                intervals["scaled", where] = scaled[where]
+                run[f"scaled_{where}"] = _interval(scaled[where][:, 0], scaled[where][:, 1], ys)
+            # Each held-out row's bin of member disagreement, "0" the lowest, and every calibration's coverage per bin.
+            for where, xs, ys in held_out:
+                bins = model._row_groups(xs, model.calibration_, None)
+                run[f"{where}_bins"] = {str(k): int(v) for k, v in zip(*np.unique(bins, return_counts=True))}
+                for label in LOCALIZE_LABELS:
+                    interval = intervals[label, where]
+                    run[f"{label}_{where}_by_bin"] = _by_group(interval[:, 0], interval[:, 1], ys, bins)
+            run["seconds"] = time.perf_counter() - started
+            rows["runs"][str(seed)] = run
+            print(name, seed, {k: round(v["coverage"], 3) for k, v in run.items() if isinstance(v, dict) and "coverage" in v}, flush=True)
             _save(results)
 
 
@@ -349,6 +486,53 @@ def stage_report(_results):
         print()
 
 
+def report_groups():
+    print("## Coverage within groups\n")
+    for name, table in _runs("groups").items():
+        runs = list(table["runs"].values())
+        print(f"### {name}, {table['rows']:,} rows, groups by {table['column']}, {len(runs)} splits\n")
+        print("| Group | Test rows | Raw | Calibrated on every row | Calibrated per group |\n|---|---:|---:|---:|---:|")
+        keys = sorted({key for run in runs for key in run["pooled"]}, key=str)
+        for key in keys:
+            have = [run for run in runs if key in run["pooled"]]
+            cells = [_mean_sd([run[stage][key]["coverage"] for run in have], 3) for stage in ("raw", "pooled", "grouped")]
+            print(f"| {key} | {int(np.mean([run['pooled'][key]['rows'] for run in have]))} | " + " | ".join(cells) + " |")
+        for stage in ("raw", "pooled", "grouped"):
+            worst = [max(abs(v["coverage"] - 0.8) for v in run[stage].values()) for run in runs]
+            print(f"\n{stage}: largest gap from 80% in any group {_mean_sd(worst, 3)}", end="")
+        print(f"\nall rows: every-row calibration {_mean_sd([r['pooled_all']['coverage'] for r in runs], 3)}, "
+              f"per group {_mean_sd([r['grouped_all']['coverage'] for r in runs], 3)}; width "
+              f"{_mean_sd([r['pooled_all']['width'] for r in runs], 3)} and {_mean_sd([r['grouped_all']['width'] for r in runs], 3)}\n")
+    print("## Coverage past the training range\n")
+    for name, table in _runs("localize").items():
+        runs = list(table["runs"].values())
+        print(f"### {name}, shift on {table['shift_column']}, {len(runs)} splits\n")
+        print("| Calibration | In range | Width | Above range | Width |\n|---|---:|---:|---:|---:|")
+        for label in LOCALIZE_LABELS:
+            if f"{label}_in_range" not in runs[0]:
+                continue
+            cells = []
+            for where in ("in_range", "above_range"):
+                cells += [_mean_sd([r[f"{label}_{where}"]["coverage"] for r in runs], 3), _mean_sd([r[f"{label}_{where}"]["width"] for r in runs], 3)]
+            print(f"| {label} | " + " | ".join(cells) + " |")
+        print()
+        if not all("scaled_in_range" in r for r in runs):
+            continue
+        # Coverage within each bin of member disagreement ("0" the lowest), over the runs where it has 50 rows.
+        bins = sorted({key for r in runs for where in ("in_range", "above_range") for key in r[f"{where}_bins"]}, key=int)
+        print("| Calibration | Rows | " + " | ".join(f"Bin {key}" for key in bins) + " |\n|---|---|" + "---:|" * len(bins))
+        for where in ("in_range", "above_range"):
+            shares = [np.mean([r[f"{where}_bins"].get(key, 0) / sum(r[f"{where}_bins"].values()) for r in runs]) for key in bins]
+            print(f"| share of rows | {where} | " + " | ".join(f"{share:.0%}" for share in shares) + " |")
+            for label in LOCALIZE_LABELS:
+                cells = []
+                for key in bins:
+                    have = [r[f"{label}_{where}_by_bin"][key]["coverage"] for r in runs if key in r[f"{label}_{where}_by_bin"]]
+                    cells.append(_mean_sd(have, 3) if have else "—")
+                print(f"| {label} | {where} | " + " | ".join(cells) + " |")
+        print()
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -371,7 +555,13 @@ def _save(results):
         _out_path(stage).write_text(json.dumps({stage: value}, indent=1, sort_keys=True))
 
 
-STAGES = {"calibration": stage_calibration, "counts": stage_counts, "uncertainty": stage_uncertainty}
+STAGES = {
+    "calibration": stage_calibration,
+    "counts": stage_counts,
+    "uncertainty": stage_uncertainty,
+    "groups": stage_groups,
+    "localize": stage_localize,
+}
 
 
 def main():
@@ -382,6 +572,7 @@ def main():
     TABLES[:] = args.tables
     if args.stage == "report":
         stage_report(None)
+        report_groups()
         return
     for name, stage in STAGES.items():
         if args.stage in {name, "all"}:

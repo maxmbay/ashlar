@@ -28,6 +28,20 @@ is the same distributional conformal step, applied to that one number.
 ``recalibrated_cdf`` turns a model's own ``P(Y <= t)`` into the share of
 calibration rows whose PIT was at most that much, so an exceedance
 probability can be recalibrated as well as an interval.
+
+Marginal coverage can hide groups that are covered too much and too little.
+Mondrian conformal prediction (Vovk et al., 2005) calibrates each group on
+its own rows, so coverage holds within every group with enough of them; a
+smaller group reads the table of all rows. The groups are a column, labels
+passed with the rows, or bins of how much the ensemble's members disagree
+(``localize="members"``), so a row the members disagree on is calibrated
+with rows they disagreed on as much.
+
+A joint head also gets a region: the set of outcomes whose joint density is
+above a threshold, the smallest region of its probability. Each row's
+score is the model's probability of an outcome denser than the one seen
+(the highest-density PIT), and the conformal quantile of those scores is
+the probability the region needs to cover the requested share of rows.
 """
 
 from __future__ import annotations
@@ -43,6 +57,11 @@ from ashlar.errors import AshlarError, ShapeError
 MIN_CALIBRATION_ROWS = 20
 # The function of a joint outcome every joint calibration includes.
 SUM = "sum"
+# Rows a group needs for a table of its own; a smaller group reads the table of all rows. At 100 rows an 80%
+# interval's conformal level moves in steps of 1% coverage, and its coverage on new rows spreads by about 4%.
+MIN_GROUP_ROWS = 100
+# Bins of member disagreement for ``localize="members"``, at most; fewer when the rows are too few for this many.
+MEMBER_BINS = 5
 
 
 def pit_values(draws: np.ndarray, y: np.ndarray, seed: int = 0, rng=None) -> np.ndarray:
@@ -259,3 +278,83 @@ def joint_calibration(columns, targets: dict) -> dict:
         "columns": [pit_calibration(np.clip(columns[:, index], 0.0, 1.0)) for index in range(columns.shape[1])],
         "targets": tables,
     }
+
+
+def group_key(value) -> str:
+    """The key a group's table is saved under. A whole number reads the same as an integer or a float."""
+    if isinstance(value, (bool, np.bool_)):
+        return str(bool(value))
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        number = float(value)
+        if math.isnan(number):
+            return "nan"
+        return str(int(number)) if number.is_integer() else repr(number)
+    return str(value)
+
+
+def group_keys(values) -> np.ndarray:
+    """``group_key`` of each value, as an object array."""
+    values = np.asarray(values, dtype=object).reshape(-1)
+    return np.asarray([group_key(value) for value in values], dtype=object)
+
+
+def disagreement_edges(values, min_rows: int = MIN_GROUP_ROWS) -> list[float]:
+    """Interior edges of equal-count bins of member disagreement: ``MEMBER_BINS``, or fewer so each has ``min_rows``."""
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    bins = min(MEMBER_BINS, values.size // max(int(min_rows), 1))
+    if bins < 2:
+        raise AshlarError(
+            f"localize='members' needs at least {2 * int(min_rows)} calibration rows for two bins of "
+            f"{int(min_rows)}; received {values.size}."
+        )
+    return [float(edge) for edge in np.quantile(values, np.arange(1, bins) / bins)]
+
+
+def disagreement_keys(values, edges) -> np.ndarray:
+    """The bin of each row's member disagreement, ``"0"`` the lowest, as keys."""
+    index = np.searchsorted(np.asarray(edges, dtype=np.float64), np.asarray(values, dtype=np.float64), side="right")
+    return np.asarray([str(int(bin_)) for bin_ in index], dtype=object)
+
+
+def grouped_calibration(pooled: dict, tables: dict, by: dict, min_rows: int) -> dict:
+    """Saved Mondrian calibration: the table of all rows, and one per group with at least ``min_rows``.
+
+    ``by`` says how a new row finds its group: ``{"column": name}``,
+    ``{"labels": True}`` (passed again at prediction), or
+    ``{"members": edges}``. Each table is of the kind an ungrouped
+    calibration of this head stores.
+    """
+    return {"kind": "groups", "by": by, "pooled": pooled, "groups": tables, "min_rows": int(min_rows)}
+
+
+def density_pit(draw_log_density, log_density, seed: int = 0, rng=None) -> np.ndarray:
+    """The model's probability of an outcome denser than the one seen, per row: the highest-density PIT.
+
+    ``draw_log_density`` is ``(n, rows)``, the log density of ``n`` draws
+    per row, and ``log_density`` that of the outcome seen. Uniform when the
+    outcome is a draw from the model, like ``pit_values``, of which it is
+    the PIT of the negative log density.
+    """
+    return pit_values(-np.asarray(draw_log_density, dtype=np.float64), -np.asarray(log_density, dtype=np.float64), seed, rng)
+
+
+def region_level(calibration: dict | None, coverage: float) -> float:
+    """The probability a highest-density region needs to hold ``coverage`` of rows. Nominal without a calibration."""
+    coverage = check_coverage(coverage)
+    if calibration is None:
+        return coverage
+    if calibration["kind"] != "pit":
+        raise AshlarError("a region level comes from a joint head's region calibration.")
+    return min(conformal_quantile(calibration["values"], coverage), 1.0)
+
+
+def region_threshold(draw_log_density, level: float) -> np.ndarray:
+    """Log density per row above which an outcome is inside the highest-density region of probability ``level``.
+
+    The draw whose negative log density is the order statistic at
+    ``level``, as in ``draw_interval``: an outcome whose highest-density PIT
+    is at most ``level`` is always inside.
+    """
+    return -draw_interval(-np.asarray(draw_log_density, dtype=np.float64), 0.0, float(level))[:, 1]

@@ -69,7 +69,7 @@ model.log_prob(X_new, y_new)                # log density of what happened
 
 No second model per quantile, and no fixed-width normal around the mean.
 
-To guarantee the coverage, calibrate on rows the model did not see: `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` is a split-conformal interval. On five public tables it brought the mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6%. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#calibrated-intervals) has the detail.
+To guarantee the coverage, calibrate on rows the model did not see: `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` is a split-conformal interval. On five public tables it brought the mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6%. `calibrate(X_holdout, y_holdout, groups="hour")` keeps a table per group, for an interval that holds within each hour of the day or each store, not only on average. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#calibrated-intervals) has the detail.
 
 With an ensemble backbone, `model.predict_uncertainty(X_new)` splits that spread into the noise in the target (`aleatoric`) and the disagreement between members (`epistemic`). On rows past the training range of one column the epistemic part rose 1.6 to 4 times, more than the noise did, so it flags rows the model has not seen; it does not size their error. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#where-the-members-disagree) has the detail.
 
