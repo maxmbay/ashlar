@@ -289,12 +289,12 @@ def make_distribution_objective(kind: str):
     return objective
 
 
-def make_joint_objective(n_events: int, family: str = "normal", *, components: int | None = None):
+def make_joint_objective(n_events: int, family: str = "normal", *, components: int | None = None, columns=None):
     """Mean member negative log-density of a joint head, weighted over rows.
 
     ``family`` is ``normal`` for ``multivariate_gaussian``, ``mixture`` for
     ``multivariate_mixture`` (with its number of ``components``), or
-    ``flow`` for ``multivariate_flow``.
+    ``flow`` for ``multivariate_flow``, or ``chain`` with its ``columns``.
 
     ``y`` is the standardized ``(batch, event)`` target. The density is the
     full joint one, so the loss rewards getting the dependence between
@@ -302,23 +302,24 @@ def make_joint_objective(n_events: int, family: str = "normal", *, components: i
     """
 
     def objective(raw, y, sample_weight):
-        context = raw[0] if family == "flow" else raw
+        context = raw[0] if family in ("flow", "chain") else raw
         if context.ndim != 3:
             raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
         target = _target_events(y, int(n_events))
-        dist = joint_member_distribution(family, raw, int(n_events), components)
+        dist = joint_member_distribution(family, raw, int(n_events), components, columns=columns)
         losses = -dist.log_prob(target[:, None, :])
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
 
     return objective
 
 
-def joint_member_distribution(family: str, raw, n_events: int, components: int | None = None):
+def joint_member_distribution(family: str, raw, n_events: int, components: int | None = None, columns=None):
     """Each member's joint distribution for every row, batch ``(rows, members)``, on the standardized target.
 
     ``family`` is ``normal`` (``multivariate_gaussian``), ``mixture``
-    (``multivariate_mixture``, with its number of ``components``), or
-    ``flow`` (``multivariate_flow``).
+    (``multivariate_mixture``, with its number of ``components``), ``flow``
+    (``multivariate_flow``), or ``chain`` (``chain``, with its ``columns``
+    from ``ashlar.chain.chain_columns``).
     """
     from ashlar.distributional import MIXTURE_COMPONENTS
     from ashlar.distributions import (
@@ -327,6 +328,10 @@ def joint_member_distribution(family: str, raw, n_events: int, components: int |
         joint_normal_distribution,
     )
 
+    if family == "chain":
+        from ashlar.chain import chain_distribution
+
+        return chain_distribution(raw, columns)
     if family == "flow":
         return joint_flow_distribution(raw, n_events)
     if family == "mixture":
@@ -515,7 +520,12 @@ BOX_TRAINING_POINTS = 32
 
 
 def make_joint_observed_objective(
-    n_events: int, family: str = "normal", *, components: int | None = None, points: int = BOX_TRAINING_POINTS
+    n_events: int,
+    family: str = "normal",
+    *,
+    components: int | None = None,
+    points: int = BOX_TRAINING_POINTS,
+    columns=None,
 ):
     """Mean member negative log-likelihood of a joint label, weighted over rows.
 
@@ -532,13 +542,13 @@ def make_joint_observed_objective(
     grid = box_points(int(points), d)
 
     def objective(raw, y, sample_weight):
-        context = raw[0] if family == "flow" else raw
+        context = raw[0] if family in ("flow", "chain") else raw
         if context.ndim != 3:
             raise ShapeError(f"joint head output must be (batch, member, width); received {context.shape}.")
         y = jnp.asarray(y, dtype=jnp.float32)
         if y.ndim != 3 or y.shape[1] != d:
             raise ShapeError(f"a joint label's fields are (batch, {d}, 6); received {y.shape}.")
-        dist = joint_member_distribution(family, raw, d, components)
+        dist = joint_member_distribution(family, raw, d, components, columns=columns)
         losses = -dist.log_box(y[:, None, :, 0], y[:, None, :, 1], grid)
         return weighted_mean(jnp.mean(losses, axis=1), sample_weight)
 
