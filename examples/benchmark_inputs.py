@@ -146,16 +146,12 @@ def shift(seeds, out):
         model = ASRRegressor(task="mixture", max_epochs=EPOCHS, random_state=seed).fit(X_train, y_train)
         scores = np.concatenate([model.input_log_density(X_test), model.input_log_density(X_out)])
         labels = np.concatenate([np.zeros(len(X_test)), np.ones(len(X_out))])
-        disagreement = np.concatenate([model.predict_uncertainty(X_test)["epistemic"],
-                                       model.predict_uncertainty(X_out)["epistemic"]])
-        row = {"seed": seed, "auc_log_density": float(roc_auc_score(labels, -scores)),
-               "auc_member_disagreement": float(roc_auc_score(labels, disagreement))}
+        row = {"seed": seed, "auc_log_density": float(roc_auc_score(labels, -scores))}
         rows.append(row)
         print(json.dumps(row), flush=True)
     _save(out, "shift", rows)
-    for key in ("auc_log_density", "auc_member_disagreement"):
-        values = [row[key] for row in rows]
-        print(f"{key}: {np.mean(values):.3f} ± {np.std(values):.3f}")
+    values = [row["auc_log_density"] for row in rows]
+    print(f"auc_log_density: {np.mean(values):.3f} ± {np.std(values):.3f}")
 
 
 def _table(rows, key, label, fmt):

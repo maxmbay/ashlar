@@ -195,6 +195,39 @@ jax.grad(q90)(batch.numeric_raw)  # how each row's 90% quantile moves with each 
 
 `numeric_raw` is in the units of `X`, missing cells as NaN; a missing cell is filled with the training median, so its gradient is 0. Categories are looked up on the host and have no gradient. `model.dist_from_raw(raw)` turns the network's raw output (`forward_raw`) into the distribution, for code that changes the network's output itself.
 
+## Missing and noisy inputs
+
+A fitted model fills a missing numeric cell with the training median, and its predictive distribution is then as narrow as if the value were known. `with_uncertain_inputs` integrates over what is not known about each row instead:
+
+```python
+wide = model.with_uncertain_inputs(draws=32)
+wide.predict_interval(X_new, 0.8)                     # wider where cells are missing
+model.with_uncertain_inputs(32, noise={"income": 5000.0}).predict_interval(X_new, 0.8)  # a measurement error
+model.predict_dist(X_new, input_draws=32)             # the same, for one call
+model.input_log_density(X_new)                        # log p(x) of each row's numeric features
+```
+
+At `fit`, Ashlar fits a Gaussian copula to the numeric features of the training partition (`input_model_`, saved with the model): each column is mapped to a normal score through 129 of its empirical quantiles, and the scores share one correlation matrix. The view runs the network on `draws` completions of each row and returns the equal-weight mixture over the completions and the members, so `predict_interval`, `predict_quantiles`, `predict_exceedance`, `sample`, `log_prob`, `predict`, and `calibrate` all integrate over the inputs.
+
+- A missing numeric cell is drawn from its distribution given the row's observed numeric cells, so a missing latitude is drawn near the latitudes that go with the row's longitude.
+- `noise={"column": sd}` declares a measurement error: the cell is drawn as `value + sd * N(0, 1)`, a number or one standard deviation per row. Its measured value still conditions the missing cells.
+- A row with no missing or noisy cell gets the same distribution as without the view.
+- Categorical cells are not drawn; a missing category is still the unknown category. Training is unchanged.
+- `input_log_density(X)` is the copula's `log p(x)` over each row's observed numeric cells, in the units of `X`, with missing cells integrated out: a score for rows unlike the training data. `fit_inputs(X)` refits the copula, for example on a model saved by an older version.
+
+On California housing and hourly bike rentals (`examples/benchmark_inputs.py`, a `mixture` head, calibrated on complete rows, seeds 0 to 2), with numeric test cells masked at random, the median's 80% interval stops holding as cells go missing. The draws' interval holds within 80% to 85%:
+
+| table | masked cells | median: coverage | median: NLL | 32 draws: coverage | 32 draws: NLL |
+|---|---:|---:|---:|---:|---:|
+| California | 10% | 65.5% | 0.84 | 80.8% | 0.26 |
+| California | 30% | 48.3% | 1.87 | 82.4% | 0.53 |
+| California | 50% | 38.3% | 2.49 | 82.9% | 0.79 |
+| bike rentals | 10% | 72.8% | 4.88 | 81.8% | 4.63 |
+| bike rentals | 30% | 59.3% | 5.67 | 83.3% | 4.90 |
+| bike rentals | 50% | 48.3% | 6.33 | 83.5% | 5.15 |
+
+Noise added to the most important feature at test time, with a standard deviation equal to the column's own, drops the 80% interval to 59.3% on California and 65.4% on bike rentals when it is ignored, and keeps it at 80.8% and 79.3% when it is declared. `input_log_density` tells held-out California rows from rows above the training range of income with an area under the ROC curve of 0.938. [benchmarks.md](benchmarks.md#missing-and-noisy-inputs) has every row.
+
 ## Deciding from the distribution
 
 Most predictions end in a number someone acts on: an order, a capacity, a reserve. `ashlar.decide` reads it off any `Distribution`, and every function is traceable JAX, so it also runs inside `jax.jit` and `jax.grad`.
