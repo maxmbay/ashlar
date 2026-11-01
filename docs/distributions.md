@@ -180,6 +180,51 @@ def exceedance(dist, threshold):
 exceedance(model.predict_dist(X_new), 50.0)
 ```
 
+`predict_dist(X)` encodes the frame on the host, so `jax.grad` stops at the distribution and never reaches `X`. To differentiate a function of the distribution in the features, encode once with `model.encode(X)` and call `model.forward_dist` on the arrays. It runs imputation, the fitted scaling, the network, and the head inside JAX and returns the same `Distribution` as `predict_dist`:
+
+```python
+batch = model.encode(X_new)
+
+def q90(numeric):
+    dist = model.forward_dist(numeric, batch.categorical_onehot, batch.category_index,
+                              batch.set_tokens, batch.set_mask)
+    return dist.quantile(0.9).sum()
+
+jax.grad(q90)(batch.numeric_raw)  # how each row's 90% quantile moves with each numeric feature, in its units
+```
+
+`numeric_raw` is in the units of `X`, missing cells as NaN; a missing cell is filled with the training median, so its gradient is 0. Categories are looked up on the host and have no gradient. `model.dist_from_raw(raw)` turns the network's raw output (`forward_raw`) into the distribution, for code that changes the network's output itself.
+
+## Explaining the distribution
+
+`model.explain(X, target)` attributes one number per row, read off the predictive distribution, to the features. The number can be a quantile, the spread, the width of an interval, or a tail probability, so it answers questions a mean cannot: which features widen this row's interval, and what drives its 95% quantile.
+
+```python
+model.explain(X_new, "quantile", level=0.95)               # the 95% quantile
+model.explain(X_new, "interval_width", coverage=0.8)       # the 80% interval's width
+model.explain(X_new, "std")                                # the predictive standard deviation
+model.explain(X_new, "exceedance", threshold=500.0)        # P(y > 500)
+model.explain(X_new, lambda d: d.quantile(0.9) - d.median())  # any fn(dist) -> one number per row
+```
+
+It returns an `Explanation`: `values` is `(rows, features)` in the target's units, `prediction` the target at each row, and `importance()` the mean absolute attribution per feature, largest first. `to_frame()` gives a pandas `DataFrame`. The function is also `ashlar.explain.explain(model, X, target)`.
+
+- **Numeric features** get integrated gradients (Sundararajan et al., 2017) from a baseline row to the row through `forward_dist`, with 32 steps by default (`steps=`). The baseline is each column's training median, or the median of `background=` when given. The numeric attributions of a row sum to the target at the row minus the target with every numeric feature at its baseline (`baseline`, and `numeric_gap()` is what the integration misses). A quantile is differentiated by the implicit-function rule, so its gradient is exact. `method="gradient_x_input"` takes one gradient at the row instead, exact only for a target linear in the features. A missing cell sits at its baseline and gets 0.
+- **Categorical features** have no input gradient, since the lookup happens on the host. Each gets an occlusion attribution: the target at the row minus its mean with that column set to each reference category in turn, the 32 most frequent values of `background`, or the training categories with equal weight. These do not enter the numeric sum.
+- A joint head's target must be one number per row, for example `lambda d: d.project(weights).quantile(0.9)` for the 90% quantile of a weighted total.
+- A cyclical column's sine and cosine attributions are summed back onto the column.
+
+On synthetic data where one feature moves the location and another the spread, the median's attribution picks the first and the interval width's the second (`tests/test_explain.py`). On hourly bike rentals (`examples/explain_bike.py`, a mixture head, 1,000 test rows, a few seconds per target on a laptop CPU), the hour of day drives all three targets, but working days matter almost as much to the width of the 80% interval (28 rentals) as to the median (32), while the year and the temperature move the median far more than the width:
+
+| feature | median | 80% width | P(> 500) |
+|---|---:|---:|---:|
+| hr | 111 | 49.9 | 0.052 |
+| workingday | 31.9 | 28.0 | 0.004 |
+| yr | 31.4 | 10.9 | 0.016 |
+| weathersit | 19.8 | 13.3 | 0.011 |
+| temp | 19.0 | 8.0 | 0.005 |
+| season | 14.2 | 4.0 | 0.012 |
+
 ## Your own head
 
 A `task="custom"` model's `dist_fn(raw)` should return one of these objects, built from the head's raw output, so `sample`, `log_prob`, and the quantile methods work on it too. `ashlar.demos.linked` returns the `Mixture` of its members' normals this way.
