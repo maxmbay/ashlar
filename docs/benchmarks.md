@@ -846,3 +846,41 @@ Seeds 0 to 2, 80/20 split, the `mixture` head. Cost against the likelihood fit's
 
 The hybrid is a little cheaper at every ratio but never by 1%. LightGBM's quantile regression, fitted per ratio, costs 6% to 23% more than the mixture's plug-in order, and more the further into the tail the order sits.
 
+## Missing and noisy inputs
+
+`examples/benchmark_inputs.py`, issue #35's test. A `mixture` head with default settings is fitted on 64% of the rows and calibrated on 11% (complete rows), then tested on 25%. Seeds 0 to 2, means. Run on an M3 Pro laptop, CPU only, in 3.5 minutes. "Median" is the default fill; "draws" is `with_uncertain_inputs(32)`.
+
+### Masked cells
+
+A share of the test rows' numeric cells is masked at random.
+
+| table | masked cells | median: 80% coverage | median: width | median: NLL | draws: 80% coverage | draws: width | draws: NLL |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| California | 0% | 79.7% | 0.947 | 0.119 | 79.7% | 0.947 | 0.118 |
+| California | 10% | 65.5% | 0.994 | 0.839 | 80.8% | 1.23 | 0.263 |
+| California | 30% | 48.3% | 1.05 | 1.866 | 82.4% | 1.77 | 0.534 |
+| California | 50% | 38.3% | 1.10 | 2.487 | 82.9% | 2.31 | 0.791 |
+| bike rentals | 0% | 80.5% | 75.3 | 4.486 | 80.5% | 75.3 | 4.486 |
+| bike rentals | 10% | 72.8% | 75.4 | 4.881 | 81.8% | 99.1 | 4.631 |
+| bike rentals | 30% | 59.3% | 75.0 | 5.668 | 83.3% | 144 | 4.897 |
+| bike rentals | 50% | 48.3% | 74.8 | 6.328 | 83.5% | 187 | 5.148 |
+
+The median's interval keeps its width and loses its coverage, down to 38% on California at half the cells. The draws' interval widens with the share missing and holds 81% to 84%, a little over, since the copula of the numeric features does not see the categorical ones. At 30% missing on California, the issue's target number, the draws cover 82.4%, against 48.3% for the median.
+
+### Noisy cells
+
+Gaussian noise is added at test time to `median_income` (California) or `temp` (bikes), with a standard deviation of 0.25, 0.5, or 1 times the column's own. "Ignored" scores the noisy rows as they are; "declared" passes `noise={column: sd}`.
+
+| table | noise sd / column sd | ignored: 80% coverage | ignored: NLL | declared: 80% coverage | declared: NLL |
+|---|---:|---:|---:|---:|---:|
+| California | 0.25 | 77.0% | 0.200 | 79.8% | 0.177 |
+| California | 0.5 | 70.4% | 0.418 | 79.6% | 0.303 |
+| California | 1 | 59.3% | 1.092 | 80.8% | 0.551 |
+| bike rentals | 0.25 | 78.7% | 4.534 | 80.6% | 4.520 |
+| bike rentals | 0.5 | 75.2% | 4.651 | 80.5% | 4.593 |
+| bike rentals | 1 | 65.4% | 5.024 | 79.3% | 4.750 |
+
+### Rows outside the training range
+
+California rows with `median_income` above its 95th percentile are held out of training. `input_log_density` ranks them below the held-out test rows from the range with an area under the ROC curve of 0.938 ± 0.006.
+
