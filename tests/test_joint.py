@@ -9,7 +9,7 @@ import pytest
 
 from ashlar import ASRModel, ASRRegressor
 from ashlar.distributions import AffineTransformed, Independent, joint_normal_distribution
-from ashlar.errors import AshlarError, ShapeError
+from ashlar.errors import ShapeError
 from ashlar.heads import MultivariateNormalHead
 from ashlar.objectives import make_joint_objective
 
@@ -68,5 +68,3 @@ def test_fit_learns_dependence_and_reports_in_target_units(tmp_path):
 
     restored = ASRModel.load(joint.save(tmp_path / "joint"))
     assert np.allclose(restored.log_prob(x[test], y[test]), joint.log_prob(x[test], y[test]), atol=1e-4)
-    with pytest.raises(AshlarError):
-        joint.calibrate(x[test], y[test])

@@ -576,6 +576,30 @@ What holds up:
 
 ![The 80% band for the total load of eight clients over the first three held-out days, joint against independent marginals, and the reliability of P(total > capacity) over all held-out hours.](images/joint-demand.png)
 
+### Calibrating the total
+
+Does `calibrate` fix what these models get wrong about the total? From `examples/joint_demand.py calibrated`. At each of the same 25 origins, four models are fitted on the training weeks but the last 15%, calibrated on those (`model.calibrate(X_cal, Y_cal)`, which covers each client and the sum), and scored before and after on the same 28 days, with the same capacities and 4,000 joint draws per hour: the rank-2 `joint`, `independent heads` (rank 0), the rank-2 normal on TabM, and `multivariate_flow`. Each model trains on 15% fewer hours than in the tables above, so its raw numbers differ a little from theirs. One fit per model and origin, means over the 25 origins, before → after. It ran on an Apple M3 Pro with 12 cores, three origins at a time.
+
+| Score | `joint` | independent heads | TabM | `multivariate_flow` |
+|---|---:|---:|---:|---:|
+| Total inside its 80% interval | 80.5% → 79.5% | 68.6% → 79.5% | 88.6% → 80.5% | 74.8% → 80.4% |
+| Width of that interval, kW | 13,465 → 12,975 | 10,217 → 13,189 | 16,637 → 13,558 | 11,862 → 13,759 |
+| Brier, total > 80th percentile ↓ | 0.0487 → 0.0473 | 0.0516 → 0.0484 | 0.0482 → 0.0482 | 0.0480 → 0.0466 |
+| Log loss, total > 80th percentile ↓ | 0.163 → 0.151 | 0.168 → 0.155 | 0.151 → 0.150 | 0.152 → 0.147 |
+| Brier, total > 95th percentile ↓ | 0.0281 → 0.0280 | 0.0339 → 0.0302 | 0.0293 → 0.0300 | 0.0294 → 0.0286 |
+| Log loss, total > 95th percentile ↓ | 0.096 → 0.091 | 0.118 → 0.098 | 0.095 → 0.095 | 0.096 → 0.091 |
+| Where P(total > 80th percentile) is 2% to 10%, share of hours it happened | 8.1% → 6.0% | 12.6% → 7.5% | 5.7% → 8.3% | 9.8% → 5.4% |
+| Hours of the day whose total is inside its interval less than 75% or more than 85% of the time | 8 → 8 | 21 → 9 | 13 → 13 | 15 → 10 |
+| Seconds to calibrate, per origin | 2.4 | 0.2 | 1.7 | 115 |
+
+In the 2% to 10% band the mean prediction is 5.1% to 5.3% for every model, before and after.
+
+- **Calibration puts the total's 80% interval at 80% for every model**, 79.5% to 80.5% after, from 68.6% to 88.6% before. It widens the independent heads' interval by 29%, since their errors move together and they do not know it, and narrows TabM's by 19%. Each client's own interval lands between 74.7% and 82.0%, from between 57.9% and 89.8%.
+- **It makes P(total > capacity) more reliable where a model was off.** Where the independent heads said 2% to 10%, the event happened 12.6% of the time, and 7.5% after calibration; the flow goes from 9.8% to 5.4%. TabM was already reliable in that band, and calibration moved it the wrong way, to 8.3%.
+- **The event scores improve on average, not origin by origin.** The mean Brier score and log loss fall for most models, the most for the independent heads (log loss at the 95th percentile from 0.118 to 0.098), but calibration lowers each score at only 10 to 16 of the 25 origins: the gain comes from the origins where a model was far off. One map of the PIT corrects the average error, not which hours are risky. After calibration the four models' event scores differ by at most 0.002 in Brier score and 0.008 in log loss, inside the noise of the origins, as in the tables above.
+- **It does not fix coverage by hour of day.** After calibration the joint normal still covers its total in 73.9% to 87.3% of the hours at each hour of the day, with 8 of the 24 hours outside 75% to 85%, and TabM 13, because one table pools every hour.
+- **The normal-based heads calibrate in 0.2 to 2.4 seconds per origin**, since the sum's PIT is exact for them. The flow reads every column and the sum from 4,000 joint draws per calibration hour: 115 seconds.
+
 ## Member uncertainty
 
 From the same script, stage `uncertainty`. The model is `tabm_piecewise(task="gaussian")`, a TabM backbone with 32 members, and `predict_uncertainty(X_test, n_samples=200)`. Two tests per table:

@@ -47,9 +47,12 @@ model = ASRRegressor(task="mixture").fit(X_train, y_train)
 model.calibrate(X_holdout, y_holdout)
 model.predict_interval(X_new, coverage=0.8)   # split-conformal, shape (rows, 2)
 model.predict_quantiles(X_new, [0.1, 0.9])     # each level recalibrated
+model.predict_exceedance(X_new, threshold)     # P(y > threshold) per row, recalibrated
 ```
 
-A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
+A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The same table recalibrates a probability: `predict_exceedance` replaces the model's own `P(y ≤ threshold)` with the share of held-out rows whose transform was at most that much, so an overconfident model's small probabilities move up and its large ones down. The map is the same for every row, so it corrects a model that is wrong the same way everywhere, not one that is too narrow on some rows and too wide on others. The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
+
+The joint heads calibrate each column, the sum of the columns, and any function of them you name, such as the largest column; [docs/distributions.md](distributions.md#calibrating-the-columns-and-the-total) has the detail.
 
 On five public tables, three splits each, calibration brought the default mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6% before. It widened the intervals that were too narrow (California, 75.9% → 80.7%; bike rentals, 76.8% → 79.7%), narrowed the one that was too wide (taxi tips, 88.6% → 79.9%), and left the ones that were right alone. The same conformal step on LightGBM's quantile models gives about the same coverage with a wider interval on three of the four tables where it applies. [docs/benchmarks.md](benchmarks.md#calibrated-intervals) has every number.
 

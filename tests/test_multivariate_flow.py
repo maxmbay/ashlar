@@ -15,7 +15,7 @@ from ashlar.distributions import (
     Mixture,
     joint_flow_distribution,
 )
-from ashlar.errors import AshlarError, ShapeError
+from ashlar.errors import ShapeError
 from ashlar.heads import MultivariateFlowHead
 from ashlar.objectives import make_joint_objective
 
@@ -122,5 +122,3 @@ def test_the_flow_task_predicts_samples_and_saves(tmp_path):
 
     restored = ASRModel.load(flow.save(tmp_path / "flow"))
     assert np.allclose(restored.log_prob(x[test], y[test]), flow.log_prob(x[test], y[test]), atol=1e-4)
-    with pytest.raises(AshlarError):
-        flow.calibrate(x[test], y[test])

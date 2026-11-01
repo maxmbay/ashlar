@@ -31,10 +31,21 @@ day 392 (late January 2013) to the end of 2014, 25 of them, each fitted on
 everything before it and scored on the 28 days after it; one fit per model
 and origin.
 
+The ``calibrated`` stage asks whether conformal calibration of the total
+fixes what the joint models get wrong about it. At each origin it fits on
+the training weeks but the last 15%, calibrates on those
+(``model.calibrate(X_cal, Y_cal)``, which covers each client and the sum),
+and scores the same model before and after on the same 28 days: the total's
+80% interval, P(total > capacity), and the interval's coverage by hour of
+day. ``shard=i/n`` runs every n-th origin from the i-th, so several
+processes can share a machine; ``calibrated_report`` reads every shard.
+
     JAX_PLATFORMS=cpu python examples/joint_demand.py            # fit and score
     JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4, TabM, and flow joint models
     JAX_PLATFORMS=cpu python examples/joint_demand.py report     # tables
     JAX_PLATFORMS=cpu python examples/joint_demand.py figure     # docs/images/joint-demand.png
+    JAX_PLATFORMS=cpu python examples/joint_demand.py calibrated shard=0/3   # fit, calibrate, and score
+    JAX_PLATFORMS=cpu python examples/joint_demand.py calibrated_report
 """
 
 from __future__ import annotations
@@ -75,6 +86,15 @@ EXTRA = {
     "joint, TabM": {"backbone": "tabm"},
     "joint flow": {"task": "multivariate_flow"},
 }
+# The calibrated stage: every model fitted on the training weeks but the last CALIBRATION_SHARE, calibrated on those.
+CALIBRATION_SHARE = 0.15
+CALIBRATED = {
+    "joint": {},
+    "independent heads": {"head_kwargs": {"rank": 0}},
+    "joint, TabM": {"backbone": "tabm"},
+    "joint flow": {"task": "multivariate_flow"},
+}
+CALIBRATED_RESULTS = DATA_DIR / "joint-demand-calibrated-{shard}.json"
 
 
 def load_matrix() -> np.ndarray:
@@ -370,6 +390,163 @@ def figure() -> None:
     print("wrote", out)
 
 
+def _calibration_split(day: np.ndarray, origin: int):
+    """Fit on the training weeks but the last ``CALIBRATION_SHARE``, calibrate on those, test on the 28 days after."""
+    held = 7 * int(round(CALIBRATION_SHARE * origin / 7))
+    fit = day < origin - held
+    calibration = (day >= origin - held) & (day < origin)
+    test = (day >= origin) & (day < origin + TEST_DAYS)
+    return fit, calibration, test
+
+
+def _event_scores(p: np.ndarray, event: np.ndarray) -> dict:
+    clipped = np.clip(p, 1.0 / DRAWS, 1.0 - 1.0 / DRAWS)
+    return {
+        "brier": float(np.mean((p - event) ** 2)),
+        "logloss": float(-np.mean(event * np.log(clipped) + (1 - event) * np.log1p(-clipped))),
+        "mean_p": float(p.mean()),
+    }
+
+
+def _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated: bool) -> dict:
+    """The total's 80% interval, overall, by hour, and per client, and P(total > capacity), before or after calibration."""
+    total = y_test.sum(axis=1)
+    interval = model.predict_interval(x_test, 0.8, target="sum", n_samples=DRAWS, calibrated=calibrated)
+    inside = (total >= interval[:, 0]) & (total <= interval[:, 1])
+    columns = model.predict_interval(x_test, 0.8, n_samples=DRAWS, calibrated=calibrated)
+    record = {
+        "total_coverage_80": float(inside.mean()),
+        "total_width_80": float(np.mean(interval[:, 1] - interval[:, 0])),
+        "coverage_by_hour": [float(inside[hour == h].mean()) for h in range(24)],
+        "client_coverage_80": np.mean((y_test >= columns[..., 0]) & (y_test <= columns[..., 1]), axis=0).round(4).tolist(),
+    }
+    for level, capacity in capacities.items():
+        p = model.predict_exceedance(x_test, capacity, target="sum", n_samples=DRAWS, calibrated=calibrated)
+        event = (total > capacity).astype(np.float64)
+        record.update({f"{key}_{level}": value for key, value in _event_scores(p, event).items()})
+        record[f"rate_{level}"] = float(event.mean())
+        if level == "0.8":
+            record["p_0.8"] = p.round(4).tolist()
+            record["event_0.8"] = event.astype(int).tolist()
+    return record
+
+
+def _shard(arguments) -> tuple[int, int]:
+    for argument in arguments:
+        if argument.startswith("shard="):
+            index, count = argument.split("=", 1)[1].split("/")
+            return int(index), int(count)
+    return 0, 1
+
+
+def run_calibrated() -> None:
+    """Fit on the training weeks but the last 15%, calibrate on those, and score before and after."""
+    index, count = _shard(sys.argv[2:])
+    matrix = load_matrix()
+    columns = clients(matrix)
+    frame, loads, day = table(matrix, columns)
+    path = Path(str(CALIBRATED_RESULTS).format(shard=f"{index}of{count}"))
+    results = json.loads(path.read_text()) if path.exists() else {}
+    cyclical = {"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25}
+    for split, origin in enumerate(ORIGIN_DAYS):
+        if split % count != index:
+            continue
+        record = results.setdefault(str(origin), {"methods": {}})
+        fit, held, test = _calibration_split(day, origin)
+        recent = loads[day < origin][-24 * 28 :].sum(axis=1)
+        capacities = {str(level): float(np.quantile(recent, level)) for level in CAPACITY_LEVELS}
+        record.update({"fit_hours": int(fit.sum()), "calibration_hours": int(held.sum()), "test_hours": int(test.sum()), "capacities": capacities})
+        x_fit, y_fit = _rows(frame, fit), loads[fit]
+        x_cal, y_cal = _rows(frame, held), loads[held]
+        x_test, y_test = _rows(frame, test), loads[test]
+        hour = np.asarray(x_test["hour"]).astype(int)
+        for name, params in CALIBRATED.items():
+            if name in record["methods"]:
+                continue
+            print(f"origin day {origin}: {name}, {fit.sum()} fit hours, {held.sum()} calibration hours", flush=True)
+            started = time.perf_counter()
+            model = ASRRegressor(
+                **{"task": "multivariate_gaussian", "cyclical": cyclical, "random_state": split, **FIT, **params}
+            ).fit(x_fit, y_fit)
+            fitted = time.perf_counter()
+            model.calibrate(x_cal, y_cal, n_samples=DRAWS)
+            calibrated = time.perf_counter()
+            dist = model.predict_dist(x_test)
+            scores = _scores(name, dist, y_test, capacities, jax.random.PRNGKey(split))
+            record["methods"][name] = {
+                "fit_seconds": fitted - started,
+                "calibrate_seconds": calibrated - fitted,
+                "joint_nll": scores["joint_nll"],
+                "total_crps": scores["total_crps"],
+                "before": _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated=False),
+                "after": _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated=True),
+            }
+            before, after = record["methods"][name]["before"], record["methods"][name]["after"]
+            print(
+                f"  {name:20s} total 80%: {before['total_coverage_80']:.3f} -> {after['total_coverage_80']:.3f}; "
+                f"brier 0.8: {before['brier_0.8']:.4f} -> {after['brier_0.8']:.4f}",
+                flush=True,
+            )
+            path.write_text(json.dumps(results))
+
+
+def calibrated_report() -> None:
+    results = {}
+    for path in sorted(DATA_DIR.glob("joint-demand-calibrated-*.json")):
+        results.update(json.loads(path.read_text()))
+    splits = [results[str(origin)] for origin in ORIGIN_DAYS if str(origin) in results]
+    methods = [name for name in CALIBRATED if all(name in split["methods"] for split in splits)]
+    print(f"{len(splits)} forecast origins; methods {methods}")
+    rows = [
+        ("total_coverage_80", "Total inside its 80% interval", "{:.1%}"),
+        ("total_width_80", "Width of that interval, kW", "{:,.0f}"),
+        ("brier_0.8", "Brier, total > 80th percentile ↓", "{:.4f}"),
+        ("logloss_0.8", "Log loss, total > 80th percentile ↓", "{:.3f}"),
+        ("brier_0.95", "Brier, total > 95th percentile ↓", "{:.4f}"),
+        ("logloss_0.95", "Log loss, total > 95th percentile ↓", "{:.3f}"),
+    ]
+    print("| Score | " + " | ".join(methods) + " |")
+    print("|---|" + "---:|" * len(methods))
+    for key, label, fmt in rows:
+        cells = []
+        for method in methods:
+            before = np.mean([split["methods"][method]["before"][key] for split in splits])
+            after = np.mean([split["methods"][method]["after"][key] for split in splits])
+            cells.append(f"{fmt.format(before)} → {fmt.format(after)}")
+        print(f"| {label} | " + " | ".join(cells) + " |")
+    for key, label in (("joint_nll", "Joint NLL ↓"), ("total_crps", "CRPS of the total, kW ↓")):
+        values = [np.mean([split["methods"][method][key] for split in splits]) for method in methods]
+        print(f"| {label} | " + " | ".join(f"{value:.4g}" for value in values) + " |")
+    for method in methods:
+        for stage in ("before", "after"):
+            by_hour = np.mean([split["methods"][method][stage]["coverage_by_hour"] for split in splits], axis=0)
+            clients_80 = np.mean([split["methods"][method][stage]["client_coverage_80"] for split in splits], axis=0)
+            print(
+                f"{method} {stage}: total coverage by hour {by_hour.min():.1%} to {by_hour.max():.1%} "
+                f"(hours outside 75-85%: {int(np.sum(np.abs(by_hour - 0.8) > 0.05))}); "
+                f"clients {clients_80.min():.1%} to {clients_80.max():.1%}"
+            )
+        for key in ("brier_0.8", "logloss_0.8", "brier_0.95", "logloss_0.95"):
+            won = sum(split["methods"][method]["after"][key] < split["methods"][method]["before"][key] for split in splits)
+            print(f"  calibration lowers {key} at {won} of {len(splits)} origins")
+        p = np.concatenate([split["methods"][method]["after"]["p_0.8"] for split in splits])
+        raw = np.concatenate([split["methods"][method]["before"]["p_0.8"] for split in splits])
+        event = np.concatenate([split["methods"][method]["after"]["event_0.8"] for split in splits])
+        for name, values in (("before", raw), ("after", p)):
+            band = (values >= 0.02) & (values < 0.10)
+            print(f"  {name}: where P(total > 80th pct) is 2-10% (n={band.sum()}), mean {values[band].mean():.3f}, happened {event[band].mean():.3f}")
+        seconds = np.mean([split["methods"][method]["fit_seconds"] for split in splits])
+        calibrate_seconds = np.mean([split["methods"][method]["calibrate_seconds"] for split in splits])
+        print(f"  fit {seconds:.0f} s, calibrate {calibrate_seconds:.1f} s per origin")
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
-    {"run": run, "extra": run_extra, "report": report, "figure": figure}[command]()
+    {
+        "run": run,
+        "extra": run_extra,
+        "report": report,
+        "figure": figure,
+        "calibrated": run_calibrated,
+        "calibrated_report": calibrated_report,
+    }[command]()

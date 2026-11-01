@@ -90,7 +90,26 @@ dist.marginals()                          # each site on its own: batch (rows, s
 Independent(dist.marginals())             # the same sites with the dependence dropped
 ```
 
-`model.predict` is the mean of every column, `model.predict_quantiles` gives each column's marginal quantiles as `(rows, columns, levels)`, and `model.log_prob(X, Y)` is the joint log density. `rank=0` trains independent columns. A question about several columns at once, such as a total, a difference, or whether two things both happen, needs the joint draws, because the marginals alone do not determine it. [The joint demand benchmark](benchmarks.md#joint-demand-across-locations) shows how much that matters on real loads.
+`model.predict` is the mean of every column, `model.predict_quantiles` gives each column's marginal quantiles as `(rows, columns, levels)`, and `model.log_prob(X, Y)` is the joint log density. `rank=0` trains independent columns. A question about several columns at once, such as a total, a difference, or whether two things both happen, needs the joint distribution, because the marginals alone do not determine it. A weighted sum of the columns is exact under the joint normal and the joint mixture: `dist.project(weights)` is its distribution, a normal or a mixture of normals with batch `(rows,)`, so `dist.project(np.ones(sites)).cdf(capacity)` is P(total ≤ capacity) with no draws. Anything else is read from the joint draws. [The joint demand benchmark](benchmarks.md#joint-demand-across-locations) shows how much that matters on real loads.
+
+### Calibrating the columns and the total
+
+`calibrate` on a joint model calibrates each column on its own, the sum of the columns, and any other function of them you name, on rows the model was not fitted on:
+
+```python
+def peak(y):                     # a function of the last axis: (..., sites) -> (...)
+    return y.max(axis=-1)
+
+model.calibrate(X_holdout, Y_holdout, target=peak)        # each site, the sum, and peak
+model.predict_interval(X_new, 0.8)                         # each site: (rows, sites, 2)
+model.predict_interval(X_new, 0.8, target="sum")           # the total: (rows, 2)
+model.predict_quantiles(X_new, [0.5, 0.95], target=peak)   # (rows, 2)
+model.predict_exceedance(X_new, capacity, target="sum")    # P(total > capacity), (rows,)
+```
+
+Each column and each function keeps its own table of probability integral transforms, the same split-conformal step a one-column head takes ([calibrated intervals](heads.md#calibrated-intervals)), so the total's 80% interval holds 80% of new rows, and so does each site's. `target` is `"sum"`, one weight per column for that weighted sum (`[1, -1, 0, 0]` for a difference), a function defined with `def`, or a list of them; the sum is always included. A weighted sum is exact under the joint normal and the joint mixture; a function, and everything about the flow, is read from `n_samples` joint draws per row, 1,000 by default. A saved model keeps every table, a function's under its name, since its code is not saved: pass the function again after `load`. A target the calibration did not include is refused, and `calibrated=False` reads any target raw. The held-out rows must be exact: where a cell is censored or an interval, a function of the columns has no single value.
+
+On the electricity loads of [the joint demand benchmark](benchmarks.md#calibrating-the-total), calibration puts the total's 80% interval at 79.5% to 80.5% of hours for every joint model tried, from 68.6% to 88.6% before, and makes P(total > capacity) more reliable where a model was off: where independent heads said 2% to 10%, the event happened 12.6% of the time before and 7.5% after. One table for every row cannot fix an error that changes from row to row, such as coverage that varies with the hour of the day.
 
 ## Dependence that is not a correlation
 
