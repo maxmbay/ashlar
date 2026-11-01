@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from copy import deepcopy
+from copy import copy, deepcopy
 from pathlib import Path
 
 import jax
@@ -36,6 +36,7 @@ from ashlar.heads import (
     PointHead,
     SoftmaxHead,
 )
+from ashlar.inputs import InputModel
 from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_state, load_opt_state
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
@@ -1015,6 +1016,7 @@ class ASRModel(BaseEstimator):
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
         self.numeric_transform_ = encoder.numeric_transform
+        self.input_model_ = InputModel.fit(np.asarray(encoded.numeric_raw))
         self.core_ = trained
         self.opt_state_ = opt_state
         self.classes_ = None if classes is None else np.asarray(classes)
@@ -1739,6 +1741,105 @@ class ASRModel(BaseEstimator):
     def _raw_from_frame(self, X):
         self._require_fitted()
         encoded = self.encoder_.transform(self._with_cyclical(X))
+        settings = getattr(self, "_uncertain_inputs", None)
+        if settings is not None:
+            return self._raw_over_inputs(X, encoded, settings)
+        return self._raw_from_encoded(encoded)
+
+    def _raw_over_inputs(self, X, encoded, settings):
+        """Raw outputs on ``draws`` completions of each row, the draws folded into the member axis."""
+        numeric = np.asarray(encoded.numeric_raw, dtype=np.float64)
+        n_rows = numeric.shape[0]
+        draws = int(settings["draws"])
+        noise = self._input_noise(X, settings.get("noise"), n_rows)
+        completed = self._input_model().draw(numeric, draws, np.random.default_rng(settings.get("seed", 0)), noise)
+        tiled = EncodedBatch(
+            numeric_raw=jnp.asarray(completed.reshape(draws * n_rows, -1), dtype=jnp.float32),
+            categorical_onehot=jnp.tile(encoded.categorical_onehot, (draws, 1)),
+            category_index=jnp.tile(encoded.category_index, (draws, 1)),
+            set_tokens=jnp.tile(encoded.set_tokens, (draws, 1, 1)),
+            set_mask=jnp.tile(encoded.set_mask, (draws, 1, 1)),
+        )
+        raw = self._raw_from_encoded(tiled)
+
+        def fold(array):
+            if array.ndim < 3:
+                raise AshlarError("uncertain inputs need a head with a member axis.")
+            shaped = array.reshape(draws, n_rows, *array.shape[1:])
+            return jnp.moveaxis(shaped, 0, 1).reshape(n_rows, draws * array.shape[1], *array.shape[2:])
+
+        if isinstance(raw, tuple):
+            return (fold(raw[0]), *raw[1:])
+        return fold(raw)
+
+    def _input_model(self) -> InputModel:
+        model = getattr(self, "input_model_", None)
+        if model is None:
+            raise AshlarError(
+                "this model has no input model (it was saved by an older version). Call fit_inputs(X_train) first."
+            )
+        return model
+
+    def _input_noise(self, X, noise, n_rows):
+        if not noise:
+            return None
+        numeric = [column.name for column in self.encoder_.columns if column.role == "numeric"]
+        out = np.zeros((n_rows, len(numeric)))
+        for name, value in dict(noise).items():
+            if name not in numeric:
+                raise AshlarError(
+                    f"input_noise names {name!r}, which is not a numeric feature; the numeric features are {numeric}."
+                )
+            sd = np.broadcast_to(np.asarray(value, dtype=np.float64), (n_rows,))
+            if np.any(~np.isfinite(sd)) or np.any(sd < 0):
+                raise AshlarError("input_noise standard deviations must be finite and non-negative.")
+            out[:, numeric.index(name)] = sd
+        return out
+
+    def with_uncertain_inputs(self, draws: int = 32, noise: dict | None = None, seed: int = 0):
+        """A view of this model that integrates over what is unknown about each row's inputs.
+
+        Every prediction (``predict_dist``, ``predict_interval``,
+        ``predict_quantiles``, ``predict_exceedance``, ``sample``,
+        ``log_prob``, ``predict``, and ``calibrate``) runs the network on
+        ``draws`` completions of each row and mixes them with the members:
+
+        - a missing numeric cell is drawn from its distribution given the
+          row's observed numeric cells, under a Gaussian copula of the
+          numeric features fitted on the training partition
+          (``input_model_``), instead of being set to the training median;
+        - ``noise={"column": sd}`` declares a measurement error: that cell is
+          drawn as ``value + sd * N(0, 1)``. ``sd`` is a number or one per row.
+
+        Intervals widen with what is not known about the row. Categorical
+        cells are not drawn; a missing category is still the unknown
+        category. The view shares the fitted parameters with this model.
+        """
+        if int(draws) < 1:
+            raise AshlarError("draws must be at least 1.")
+        self._require_fitted()
+        self._input_model()
+        view = copy(self)
+        view._uncertain_inputs = {"draws": int(draws), "noise": noise, "seed": int(seed)}
+        return view
+
+    def fit_inputs(self, X):
+        """Refit the copula of the numeric features (``input_model_``) on ``X``, for example after ``load``."""
+        self._require_fitted()
+        self.input_model_ = InputModel.fit(np.asarray(self.encode(X).numeric_raw))
+        return self
+
+    def input_log_density(self, X) -> np.ndarray:
+        """``log p(x)`` of each row's observed numeric features under ``input_model_``, in the units of ``X``.
+
+        Low values flag rows unlike the training partition: shifted, out of
+        range, or with an unusual combination of values. Missing cells are
+        integrated out. Categorical features are not scored.
+        """
+        self._require_fitted()
+        return self._input_model().log_density(np.asarray(self.encode(X).numeric_raw))
+
+    def _raw_from_encoded(self, encoded):
         numeric_z = self.numeric_transform_(encoded.numeric_raw)
         inputs = (
             numeric_z,
@@ -1918,7 +2019,15 @@ class ASRModel(BaseEstimator):
             return np.asarray(self.target_mean_, dtype=np.float64), np.asarray(self.target_std_, dtype=np.float64)
         return float(self.target_mean_), float(self.target_std_)
 
-    def predict_dist(self, X, policy: str | None = None):
+    def predict_dist(
+        self,
+        X,
+        policy: str | None = None,
+        *,
+        input_draws: int | None = None,
+        input_noise: dict | None = None,
+        seed: int = 0,
+    ):
         """The predictive distribution of every row, in the units of ``y``.
 
         One object for every head, an ``ashlar.distributions.Distribution``
@@ -1936,7 +2045,15 @@ class ASRModel(BaseEstimator):
         - ``classification``, ``ordinal``, and ``tree``: a ``Categorical`` over
           ``classes_`` (the leaves, for a tree), its values class indices.
         - ``custom``: whatever ``dist_fn(raw)`` returns.
+
+        ``input_draws=K`` integrates over each row's missing numeric cells
+        and ``input_noise={"column": sd}`` over declared measurement errors:
+        the mixture over ``K`` completions of the row and the members. See
+        ``with_uncertain_inputs``, which does the same for every method.
         """
+        if input_draws is not None or input_noise:
+            view = self.with_uncertain_inputs(32 if input_draws is None else input_draws, input_noise, seed)
+            return view._dist_from_raw(view._raw_from_frame(X), policy)
         return self._dist_from_raw(self._raw_from_frame(X), policy)
 
     def dist_from_raw(self, raw, policy: str | None = None):
@@ -2965,6 +3082,7 @@ class ASRModel(BaseEstimator):
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
             "schema": self.encoder_.to_json(),
+            "input_model": None if getattr(self, "input_model_", None) is None else self.input_model_.to_json(),
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
             "flow_layout": FLOW_LAYOUT,
@@ -3042,6 +3160,7 @@ class ASRModel(BaseEstimator):
         estimator.target_mean_ = payload.get("target_mean")
         estimator.target_std_ = payload.get("target_std")
         estimator.calibration_ = payload.get("calibration")
+        estimator.input_model_ = InputModel.from_json(payload.get("input_model"))
         estimator.reduction_ = payload["reduction"]
         estimator.n_features_in_ = len(encoder.feature_names)
         estimator.is_fitted_ = True
