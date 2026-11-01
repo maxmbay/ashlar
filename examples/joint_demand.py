@@ -46,6 +46,12 @@ alone or added to the log density, and the flow on the log density plus the
 variogram score (``objective=...``), each also calibrated as above.
 ``scored_report`` sets them beside the log-density fits of ``calibrated``.
 
+The ``by_hour`` stage asks whether a calibration per hour of day holds the
+total's interval at every hour, where one calibration of every row holds it
+only on average: on the same splits, the rank-2 normal and the flow,
+calibrated on every row and then per hour (``groups="hour"``), and the 80%
+joint highest-density region (``predict_region``) before and after.
+
     JAX_PLATFORMS=cpu python examples/joint_demand.py            # fit and score
     JAX_PLATFORMS=cpu python examples/joint_demand.py extra      # rank 4, TabM, and flow joint models
     JAX_PLATFORMS=cpu python examples/joint_demand.py report     # tables
@@ -54,6 +60,8 @@ variogram score (``objective=...``), each also calibrated as above.
     JAX_PLATFORMS=cpu python examples/joint_demand.py calibrated_report
     JAX_PLATFORMS=cpu python examples/joint_demand.py scored shard=0/3       # train on other proper scores
     JAX_PLATFORMS=cpu python examples/joint_demand.py scored_report
+    JAX_PLATFORMS=cpu python examples/joint_demand.py by_hour shard=0/3      # calibrate per hour of day
+    JAX_PLATFORMS=cpu python examples/joint_demand.py by_hour_report
 """
 
 from __future__ import annotations
@@ -112,6 +120,11 @@ SCORED = {
     "joint flow, NLL + variogram": {"task": "multivariate_flow", "objective": {"nll": 1.0, "variogram": 1.0}},
 }
 SCORED_RESULTS = DATA_DIR / "joint-demand-scored-{shard}.json"
+# The by_hour stage: log-density joint models calibrated on every row, then per hour of day.
+BY_HOUR = {"joint": {}, "joint flow": {"task": "multivariate_flow"}}
+BY_HOUR_RESULTS = DATA_DIR / "joint-demand-by-hour-{shard}.json"
+# Rows an hour needs for a table of its own. The first origin holds out 56 days, so 56 rows per hour.
+HOUR_ROWS = 50
 
 
 def load_matrix() -> np.ndarray:
@@ -631,6 +644,95 @@ def scored_report() -> None:
         )
 
 
+def _region_coverage(model, x_test, y_test, calibrated: bool) -> float:
+    """Share of test hours whose eight loads are inside the 80% joint highest-density region."""
+    density = np.asarray(model.log_prob(x_test, y_test), dtype=np.float64)
+    threshold = model.predict_region(x_test, 0.8, n_samples=DRAWS, calibrated=calibrated)
+    return float(np.mean(density >= threshold))
+
+
+def run_by_hour() -> None:
+    """Fit on the training weeks but the last 15%, calibrate on those on every row and per hour, and score each."""
+    index, count = _shard(sys.argv[2:])
+    matrix = load_matrix()
+    frame, loads, day = table(matrix, clients(matrix))
+    path = Path(str(BY_HOUR_RESULTS).format(shard=f"{index}of{count}"))
+    results = json.loads(path.read_text()) if path.exists() else {}
+    cyclical = {"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25}
+    for split, origin in enumerate(ORIGIN_DAYS):
+        if split % count != index:
+            continue
+        record = results.setdefault(str(origin), {"methods": {}})
+        fit, held, test = _calibration_split(day, origin)
+        recent = loads[day < origin][-24 * 28 :].sum(axis=1)
+        capacities = {str(level): float(np.quantile(recent, level)) for level in CAPACITY_LEVELS}
+        x_fit, y_fit = _rows(frame, fit), loads[fit]
+        x_cal, y_cal = _rows(frame, held), loads[held]
+        x_test, y_test = _rows(frame, test), loads[test]
+        hour = np.asarray(x_test["hour"]).astype(int)
+        for name, params in BY_HOUR.items():
+            if name in record["methods"]:
+                continue
+            print(f"origin day {origin}: {name}, {held.sum()} calibration hours", flush=True)
+            started = time.perf_counter()
+            model = ASRRegressor(
+                **{"task": "multivariate_gaussian", "cyclical": cyclical, "random_state": split, **FIT, **params}
+            ).fit(x_fit, y_fit)
+            entry = {"fit_seconds": time.perf_counter() - started}
+            entry["raw"] = _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated=False)
+            entry["raw"]["region_80"] = _region_coverage(model, x_test, y_test, calibrated=False)
+            started = time.perf_counter()
+            model.calibrate(x_cal, y_cal, n_samples=DRAWS, groups="hour", min_group_rows=HOUR_ROWS)
+            entry["calibrate_seconds"] = time.perf_counter() - started
+            by_hour = model.calibration_
+            entry["hours_with_own_table"] = len(by_hour["groups"])
+            # A calibration by group keeps the table of every row too, from the same scores, the same table
+            # model.calibrate(x_cal, y_cal) would store; score with it alone, then per hour.
+            model.calibration_ = by_hour["pooled"]
+            entry["every_row"] = _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated=True)
+            entry["every_row"]["region_80"] = _region_coverage(model, x_test, y_test, calibrated=True)
+            model.calibration_ = by_hour
+            entry["by_hour"] = _calibrated_scores(model, x_test, y_test, hour, capacities, calibrated=True)
+            entry["by_hour"]["region_80"] = _region_coverage(model, x_test, y_test, calibrated=True)
+            record["methods"][name] = entry
+            print(
+                "  " + "; ".join(
+                    f"{stage}: total {entry[stage]['total_coverage_80']:.3f}, by hour "
+                    f"{min(entry[stage]['coverage_by_hour']):.2f}-{max(entry[stage]['coverage_by_hour']):.2f}, "
+                    f"region {entry[stage]['region_80']:.3f}"
+                    for stage in ("raw", "every_row", "by_hour")
+                ),
+                flush=True,
+            )
+            path.write_text(json.dumps(results))
+
+
+def by_hour_report() -> None:
+    results = _held_out("joint-demand-by-hour-*.json")
+    splits = [results[str(origin)] for origin in ORIGIN_DAYS if str(origin) in results]
+    methods = [name for name in BY_HOUR if splits and all(name in split["methods"] for split in splits)]
+    print(f"{len(splits)} forecast origins; methods {methods}")
+    print("| Model | Calibration | Total in its 80% interval | Lowest hour | Highest hour | Hours outside 75-85% | Width, kW | 80% joint region |")
+    print("|---|---|---:|---:|---:|---:|---:|---:|")
+    for method in methods:
+        for stage, label in (("raw", "none"), ("every_row", "every row"), ("by_hour", "per hour")):
+            entries = [split["methods"][method][stage] for split in splits]
+            by_hour = np.mean([entry["coverage_by_hour"] for entry in entries], axis=0)
+            cells = [
+                f"{np.mean([entry['total_coverage_80'] for entry in entries]):.1%}",
+                f"{by_hour.min():.1%}",
+                f"{by_hour.max():.1%}",
+                str(int(np.sum(np.abs(by_hour - 0.8) > 0.05))),
+                f"{np.mean([entry['total_width_80'] for entry in entries]):,.0f}",
+                f"{np.mean([entry['region_80'] for entry in entries]):.1%}",
+            ]
+            print(f"| {method} | {label} | " + " | ".join(cells) + " |")
+    for method in methods:
+        own = np.mean([split["methods"][method]["hours_with_own_table"] for split in splits])
+        seconds = np.mean([split["methods"][method]["calibrate_seconds"] for split in splits])
+        print(f"{method}: {own:.1f} of 24 hours with a table of their own on average; calibration {seconds:.1f} s per origin")
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
     {
@@ -642,4 +744,6 @@ if __name__ == "__main__":
         "calibrated_report": calibrated_report,
         "scored": run_scored,
         "scored_report": scored_report,
+        "by_hour": run_by_hour,
+        "by_hour_report": by_hour_report,
     }[command]()

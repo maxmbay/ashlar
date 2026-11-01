@@ -52,7 +52,21 @@ model.predict_exceedance(X_new, threshold)     # P(y > threshold) per row, recal
 
 A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The same table recalibrates a probability: `predict_exceedance` replaces the model's own `P(y ≤ threshold)` with the share of held-out rows whose transform was at most that much, so an overconfident model's small probabilities move up and its large ones down. The map is the same for every row, so it corrects a model that is wrong the same way everywhere, not one that is too narrow on some rows and too wide on others. The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
 
-The joint heads calibrate each column, the sum of the columns, and any function of them you name, such as the largest column; [docs/distributions.md](distributions.md#calibrating-the-columns-and-the-total) has the detail.
+One calibration of every row holds its coverage over those rows on average, not within each kind of row: an interval can hold 95% of quiet rows and 50% of loud ones and still average 80%. `calibrate` can calibrate groups of rows on their own (Mondrian conformal prediction):
+
+```python
+model.calibrate(X_holdout, y_holdout, groups="store")       # a column of X, read again from X_new
+model.predict_interval(X_new, 0.8)                           # each row reads its store's table
+
+model.calibrate(X_holdout, y_holdout, groups=labels)         # one label per row
+model.predict_interval(X_new, 0.8, groups=new_labels)
+
+model.calibrate(X_holdout, y_holdout, localize="members")   # bins of member disagreement
+```
+
+Each group with at least 100 calibration rows (`min_group_rows`) gets tables of its own, so the interval holds within that group; a smaller group, and a group the calibration did not see, reads the table of every row. `localize="members"` makes the groups up to five equal bins of how much an ensemble's members disagree on a row, as a share of its predictive spread (`predict_uncertainty`), so a row the members disagree on is calibrated with rows they disagreed on as much. It needs a backbone with several members, such as `backbone="tabm"`. `predict_quantiles` and `predict_exceedance` read the groups the same way.
+
+The joint heads calibrate each column, the sum of the columns, any function of them you name, such as the largest column, and a joint region; [docs/distributions.md](distributions.md#calibrating-the-columns-and-the-total) has the detail.
 
 On five public tables, three splits each, calibration brought the default mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6% before. It widened the intervals that were too narrow (California, 75.9% → 80.7%; bike rentals, 76.8% → 79.7%), narrowed the one that was too wide (taxi tips, 88.6% → 79.9%), and left the ones that were right alone. The same conformal step on LightGBM's quantile models gives about the same coverage with a wider interval on three of the four tables where it applies. [docs/benchmarks.md](benchmarks.md#calibrated-intervals) has every number.
 

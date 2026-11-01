@@ -75,11 +75,18 @@ from ashlar.objectives import (
     score_weights,
 )
 from ashlar.calibrate import (
+    MIN_CALIBRATION_ROWS,
+    MIN_GROUP_ROWS,
     check_coverage,
     cqr_calibration,
     cqr_margin,
+    density_pit,
+    disagreement_edges,
+    disagreement_keys,
     draw_interval,
     draw_quantiles,
+    group_keys,
+    grouped_calibration,
     interval_levels,
     joint_calibration,
     joint_targets,
@@ -87,6 +94,8 @@ from ashlar.calibrate import (
     pit_values,
     recalibrated_cdf,
     recalibrated_levels,
+    region_level,
+    region_threshold,
     target_spec,
 )
 from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
@@ -309,6 +318,9 @@ def _jit_observed_pit():
 
 
 _CDF = None
+_LOG_PROB = None
+# Draws times rows times members per block when a joint region reads the log density of its draws.
+_REGION_BLOCK = 2_000_000
 
 
 def _jit_cdf():
@@ -318,6 +330,20 @@ def _jit_cdf():
 
         _CDF = eqx.filter_jit(lambda dist, value: dist.cdf(value))
     return _CDF
+
+
+def _jit_draw_log_prob():
+    """``(log p(draws), log p(value))`` of ``n`` fresh draws per row and of ``value``, compiled once per shape."""
+    global _LOG_PROB
+    if _LOG_PROB is None:
+        import equinox as eqx
+
+        def score(dist, value, key, n):
+            draws = dist.sample(key, (n,))
+            return dist.log_prob(draws), None if value is None else dist.log_prob(value)
+
+        _LOG_PROB = eqx.filter_jit(score)
+    return _LOG_PROB
 
 
 def _chunks(dist, size: int):
@@ -2101,6 +2127,7 @@ class ASRModel(BaseEstimator):
         seed: int = 0,
         calibrated: bool | None = None,
         target=None,
+        groups=None,
     ):
         """Quantiles per row, shape ``(rows, len(levels))``, in the units of ``y``.
 
@@ -2124,19 +2151,28 @@ class ASRModel(BaseEstimator):
         that held that fraction of the calibration rows, and the quantile
         head's outer levels move out (or in) by the conformal margin at 80%.
         ``calibrated=False`` reads the raw head; ``None`` uses the calibration
-        when there is one.
+        when there is one. A calibration by group reads each row's group's
+        table; ``groups`` gives each row's label when ``calibrate`` was given
+        labels rather than a column.
         """
         self._univariate_dist("predict_quantiles")
         levels = tuple(float(level) for level in np.atleast_1d(levels))
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_quantiles(part, levels, n_samples, seed, calibration, target),
+        )
+
+    def _calibrated_quantiles(self, X, levels, n_samples: int, seed: int, calibration, target):
         if self.task in JOINT_TASKS:
-            spec, tables = self._joint_tables(target, calibrated)
+            spec, tables = self._joint_tables(target, calibration)
             if tables is None:
                 if spec is None:
                     return self._quantiles(X, levels, n_samples, seed)
                 return self._joint_quantiles(X, spec, [levels], n_samples, seed)
             return self._joint_quantiles(X, spec, [recalibrated_levels(table, levels) for table in tables], n_samples, seed)
         self._no_target(target)
-        calibration = self._calibration(calibrated)
         mean, std = self._target_affine()
         if self.task == "quantile":
             if levels != tuple(QUANTILE_LEVELS):
@@ -2158,14 +2194,16 @@ class ASRModel(BaseEstimator):
         seed: int = 0,
         calibrated: bool | None = None,
         target=None,
+        groups=None,
     ):
         """Central interval per row, shape ``(rows, 2)``, in the units of ``y``.
 
         Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
         quantiles of ``predict_dist(X)``. After ``calibrate`` it is the
         split-conformal interval: on rows exchangeable with the calibration
-        rows it holds at least ``coverage`` of them. The quantile head gives
-        only its 80% interval, calibrated or not.
+        rows it holds at least ``coverage`` of them, and after a calibration
+        by group, within each group that had a table of its own. The quantile
+        head gives only its 80% interval, calibrated or not.
 
         A joint head gives each column's interval, ``(rows, columns, 2)``, or
         with ``target`` the interval of that function of the columns, such as
@@ -2173,9 +2211,17 @@ class ASRModel(BaseEstimator):
         """
         self._univariate_dist("predict_interval")
         coverage = check_coverage(coverage)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_interval(part, coverage, n_samples, seed, calibration, target),
+        )
+
+    def _calibrated_interval(self, X, coverage: float, n_samples: int, seed: int, calibration, target):
         nominal = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
         if self.task in JOINT_TASKS:
-            spec, tables = self._joint_tables(target, calibrated)
+            spec, tables = self._joint_tables(target, calibration)
             if tables is None:
                 if spec is None:
                     return self._quantiles(X, nominal, n_samples, seed)
@@ -2183,12 +2229,11 @@ class ASRModel(BaseEstimator):
             levels = [interval_levels(table, coverage) for table in tables]
             return self._joint_quantiles(X, spec, levels, n_samples, seed, interval=True)
         self._no_target(target)
-        calibration = self._calibration(calibrated)
         if self.task == "quantile":
             outer = QUANTILE_LEVELS[2] - QUANTILE_LEVELS[0]
             if not np.isclose(coverage, outer):
                 raise AshlarError(f"the quantile head gives only its {outer:.0%} interval.")
-            values = self.predict_quantiles(X, calibrated=calibration is not None)
+            values = self._calibrated_quantiles(X, tuple(QUANTILE_LEVELS), n_samples, seed, calibration, None)
             return values[:, [0, 2]]
         if calibration is None:
             levels = nominal
@@ -2197,7 +2242,14 @@ class ASRModel(BaseEstimator):
         return self._quantiles(X, levels, n_samples, seed)
 
     def predict_exceedance(
-        self, X, threshold, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None, target=None
+        self,
+        X,
+        threshold,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
+        groups=None,
     ):
         """``P(y > threshold)`` per row, shape ``(rows,)``.
 
@@ -2206,7 +2258,8 @@ class ASRModel(BaseEstimator):
         ``cdf(threshold)`` is replaced by the share of calibration rows whose
         PIT was at most that much (``ashlar.calibrate.recalibrated_cdf``), so
         an overconfident model's small probabilities move up and its large
-        ones down.
+        ones down; after a calibration by group, by the rows of the row's
+        group.
 
         A joint head gives each column's probability, ``(rows, columns)``, with
         a threshold per column or one for all, or with ``target`` the
@@ -2218,21 +2271,33 @@ class ASRModel(BaseEstimator):
         self._univariate_dist("predict_exceedance")
         if self.task == "quantile":
             raise AshlarError("the quantile head has three levels, not a CDF, so it has no exceedance probability.")
-        dist = self.predict_dist(X)
-        rows = int(dist.batch_shape[0])
+        rows = _row_count(X)
         if self.task in JOINT_TASKS:
-            spec, tables = self._joint_tables(target, calibrated)
-            shape = (rows, int(self.n_events_)) if spec is None else (rows,)
-            below = self._joint_cdf(dist, spec, _thresholds(threshold, shape), n_samples, seed)
+            shape = (rows, int(self.n_events_)) if target is None else (rows,)
+        else:
+            self._no_target(target)
+            shape = (rows,)
+        values = _thresholds(threshold, shape)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, at: self._calibrated_exceedance(
+                part, values if at is None else values[at], n_samples, seed, calibration, target
+            ),
+        )
+
+    def _calibrated_exceedance(self, X, values, n_samples: int, seed: int, calibration, target):
+        dist = self.predict_dist(X)
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibration)
+            below = self._joint_cdf(dist, spec, values, n_samples, seed)
             if tables is not None:
                 if spec is None:
                     below = np.stack([recalibrated_cdf(table, below[:, index]) for index, table in enumerate(tables)], axis=1)
                 else:
                     below = recalibrated_cdf(tables[0], below)
             return 1.0 - below
-        self._no_target(target)
-        calibration = self._calibration(calibrated)
-        values = _thresholds(threshold, (rows,))
         key = jax.random.PRNGKey(int(seed))
         pieces = []
         for start, chunk in _chunks(dist, self._chunk_rows()):
@@ -2248,7 +2313,62 @@ class ASRModel(BaseEstimator):
             below = recalibrated_cdf(calibration, below)
         return 1.0 - below
 
-    def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0, target=None):
+    def predict_region(
+        self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None, groups=None
+    ):
+        """A joint head's highest-density region per row, as a log density threshold, shape ``(rows,)``.
+
+        The region is every outcome ``y`` with ``log_prob(X, y) >= threshold``:
+        the smallest region with its probability, so it follows a curved or
+        multi-modal dependence that a box of per-column intervals cannot.
+        Uncalibrated, its probability under the model is ``coverage``. After
+        ``calibrate`` it is the split-conformal region: the probability is
+        raised or lowered until the region holds ``coverage`` of the
+        calibration rows, so on exchangeable rows it holds at least that
+        share. The threshold is read from ``n_samples`` joint draws per row.
+
+        ``model.log_prob(X, Y) >= model.predict_region(X)`` says, row by row,
+        whether ``Y`` is inside.
+        """
+        self._univariate_dist("predict_region")
+        if self.task not in JOINT_TASKS:
+            raise AshlarError("predict_region is for the joint heads; a one-column head has predict_interval.")
+        coverage = check_coverage(coverage)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_region(part, coverage, n_samples, seed, calibration),
+        )
+
+    def _calibrated_region(self, X, coverage: float, n_samples: int, seed: int, calibration):
+        table = None
+        if calibration is not None:
+            if calibration.get("kind") != "joint":
+                raise AshlarError("this calibration is not a joint model's; calibrate the model again.")
+            table = calibration.get("region")
+            if table is None:
+                raise AshlarError("this joint calibration has no region; calibrate the model again.")
+        level = region_level(table, coverage)
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for _start, chunk in _chunks(self.predict_dist(X), self._region_rows(n_samples)):
+            key, draw_key = jax.random.split(key)
+            drawn, _seen = _jit_draw_log_prob()(chunk, None, draw_key, int(n_samples))
+            pieces.append(region_threshold(np.asarray(drawn, dtype=np.float64), level))
+        return np.concatenate(pieces) if pieces else np.zeros(0)
+
+    def calibrate(
+        self,
+        X,
+        y,
+        n_samples: int = 1000,
+        seed: int = 0,
+        target=None,
+        groups=None,
+        localize: str | None = None,
+        min_group_rows: int = MIN_GROUP_ROWS,
+    ):
         """Split-conformal calibration on held-out rows. Returns ``self``.
 
         Pass rows the model was not fitted on. A density head stores each
@@ -2271,14 +2391,53 @@ class ASRModel(BaseEstimator):
         sum is exact under the normal-based joint heads; a function, and
         everything about a flow, is read from ``n_samples`` joint draws per
         row. A saved model keeps a function's PIT table under its name; pass
-        the function again after ``load``.
+        the function again after ``load``. It also calibrates the joint
+        highest-density region of ``predict_region``.
+
+        By group (Mondrian), each group with at least ``min_group_rows`` rows
+        gets tables of its own, read for the rows of that group, and every
+        other row reads the tables of all rows:
+
+        - ``groups="column"``: the groups are the values of that column of
+          ``X``, read again from the rows you predict.
+        - ``groups=labels``: one label per row; pass ``groups=`` again, one
+          per row, when you predict.
+        - ``localize="members"``: up to five equal-count bins of how much the
+          ensemble's members disagree on the row, as a share of its
+          predictive spread (``predict_uncertainty``). It needs a backbone
+          with several members, such as ``tabm``.
         """
         self._univariate_dist("calibrate")
+        grouping = None
+        if groups is not None or localize is not None:
+            grouping = self._calibration_groups(X, groups, localize, min_group_rows)
+        scores, functions = self._calibration_scores(X, y, n_samples, seed, target)
+        pooled = _calibration_table(scores)
+        if grouping is None:
+            self.calibration_ = pooled
+        else:
+            keys, by = grouping
+            if len(keys) != _score_rows(scores):
+                raise ShapeError(f"X has {len(keys)} rows and y has {_score_rows(scores)}.")
+            tables = {}
+            for key in dict.fromkeys(keys):
+                rows = np.flatnonzero(keys == key)
+                if rows.size >= int(min_group_rows):
+                    tables[key] = _calibration_table(scores, rows)
+            self.calibration_ = grouped_calibration(pooled, tables, by, int(min_group_rows))
+        self._calibration_functions = functions
+        return self
+
+    def _calibration_scores(self, X, y, n_samples: int, seed: int, target) -> tuple[dict, dict]:
+        """Each calibration row's scores, which a table of any group of the rows is built from (``_calibration_table``).
+
+        Also the functions of a joint target by name.
+        """
         if self.task in JOINT_TASKS:
-            return self._calibrate_joint(X, y, n_samples, seed, target)
+            return self._joint_scores(X, y, n_samples, seed, target)
         self._no_target(target)
         if observed.is_observed(target_array(y)):
-            return self._calibrate_observed(X, observed.as_observed(target_array(y)), seed)
+            return {"pit": self._observed_pit(X, observed.as_observed(target_array(y)), seed)}, {}
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if not np.isfinite(target).all():
             raise AshlarError("calibration targets must be finite.")
@@ -2287,8 +2446,7 @@ class ASRModel(BaseEstimator):
             values = self._quantile_head_levels(X) * std + mean
             if values.shape[0] != target.shape[0]:
                 raise ShapeError(f"X has {values.shape[0]} rows and y has {target.shape[0]}.")
-            self.calibration_ = cqr_calibration(values[:, 0], values[:, 2], target)
-            return self
+            return {"cqr": (values[:, 0], values[:, 2], target)}, {}
         dist = self.predict_dist(X)
         if int(dist.batch_shape[0]) != target.shape[0]:
             raise ShapeError(f"X has {int(dist.batch_shape[0])} rows and y has {target.shape[0]}.")
@@ -2303,11 +2461,97 @@ class ASRModel(BaseEstimator):
         except NotImplementedError:
             draws = self.sample(X, n=n_samples, seed=seed)
             pit = pit_values(draws, target, seed=seed)
-        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
-        return self
+        return {"pit": pit}, {}
 
-    def _calibrate_observed(self, X, label, seed: int):
-        """Calibrate on coarse rows: each row's PIT is uniform over what its label allows."""
+    def _calibration_groups(self, X, groups, localize, min_group_rows) -> tuple[np.ndarray, dict]:
+        """Each calibration row's group key, and how a new row finds its group."""
+        if groups is not None and localize is not None:
+            raise AshlarError("calibrate groups rows by groups= or by localize=, not both.")
+        if int(min_group_rows) < MIN_CALIBRATION_ROWS:
+            raise AshlarError(f"min_group_rows must be at least {MIN_CALIBRATION_ROWS}; received {min_group_rows!r}.")
+        if localize is not None:
+            if localize != "members":
+                raise AshlarError(f"localize is 'members'; received {localize!r}.")
+            disagreement = self._member_disagreement(X)
+            edges = disagreement_edges(disagreement, int(min_group_rows))
+            return disagreement_keys(disagreement, edges), {"members": edges}
+        if isinstance(groups, str):
+            names, columns = frame_columns(X)
+            if groups not in names:
+                raise AshlarError(f"groups names a column of X, and X has no column {groups!r}.")
+            return group_keys(columns[names.index(groups)]), {"column": groups}
+        return group_keys(groups), {"labels": True}
+
+    def _member_disagreement(self, X) -> np.ndarray:
+        """How much the members disagree on each row: their spread's share of the predictive spread, ``(rows,)``."""
+        if int(self.core_.backbone.k) < 2:
+            raise AshlarError(
+                "localize='members' bins rows by how much the ensemble's members disagree, and this backbone has "
+                "one member. Fit with backbone='tabm', or another backbone with k > 1."
+            )
+        if self.task == "quantile":
+            raise AshlarError("localize='members' needs a head with a predictive spread; the quantile head has three levels.")
+        parts = self.predict_uncertainty(X)
+        share = np.asarray(parts["epistemic"], dtype=np.float64) / np.maximum(np.asarray(parts["total"], dtype=np.float64), 1e-12)
+        return share.mean(axis=-1) if share.ndim > 1 else share
+
+    def _by_group(self, X, calibrated, groups, predict):
+        """``predict(X, calibration, rows)`` with the calibration each row reads: the one table, or its group's.
+
+        ``rows`` is ``None`` when every row reads one calibration, and
+        otherwise the indices of the rows passed, for arguments given per row.
+        """
+        calibration = self._calibration(calibrated)
+        if calibration is None or calibration.get("kind") != "groups":
+            stored = getattr(self, "calibration_", None)
+            by_labels = stored is not None and stored.get("kind") == "groups" and "labels" in stored["by"]
+            # The raw head of a model calibrated by labels ignores them; any other model has no use for them.
+            if groups is not None and not by_labels:
+                raise AshlarError("groups= gives each row's label for a model calibrated by labels, and this one was not.")
+            return predict(X, calibration, None)
+        keys = self._row_groups(X, calibration, groups)
+        known = calibration["groups"]
+        tables = np.asarray([key if key in known else None for key in keys], dtype=object)
+        if len(keys) == 0 or all(key is None for key in tables):
+            return predict(X, calibration["pooled"], None)
+        members = {}
+        for index, key in enumerate(tables):
+            members.setdefault(key, []).append(index)
+        names, columns = frame_columns(X)
+        out = None
+        for key, indices in members.items():
+            rows = np.asarray(indices, dtype=np.int64)
+            # Each group's rows are padded with copies of its first to a size from a short ladder, so groups of
+            # similar size share one compiled shape instead of compiling once each.
+            padded = np.concatenate([rows, np.full(_padded_rows(rows.size) - rows.size, rows[0])])
+            table = calibration["pooled"] if key is None else known[key]
+            part = np.asarray(predict(_take_rows(names, columns, padded), table, padded))[: rows.size]
+            if out is None:
+                out = np.empty((len(keys),) + part.shape[1:], dtype=part.dtype)
+            out[rows] = part
+        return out
+
+    def _row_groups(self, X, calibration: dict, groups) -> np.ndarray:
+        """The group key of every row of ``X`` under a calibration by group."""
+        by = calibration["by"]
+        if "labels" not in by and groups is not None:
+            raise AshlarError("this model's groups come from X; pass no groups=.")
+        if "column" in by:
+            names, columns = frame_columns(X)
+            if by["column"] not in names:
+                raise AshlarError(f"the calibration groups rows by column {by['column']!r}, and X has no such column.")
+            return group_keys(columns[names.index(by["column"])])
+        if "members" in by:
+            return disagreement_keys(self._member_disagreement(X), by["members"])
+        if groups is None:
+            raise AshlarError("this model was calibrated with a group label per row; pass groups=, one label per row of X.")
+        keys = group_keys(groups)
+        if len(keys) != _row_count(X):
+            raise ShapeError(f"X has {_row_count(X)} rows and groups has {len(keys)}.")
+        return keys
+
+    def _observed_pit(self, X, label, seed: int) -> np.ndarray:
+        """Each coarse row's PIT, drawn uniformly over what its label allows."""
         if self.task == "quantile":
             raise AshlarError("the quantile head calibrates from exact values; it has no CDF to spread a coarse label over.")
         if observed.is_truncated(label) or observed.is_noisy(label) or observed.has_groups(label):
@@ -2325,11 +2569,10 @@ class ASRModel(BaseEstimator):
         pit = np.concatenate(pit)
         if pit.shape[0] != len(label):
             raise ShapeError(f"X has {pit.shape[0]} rows and y has {len(label)}.")
-        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
-        return self
+        return pit
 
-    def _calibrate_joint(self, X, y, n_samples: int, seed: int, target):
-        """One PIT table per column and per function of the columns, from the same rows and draws."""
+    def _joint_scores(self, X, y, n_samples: int, seed: int, target) -> tuple[dict, dict]:
+        """Each row's PIT per column, per function of the columns, and for the region, from the same rows and draws."""
         d = int(self.n_events_)
         values = self._joint_values(y)
         targets = joint_targets(target, d)
@@ -2360,11 +2603,23 @@ class ASRModel(BaseEstimator):
                 if draws is None:
                     draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
                 pits[name].append(pit_values(_target_values(spec, draws), _target_values(spec, part), rng=rng))
-        self.calibration_ = joint_calibration(
-            np.concatenate(columns), {name: (spec, np.concatenate(pits[name])) for name, spec in targets.items()}
-        )
-        self._calibration_functions = {name: spec["function"] for name, spec in targets.items() if "function" in spec}
-        return self
+        region = []
+        for start, chunk in _chunks(dist, self._region_rows(n_samples)):
+            key, draw_key = jax.random.split(key)
+            seen = jnp.asarray(values[start : start + int(chunk.batch_shape[0])], dtype=jnp.float32)
+            drawn, observed_density = _jit_draw_log_prob()(chunk, seen, draw_key, int(n_samples))
+            region.append(density_pit(np.asarray(drawn), np.asarray(observed_density), rng=rng))
+        scores = {
+            "columns": np.concatenate(columns),
+            "targets": {name: (spec, np.concatenate(pits[name])) for name, spec in targets.items()},
+            "region": np.concatenate(region),
+        }
+        return scores, {name: spec["function"] for name, spec in targets.items() if "function" in spec}
+
+    def _region_rows(self, n_samples: int) -> int:
+        """Rows per block when reading the log density of ``n_samples`` draws per row and member."""
+        members = int(self.core_.backbone.k)
+        return max(1, min(self._chunk_rows(), _REGION_BLOCK // max(1, int(n_samples) * members)))
 
     def _joint_values(self, y) -> np.ndarray:
         """A joint calibration's exact values, ``(rows, columns)``."""
@@ -2412,12 +2667,11 @@ class ASRModel(BaseEstimator):
             spec = {"function": function}
         return name, spec
 
-    def _joint_tables(self, target, calibrated):
+    def _joint_tables(self, target, calibration):
         """``(spec, tables)``: the target (``None`` for each column) and its PIT tables, ``None`` when uncalibrated."""
         spec = None
         if target is not None:
             name, spec = self._target(target)
-        calibration = self._calibration(calibrated)
         if calibration is None:
             return spec, None
         if calibration.get("kind") != "joint":
@@ -2980,6 +3234,39 @@ def _sklearn_stratified(indices, labels, validation_size, random_state, train_te
 
 def _take_rows(names, columns, indices):
     return {name: np.asarray(values)[indices] for name, values in zip(names, columns, strict=True)}
+
+
+def _row_count(X) -> int:
+    _names, columns = frame_columns(X)
+    return int(len(columns[0])) if columns else 0
+
+
+def _padded_rows(rows: int) -> int:
+    """The next size up on a ladder of powers of two from 64: the rows a group's prediction runs on."""
+    return max(64, 1 << (int(rows) - 1).bit_length())
+
+
+def _score_rows(scores: dict) -> int:
+    if "pit" in scores:
+        return int(len(scores["pit"]))
+    if "cqr" in scores:
+        return int(len(scores["cqr"][2]))
+    return int(scores["columns"].shape[0])
+
+
+def _calibration_table(scores: dict, rows=None) -> dict:
+    """The saved calibration of ``rows`` (all of them by default) from their scores (``_calibration_scores``)."""
+    take = slice(None) if rows is None else np.asarray(rows)
+    if "pit" in scores:
+        return pit_calibration(np.clip(np.asarray(scores["pit"])[take], 0.0, 1.0))
+    if "cqr" in scores:
+        low, high, y = scores["cqr"]
+        return cqr_calibration(low[take], high[take], y[take])
+    calibration = joint_calibration(
+        scores["columns"][take], {name: (spec, pit[take]) for name, (spec, pit) in scores["targets"].items()}
+    )
+    calibration["region"] = pit_calibration(np.clip(scores["region"][take], 0.0, 1.0))
+    return calibration
 
 
 def _entropy(probabilities):
