@@ -110,9 +110,10 @@ the weekday profile error: the root mean square, over clients and weekdays,
 of the error in each weekday's share of the client's mean load.
 
 Results go to ``/tmp/ashlar-bench/observed-real-<stage>.json`` after every
-fit, or every split for the survival stages, and a stage restarted with the
+fit, or every split for the clinical tables, and a stage restarted with the
 same command skips what is done; a Backblaze split missing a model, such as
-pycox after it failed, fits only that model.
+pycox after it failed, fits only that model. pycox fits in a process of its
+own, since torch's OpenMP runtime can hang in one where XGBoost's has run.
 
     pip install -e ".[dev]" xgboost scikit-survival h5py lightgbm pyarrow torch pycox
     JAX_PLATFORMS=cpu python examples/benchmark_observed_real.py survival     # SUPPORT, METABRIC, GBSG
@@ -970,8 +971,70 @@ def _pycox_hazard(x_fit, t_fit, e_fit, x_val, t_val, e_val, seed: int):
     return model, mean, sd
 
 
+# A pycox fit that has not finished in this long is stopped and its model skipped.
+PYCOX_TIMEOUT_SECONDS = 7200
+
+
+def _pycox_scores(x_fit, t_fit, e_fit, x_val, t_val, e_val, x_test, tau, grid, seed: int) -> dict:
+    """Fit pycox's logistic hazard and read its test curves, with the seconds of the fit."""
+    importlib.import_module("pycox.models")  # loads torch before the clock starts, so the seconds are the fit's alone
+    with _Clock() as clock:
+        hazard, mean, sd = _pycox_hazard(x_fit, t_fit, e_fit, x_val, t_val, e_val, seed)
+    surv = hazard.interpolate(10).predict_surv_df((x_test - mean) / sd)
+    times, values = surv.index.to_numpy(np.float64), surv.to_numpy(np.float64).T
+    return {
+        "curves": _step_grid(times, values, grid),
+        "own": _step_own(times, values, tau),
+        "risk": 1.0 - _step_grid(times, values, np.array([RISK_DAYS]))[:, 0],
+        "cpu": clock.cpu,
+        "wall": clock.wall,
+    }
+
+
+def _pycox_child(connection, *arguments) -> None:
+    """The process ``_pycox_isolated`` starts: send back the scores, or the error that stopped them."""
+    try:
+        connection.send(_pycox_scores(*arguments))
+    except Exception as error:  # noqa: BLE001 - every failure goes back to the parent, which skips pycox
+        connection.send(RuntimeError(f"{type(error).__name__}: {error}"))
+    finally:
+        connection.close()
+
+
+def _pycox_isolated(features, entry, window, failed, fit, held, test, grid, seed: int) -> dict:
+    """pycox in a fresh process, with the CPU and wall seconds of its fit there.
+
+    torch brings its own OpenMP runtime. On macOS, after XGBoost's runtime has run in the same process, torch's
+    first parallel call waited forever at an OpenMP barrier; a spawned process has not run XGBoost. A process
+    that dies or runs past ``PYCOX_TIMEOUT_SECONDS`` raises here, and the split goes on without pycox.
+    """
+    import multiprocessing
+
+    matrix = _numeric(features, entry, sorted(features["model"].astype(str).unique()))
+    arguments = (
+        matrix[fit], window[fit], failed[fit], matrix[held], window[held], failed[held], matrix[test], window[test], grid, seed
+    )
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    process = context.Process(target=_pycox_child, args=(send, *arguments), daemon=True)
+    process.start()
+    send.close()
+    try:
+        if not receive.poll(PYCOX_TIMEOUT_SECONDS):
+            raise TimeoutError(f"no result after {PYCOX_TIMEOUT_SECONDS} seconds")
+        result = receive.recv()  # EOFError if the process died without sending
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join()
+        receive.close()
+    if isinstance(result, Exception):
+        raise result
+    return result
+
+
 def _backblaze_fit(name: str, features, entry, window, failed, exit_, train, fit, held, seed: int) -> dict:
-    """Fit one model: Ashlar on the truncated age, the others on the days watched with the age on entry as a feature."""
+    """Fit one model but pycox: Ashlar on the truncated age, the others on the days watched with the age on entry as a feature."""
     from sksurv.nonparametric import kaplan_meier_estimator
 
     if name.startswith("ashlar"):
@@ -983,10 +1046,6 @@ def _backblaze_fit(name: str, features, entry, window, failed, exit_, train, fit
             with_entry.iloc[fit], window[fit], failed[fit], with_entry.iloc[held], window[held], failed[held], seed
         )
         return {"booster": booster, "family": family, "scale": scale, "features": with_entry, "single": single}
-    if name.startswith("pycox"):
-        matrix = _numeric(features, entry, sorted(features["model"].astype(str).unique()))
-        hazard, mean, sd = _pycox_hazard(matrix[fit], window[fit], failed[fit], matrix[held], window[held], failed[held], seed)
-        return {"hazard": hazard, "matrix": (matrix - mean) / sd}
     times, survival = kaplan_meier_estimator(failed[train], window[train])
     return {"times": times, "survival": survival}
 
@@ -1015,11 +1074,6 @@ def _backblaze_curves(name: str, fitted: dict, features, entry, exit_, window, f
         )
         # Its likelihood is of the log of the days watched; an event's density in days divides by them.
         return scores["curves"], scores["own"], scores["risk"], scores["nll"] + float(np.mean(event * np.log(tau)))
-    if name.startswith("pycox"):
-        surv = fitted["hazard"].interpolate(10).predict_surv_df(fitted["matrix"][test])
-        times, values = surv.index.to_numpy(np.float64), surv.to_numpy(np.float64).T
-        risk = 1.0 - _step_grid(times, values, np.array([RISK_DAYS]))[:, 0]
-        return _step_grid(times, values, grid), _step_own(times, values, tau), risk, None
     curve = np.broadcast_to(fitted["survival"], (len(test), len(fitted["survival"])))
     return _step_grid(fitted["times"], curve, grid), _step_own(fitted["times"], curve, tau), np.zeros(len(test)), None
 
@@ -1037,9 +1091,15 @@ def _backblaze_split(features, entry, exit_, window, failed, train, test, seed: 
             print("    pycox is not installed; skipping its model", flush=True)
             continue
         try:
-            with _Clock() as clock:
-                fitted = _backblaze_fit(name, features, entry, window, failed, exit_, train, fit, held, seed)
-            curves, own, risk, nll = _backblaze_curves(name, fitted, features, entry, exit_, window, failed, test, grid)
+            if name.startswith("pycox"):
+                child = _pycox_isolated(features, entry, window, failed, fit, held, test, grid, seed)
+                curves, own, risk, nll = child["curves"], child["own"], child["risk"], None
+                cpu, wall = child["cpu"], child["wall"]
+            else:
+                with _Clock() as clock:
+                    fitted = _backblaze_fit(name, features, entry, window, failed, exit_, train, fit, held, seed)
+                curves, own, risk, nll = _backblaze_curves(name, fitted, features, entry, exit_, window, failed, test, grid)
+                cpu, wall = clock.cpu, clock.wall
         except Exception as error:
             # pycox and torchtuples have lagged behind numpy releases; a failure there should not stop the others.
             if not name.startswith("pycox"):
@@ -1054,8 +1114,8 @@ def _backblaze_split(features, entry, exit_, window, failed, train, test, seed: 
             "d_chi2": chi2,
             "d_p": p,
             "nll": nll,
-            "cpu": clock.cpu,
-            "wall": clock.wall,
+            "cpu": cpu,
+            "wall": wall,
         }
         if name == "xgboost aft":
             records[name]["chosen"] = f"{fitted['family']}, scale {fitted['scale']}"
@@ -1085,8 +1145,12 @@ def run_backblaze() -> None:
             continue
         train, test = train_test_split(np.arange(len(failed)), test_size=0.2, stratify=failed, random_state=seed)
         print(f"  split {seed}: {', '.join(missing)}", flush=True)
-        results[str(seed)] = {**done, **_backblaze_split(features, entry, exit_, window, failed, train, test, seed, missing)}
-        _save("backblaze", results)
+        for name in missing:
+            # Saved after every model, so a run that is stopped keeps the models it finished.
+            results.setdefault(str(seed), {}).update(
+                _backblaze_split(features, entry, exit_, window, failed, train, test, seed, (name,))
+            )
+            _save("backblaze", results)
 
 
 def backblaze_report() -> None:
