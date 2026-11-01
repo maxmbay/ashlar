@@ -812,3 +812,37 @@ Each cell is a mean over the three splits. The last two columns score each bin o
 - **No calibration on rows in range holds the interval above it.** The members flag those rows: most of California's and diamonds' fall in the top bin. But the top bin's table comes from rows in range, whose errors are smaller, so the rows above the range keep the coverage of one calibration, 59.4% on California and 5.5% on diamonds. Calibrating also narrows an interval that was too wide in range, and that costs coverage above it: California's 64.5% before calibration falls to 59.0% after one calibration, and bike rentals' 79.9% to 70.8%.
 - **Scaling by the member spread trades coverage in range for coverage above it.** Above the range the scaled interval covers 77.2% of California's rows, with an interval 1.7 times as wide as one calibration's, and 74.3% of bike rentals'. In range it still covers 80% on average, but only 59.8% to 64.9% of the rows the members agree on most and 91.6% to 93.9% of those they disagree on most. In range most of the error is noise, which the member spread does not measure (the ranking table above), so an interval sized by the spread alone is too narrow where the members agree and too wide where they do not. Ashlar does not ship it.
 - **On diamonds nothing reaches the rows above the range.** The scaled interval, twice as wide as one calibration's, covers 18.6% of them. The members drift apart there, but the error grows far more (the RMSE 21 times, the member spread 4 times, in the shift table above), so no interval sized by their disagreement holds it. Use the spread to flag those rows, as above.
+
+## Decisions from the distribution
+
+`examples/benchmark_decide.py`, issue #32's test of training through a decision's cost. A newsvendor orders before demand is known; a unit short costs `under`, a unit over costs `over`, and the best order is the `under / (under + over)` quantile. Each head is trained on its likelihood (`nll`, then the plug-in order), on its likelihood plus the newsvendor cost of its own order (`hybrid`, weights 1 and 1), and on the cost alone (`cost`). Run on an M3 Pro laptop, CPU only, in 7 minutes.
+
+### A skewed target, costs 9:1
+
+Four features; demand is `exp(0.5 x0 + s(x1) G)`, `G ~ Gamma(2)`, `s(x1) = 0.4 + 0.3 tanh(x1)`. 6,000 rows to train, 1,500 to calibrate on, 20,000 to test; seeds 0 to 4, mean ± standard deviation. Cost in percent above ordering the true 0.9 quantile; the service level is the share of demand at or below the order (90% is right); "calibrated" is after `calibrate` on the 1,500 rows.
+
+| model | objective | cost above oracle | service level | NLL | calibrated cost | calibrated service |
+|---|---|---:|---:|---:|---:|---:|
+| LightGBM quantile | – | 5.37% ± 0.93 | 85.1% | – | – | – |
+| gaussian | nll | 59.1% ± 42.6 | 95.2% | 3.48 | 25.3% ± 23.0 | 90.0% |
+| gaussian | hybrid | 41.3% ± 28.0 | 95.8% | 3.46 | 8.91% ± 4.62 | 89.7% |
+| gaussian | cost | 1.37% ± 0.57 | 90.1% | 4.96 | 1.35% ± 0.60 | 90.3% |
+| mixture | nll | 0.74% ± 0.27 | 89.2% | 1.51 | 0.59% ± 0.20 | 90.2% |
+| mixture | hybrid | 1.00% ± 0.65 | 89.2% | 1.54 | 0.78% ± 0.38 | 90.0% |
+| mixture | cost | 1.58% ± 0.43 | 89.6% | 5.23 | 1.45% ± 0.48 | 90.5% |
+
+The issue's rule was to drop decision training if the hybrid's gain on the mixture is under 1%. It is negative: the mixture's plug-in order is already within 0.7% of the oracle, and the hybrid costs 0.26% ± 0.63 more. The cost pays only on the misspecified normal head, where `calibrate` recovers part of it and training on the cost alone recovers nearly all of it, but wrecks the likelihood (NLL 3.48 to 4.96). Decision training was not shipped; `ashlar.decide` and `predict_order` were.
+
+### Hourly bike rentals, four cost ratios
+
+Seeds 0 to 2, 80/20 split, the `mixture` head. Cost against the likelihood fit's plug-in order (negative is cheaper).
+
+| costs (short:over) | level | hybrid cost vs nll | LightGBM quantile vs nll | NLL: nll fit | NLL: hybrid |
+|---|---:|---:|---:|---:|---:|
+| 1:1 | 0.50 | -0.13% ± 0.20 | +6.1% ± 2.4 | 4.46 | 4.46 |
+| 3:1 | 0.75 | -0.75% ± 0.28 | +7.5% ± 2.5 | 4.46 | 4.47 |
+| 9:1 | 0.90 | -0.24% ± 0.46 | +12.2% ± 1.8 | 4.46 | 4.46 |
+| 19:1 | 0.95 | -0.60% ± 0.52 | +22.6% ± 3.0 | 4.46 | 4.46 |
+
+The hybrid is a little cheaper at every ratio but never by 1%. LightGBM's quantile regression, fitted per ratio, costs 6% to 23% more than the mixture's plug-in order, and more the further into the tail the order sits.
+
