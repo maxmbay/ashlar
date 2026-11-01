@@ -2,6 +2,15 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Added
+
+- **Calibrated joint outputs.** `calibrate` works on `multivariate_gaussian`, `multivariate_mixture`, and `multivariate_flow`. It keeps a table of probability integral transforms for each column and for each function of the columns it is given with `target`: always their sum, and also a weight per column (that weighted sum) or a function defined with `def`. `predict_interval`, `predict_quantiles`, and `predict_exceedance` take the same `target`, so `predict_interval(X, 0.8, target="sum")` is a calibrated interval for the total. A function's table is saved under its name; pass the function again after `load`. Joint calibration needs rows whose cells are all exact. [docs/distributions.md](docs/distributions.md#calibrating-the-columns-and-the-total) has the detail. ([#31](https://github.com/maxmbay/ashlar/issues/31))
+- `predict_exceedance(X, threshold)`: P(y > threshold) per row for every head with a CDF, one probability per column on a joint head, or for a function of the columns with `target`. After `calibrate` the model's own `P(y ≤ threshold)` is replaced by the share of calibration rows whose transform was at most that much.
+- `Distribution.project(weights)`: the exact distribution of a weighted sum of a joint outcome's columns, a normal under `LowRankMultivariateNormal` and `Independent` normals, and a mixture of normals under `Mixture` and `AffineTransformed` of them. The flow has no closed form and raises `NotImplementedError`.
+- `examples/joint_demand.py calibrated`: the joint demand benchmark with the last 15% of each origin's training weeks held out to calibrate the total and each site.
+
 ## 0.0.4 — 2026-10-31
 
 ### Added
