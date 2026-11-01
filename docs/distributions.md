@@ -196,6 +196,8 @@ A column's kind is any one-column head that has a likelihood: `poisson` and `neg
 
 A chain takes a [joint label](observed.md#several-products-that-sell-out-together) too. A categorical column's cell can be a range of classes, `observed.interval(-inf, inf)` for a class that was not recorded, and the likelihood sums over the classes it allows; the last column's cell can be censored or an interval. Every other cell must be exact, because the columns after it condition on its value. That is enough for a censored time with an unknown cause, the competing-risks model in [docs/observed.md](observed.md).
 
+On freMTPL2's 677,991 motor policies, a chain of a `negative_binomial` claim count and a `hurdle` cost has a joint NLL of 0.467 nats per policy, against 0.615 for the same two heads fitted apart, because it knows that a cost is zero exactly when there was no claim. It ties the actuary's frequency and severity model built by hand, 0.4672 against 0.4673, with the total's calibration the same, and gets there from the column kinds alone. [docs/benchmarks.md](benchmarks.md#chained-claim-counts-and-costs) has the table.
+
 ## JAX transforms
 
 A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, `LowRankMultivariateNormal`, and `AutoregressiveFlow`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.

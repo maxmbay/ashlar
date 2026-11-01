@@ -459,6 +459,18 @@ From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi
 
 The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
 
+## Chained claim counts and costs
+
+From [`examples/benchmark_chain.py`](../examples/benchmark_chain.py). French motor insurance (freMTPL2, from CASdatasets), 677,991 policies, 3.68% with a claim. Each policy's outcome is its number of claims `N`, capped at 4, and its average cost per claim `S`, 0 without a claim. Three random 80/20 splits, mean ± standard deviation. The joint NLL is per policy, with a cost's density per euro. The total `T = N × S` is read from 200 joint draws per policy on 50,000 test policies; the PIT distance is the Kolmogorov distance of its randomized PIT from uniform, × 100. Observed on split 0: P(T > 0) 3.66%, P(T > 1,000) 2.53%, P(T > 5,000) 0.15%.
+
+| Model | Joint NLL ↓ | Count NLL | Cost NLL given the count | P(T > 0) | P(T > 1,000) | P(T > 5,000) | Mean T / observed | CRPS of T ↓ | PIT distance × 100 ↓ | CPU seconds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `chain`: `negative_binomial`, then `hurdle` | **0.4672 ± 0.0033** | 0.1553 | 0.3120 | 3.52% | 1.72% | 0.25% | 0.73 ± 0.17 | **92.5** | 0.48 ± 0.08 | 940 |
+| independent `negative_binomial` and `hurdle` | 0.6145 ± 0.0036 | 0.1551 | 0.4593 | 0.24% | 0.13% | 0.02% | 0.05 ± 0.01 | 93.9 | 3.30 ± 0.07 | 1,716 |
+| frequency and severity by hand | 0.4673 ± 0.0030 | 0.1551 | 0.3122 | 3.52% | 1.73% | 0.25% | 0.73 ± 0.17 | 92.6 | **0.47 ± 0.06** | 894 |
+
+The chain beats the independent heads by 0.147 nats per policy, fifteen times the issue's bar of 0.01, and its total is far better calibrated: the independent hurdle cannot know that a cost is zero exactly when the count is, so drawn apart they give a policy a positive total 0.24% of the time against 3.66%. The chain ties the actuary's model built by hand, a count model and a log-normal cost fitted on the policies with claims, with the cost set to zero where there was none: its joint NLL is 0.0001 nats better, inside the spread across splits, and it learns the same structure from the column kinds alone. Both put too little mass between 1,000 and 5,000 euros and too much above. The mean total is 0.96 to 0.98 of the observed on split 0 and about 0.61 on splits 1 and 2, for both models alike; freMTPL2's costs have a very long tail, and a handful of test claims in the millions decide the sum.
+
 ## Labels that say what was observed
 
 From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py). Three simulations, so the true values are known and every fit is scored against them. Five seeds, 0 to 4, mean ± standard deviation across seeds. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments. [docs/observed.md](observed.md) describes the labels.
