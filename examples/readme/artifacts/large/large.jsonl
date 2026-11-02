@@ -57,3 +57,7 @@
 {"table": "airlines_delay", "model": "catboost_uncertainty", "variant": "", "seed": 0, "seconds": 626.1, "trees": 999, "rmse": 29.058593615639595, "mae": 13.917393666026527, "crps": 11.457328763069876, "nll": 4.721556686489289, "pinball": 5.487338049570988, "coverage80": 0.93914, "width80": 66.81706154243096}
 {"table": "taxi_tip", "model": "tabm_pytabkit", "variant": "", "seed": 0, "seconds": 15168.7, "rmse": 1.7976548296698067, "mae": 0.732706668541302}
 {"table": "year", "model": "ashlar", "variant": "v3check", "seed": 0, "seconds": 171.8, "epochs": 23, "rmse": 8.698345763433277, "mae": 5.9025542542802505}
+{"table": "higgs", "model": "ashlar", "variant": "v3", "seed": 1, "seconds": 323.1, "epochs": 20, "accuracy": 0.7633975, "log_loss": 0.481012761592865, "auc": 0.8473128124616199}
+{"table": "higgs", "model": "lightgbm", "variant": "", "seed": 1, "seconds": 52.8, "trees": 4001, "accuracy": 0.7514075, "log_loss": 0.49820014948254143, "auc": 0.8341394271683622}
+{"table": "higgs", "model": "xgboost", "variant": "", "seed": 1, "seconds": 71.7, "trees": 3998, "accuracy": 0.753375, "log_loss": 0.49559885263442993, "auc": 0.8359454775443118}
+{"table": "higgs", "model": "catboost", "variant": "", "seed": 1, "seconds": 161.9, "trees": 4000, "accuracy": 0.7524825, "log_loss": 0.49813823271720264, "auc": 0.8345466788100695}
