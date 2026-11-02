@@ -39,6 +39,7 @@ from ashlar.heads import (
 )
 from ashlar.inputs import InputModel
 from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_state, load_opt_state
+from ashlar.monotone import MONOTONE_TASKS, MonotoneTerm, check_monotone, monotone_edges, output_signs
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
     CategoricalEmbeddings,
@@ -160,7 +161,7 @@ _LABELED_TASKS = {"classification", "ordinal"}
 # Tasks whose ``predict`` returns a label and whose ``predict_proba`` exists.
 _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
-DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
+DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", "quantile_spline", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
 JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow", "chain")
 # Joint tasks whose marginals and moments are read from draws: no closed form.
@@ -194,9 +195,9 @@ _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
 DISTRIBUTION_GRADIENT_CLIP = 1.0
 # Tasks that train on an ``ashlar.observed`` label: every univariate head with a CDF.
-OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", *COUNT_HEADS, "normal", "hurdle")
+OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", "quantile_spline", *COUNT_HEADS, "normal", "hurdle")
 # Those whose distribution plus normal noise stays in closed form.
-NOISY_TASKS = ("gaussian", "mixture", "normal", "student_t", "flow", "histogram", "hurdle")
+NOISY_TASKS = ("gaussian", "mixture", "normal", "student_t", "flow", "histogram", "quantile_spline", "hurdle")
 # Those whose sum over independent rows stays in closed form, for group totals: ``TOTAL_TASKS``.
 
 
@@ -523,6 +524,16 @@ class ASRModel(BaseEstimator):
         stump has two class-logit leaves, mixed by a sigmoid gate. The
         stumps are summed with shrinkage 0.3 and added to the head's
         log-probabilities. The residual default leaves this off.
+    monotone:
+        ``None`` (default) leaves every feature to the trunk. A dict of
+        numeric feature names to ``+1`` or ``-1`` keeps those features out
+        of the trunk and adds them back through rising (or falling)
+        piecewise-linear shapes, on the head outputs whose rise moves every
+        quantile up, so the whole predictive distribution moves one way
+        with each: first-order stochastic dominance. For ``regression``,
+        ``gaussian``, ``student_t``, ``quantile_spline``, ``poisson``, and
+        ``negative_binomial``. A constrained feature does not interact with
+        the others. See ``ashlar.monotone``.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -584,6 +595,7 @@ class ASRModel(BaseEstimator):
         cyclical: dict | None = None,
         random_state: int = 0,
         tree: dict | None = None,
+        monotone: dict | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -623,12 +635,21 @@ class ASRModel(BaseEstimator):
         self.set_features = set_features
         self.categorical_embedding_dim = categorical_embedding_dim
         self.categorical_embedding_hidden = categorical_embedding_hidden
+        self.monotone = monotone
         self.set_max_length = set_max_length
         self.cyclical = cyclical
         self.random_state = random_state
         self.tree = tree
 
     def _check_config(self):
+        if check_monotone(self.monotone):
+            if self.task not in MONOTONE_TASKS:
+                raise AshlarError(
+                    f"monotone constraints need a head whose outputs move every quantile one way: "
+                    f"{', '.join(MONOTONE_TASKS)}; this model is {self.task}."
+                )
+            if self._cure() or self.soft_stages is not None or not (self.head is None or isinstance(self.head, str)):
+                raise AshlarError("monotone constraints work with the built-in heads, without cure fractions or soft stages.")
         if self.task not in {
             "regression", "classification", "ordinal", "normal", "tree", "custom",
             *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS,
@@ -1554,6 +1575,23 @@ class ASRModel(BaseEstimator):
             )
         return int(value)
 
+    def _monotone_term(self, encoder, numeric_z, members: int, head, d_head: int):
+        """The ``MonotoneTerm`` for ``monotone=``, or ``None``."""
+        constraints = check_monotone(self.monotone)
+        if not constraints:
+            return None
+        numeric = [column.name for column in encoder.columns if column.role == "numeric"]
+        unknown = [name for name in constraints if name not in numeric]
+        if unknown:
+            raise AshlarError(f"monotone features must be numeric columns of X; {unknown} are not.")
+        columns = [numeric.index(name) for name in constraints]
+        shape = jax.eval_shape(lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32))
+        if not hasattr(shape, "shape") or len(shape.shape) != 3:
+            raise AshlarError(f"monotone constraints need one of {', '.join(MONOTONE_TASKS)}; this model is {self.task}.")
+        signs = output_signs(self.task, int(shape.shape[-1]))
+        edges = monotone_edges(None if numeric_z is None else np.asarray(numeric_z), columns)
+        return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
+
     def _soft_stage_count(self) -> int | None:
         value = self.soft_stages
         if value is None or value is False:
@@ -1638,7 +1676,9 @@ class ASRModel(BaseEstimator):
                 shrinkage=SOFT_STAGE_SHRINKAGE,
                 key=jax.random.fold_in(key, 8),
             )
+        monotone = self._monotone_term(encoder, numeric_z, int(backbone.k), head, d_head)
         return PredictiveCore(
+            monotone=monotone,
             embeddings=embeddings,
             categorical_embeddings=categorical_embeddings,
             set_embeddings=set_embeddings,
@@ -3278,6 +3318,7 @@ class ASRModel(BaseEstimator):
             "gradient_clip": self.gradient_clip,
             "cyclical": self.cyclical,
             "tree": None if self.tree is None else self.tree_.spec,
+            "monotone": check_monotone(self.monotone) or None,
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
@@ -3341,6 +3382,7 @@ class ASRModel(BaseEstimator):
             set_max_length=payload.get("set_max_length", 8),
             random_state=payload["random_state"],
             tree=payload.get("tree"),
+            monotone=payload.get("monotone"),
         )
         estimator.tree_ = parse_tree(tree_json(estimator.tree)) if estimator.task == "tree" else None
         encoder = FeatureEncoder.from_json(payload["schema"])

@@ -642,7 +642,7 @@ def make_observed_objective(task: str, *, severity: str = "lognormal", truncated
 
 TOTAL_TASKS = ("gaussian", "normal", "poisson")
 # Heads whose sum over rows has no closed form: their totals are scored on a grid (``grid_total_log_likelihood``).
-GRID_TOTAL_TASKS = ("mixture", "flow", "histogram", "student_t", "negative_binomial", "poisson")
+GRID_TOTAL_TASKS = ("mixture", "flow", "histogram", "student_t", "quantile_spline", "negative_binomial", "poisson")
 # Points of the grid a total is convolved on, and how many of the sum's standard deviations it spans.
 GRID_POINTS = 512
 # A count's grid is longer, so its bins stay whole numbers for sums with a standard deviation up to 128.

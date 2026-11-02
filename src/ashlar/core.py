@@ -33,6 +33,8 @@ class PredictiveCore(Module):
     set_length: int = field(static=True)
     feature_dropout: float = field(static=True)
     feature_chunks: tuple[int, ...] = field(static=True)
+    # ``ashlar.monotone.MonotoneTerm``: features kept out of the trunk and added to the head's outputs, one way.
+    monotone: Module | None = None
 
     def __call__(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key):
         if numeric_z.ndim != 2 or categorical_onehot.ndim != 2:
@@ -64,8 +66,9 @@ class PredictiveCore(Module):
             feature_key, backbone_key = None, None
         else:
             feature_key, backbone_key = jax.random.split(key)
+        trunk_z = numeric_z if self.monotone is None else self.monotone.without(numeric_z)
         if self.n_numeric:
-            pieces.append(numeric_z if self.embeddings is None else self.embeddings(numeric_z))
+            pieces.append(trunk_z if self.embeddings is None else self.embeddings(trunk_z))
         if self.n_categorical:
             pieces.append(categorical_onehot)
         if self.categorical_embeddings is not None:
@@ -80,6 +83,8 @@ class PredictiveCore(Module):
         if self.bottleneck is not None:
             hidden = self.bottleneck(hidden)
         log_probs = self.head(hidden, key=None)
+        if self.monotone is not None:
+            return log_probs + self.monotone(numeric_z)
         if self.soft_histogram is None:
             return log_probs
         residual = self.soft_histogram(numeric_z)

@@ -1547,6 +1547,127 @@ def randomized_pit(dist: Distribution, value, key):
     return lower + jax.random.uniform(key, jnp.shape(upper), dtype=upper.dtype) * (upper - lower)
 
 
+# Where the quantile spline's slope may change, in logistic scores on each side of the median: the levels
+# 0.5, 0.75, 0.91, and 0.977, a normal's median and 0.67, 1.34, and 2 standard deviations.
+SPLINE_BREAKS = (0.0, 1.1, 2.3, 3.75)
+# The slope that gives a logistic score unit variance: sqrt(3) / pi.
+SPLINE_UNIT_SLOPE = math.sqrt(3.0) / math.pi
+SPLINE_VARIANCE_POINTS = 2048
+
+
+def _spline_widths(dtype=jnp.float32):
+    breaks = jnp.asarray(SPLINE_BREAKS, dtype=dtype)
+    return breaks, jnp.concatenate([jnp.diff(breaks), jnp.asarray([jnp.inf], dtype=dtype)])
+
+
+class QuantileSpline(Distribution):
+    """A quantile function piecewise linear in the logistic score: ``Y = Q(Z)``, ``Z`` standard logistic.
+
+    ``median`` is ``Q(0)``; ``upper[..., k]`` is the slope of ``Q`` on the
+    ``k``-th piece above the median and ``lower[..., k]`` on the ``k``-th
+    below, the pieces breaking at the logistic scores ``SPLINE_BREAKS`` and
+    the last running to infinity. Every slope is positive, so ``Q`` rises
+    and its inverse is the sum of each piece's clipped share, in closed
+    form: ``cdf``, ``log_prob``, and ``quantile`` need no bisection. Equal
+    slopes give a logistic distribution, close to a normal in the middle;
+    unequal slopes give skew and either tail heavier or lighter. Beyond the
+    last break each tail is exponential, so a far value costs a likelihood
+    linear in its distance, not quadratic: an outlier cannot swamp the fit.
+
+    Because each quantile is the median plus or minus a sum of slopes, a
+    quantile rises with the median, with every upper slope, and as every
+    lower slope falls. The ``quantile_spline`` head with ``monotone=``
+    builds those three directions in, which is first-order stochastic
+    dominance in the constrained features.
+    """
+
+    median: jax.Array
+    upper: jax.Array
+    lower: jax.Array
+    reparameterized: ClassVar[bool] = True
+    atomless: ClassVar[bool] = True
+
+    def __init__(self, median, upper, lower):
+        self.median = jnp.asarray(median, dtype=jnp.float32)
+        self.upper = jnp.broadcast_to(jnp.asarray(upper, dtype=jnp.float32), self.median.shape + (len(SPLINE_BREAKS),))
+        self.lower = jnp.broadcast_to(jnp.asarray(lower, dtype=jnp.float32), self.median.shape + (len(SPLINE_BREAKS),))
+
+    @property
+    def batch_shape(self):
+        return self.median.shape
+
+    def _knots(self):
+        """Values of ``Q`` at the breaks above and below the median, ``batch + (pieces,)``."""
+        _breaks, widths = _spline_widths(self.median.dtype)
+        finite = jnp.where(jnp.isfinite(widths), widths, 0.0)
+        above = self.median[..., None] + jnp.cumsum(self.upper * finite, axis=-1) - self.upper * finite
+        below = self.median[..., None] - jnp.cumsum(self.lower * finite, axis=-1) + self.lower * finite
+        return above, below, widths
+
+    def score(self, value):
+        """The logistic score ``Q^{-1}(value)`` and the slope of ``Q`` there."""
+        value = jnp.asarray(value, dtype=self.median.dtype)[..., None]
+        above, below, widths = self._knots()
+        up = jnp.clip((value - above) / self.upper, 0.0, widths)
+        down = jnp.clip((below - value) / self.lower, 0.0, widths)
+        z = jnp.sum(up, axis=-1) - jnp.sum(down, axis=-1)
+        # The piece the score falls in gives the slope: read from z, not from the knots, so rounding at a
+        # knot cannot leave a value in no piece (and a zero slope).
+        breaks, _widths = _spline_widths(self.median.dtype)
+        piece = jnp.sum(jnp.abs(z)[..., None] >= breaks, axis=-1) - 1
+        shape = z.shape + self.upper.shape[-1:]
+        upper = jnp.take_along_axis(jnp.broadcast_to(self.upper, shape), piece[..., None], axis=-1)[..., 0]
+        lower = jnp.take_along_axis(jnp.broadcast_to(self.lower, shape), piece[..., None], axis=-1)[..., 0]
+        slope = jnp.where(z >= 0, upper, lower)
+        return z, slope
+
+    def quantile_of_score(self, z):
+        z = jnp.asarray(z, dtype=self.median.dtype)
+        breaks, widths = _spline_widths(self.median.dtype)
+        up = jnp.clip(jnp.maximum(z, 0.0)[..., None] - breaks, 0.0, widths)
+        down = jnp.clip(jnp.maximum(-z, 0.0)[..., None] - breaks, 0.0, widths)
+        return self.median + jnp.sum(self.upper * up, axis=-1) - jnp.sum(self.lower * down, axis=-1)
+
+    def log_prob(self, value):
+        z, slope = self.score(value)
+        return -z - 2.0 * jax.nn.softplus(-z) - jnp.log(slope)
+
+    def cdf(self, value):
+        return jax.nn.sigmoid(self.score(value)[0])
+
+    def log_cdf(self, value):
+        return -jax.nn.softplus(-self.score(value)[0])
+
+    def log_survival(self, value):
+        return -jax.nn.softplus(self.score(value)[0])
+
+    def quantile(self, q):
+        q = jnp.asarray(q, dtype=self.median.dtype)
+        return self.quantile_of_score(jnp.log(q) - jnp.log1p(-q))
+
+    def sample(self, key, sample_shape=()):
+        z = jax.random.logistic(key, tuple(sample_shape) + self.batch_shape, dtype=self.median.dtype)
+        return self.quantile_of_score(z)
+
+    def mean(self):
+        # E[clip(Z - b, 0, w)] = the integral of P(Z > t) from b to b + w; the lower side mirrors it.
+        breaks, widths = _spline_widths(self.median.dtype)
+        end = jnp.where(jnp.isfinite(widths), breaks + jnp.where(jnp.isfinite(widths), widths, 0.0), 0.0)
+        piece = jax.nn.softplus(-breaks) - jnp.where(jnp.isfinite(widths), jax.nn.softplus(-end), 0.0)
+        return self.median + jnp.sum((self.upper - self.lower) * piece, axis=-1)
+
+    def variance(self):
+        # The midpoints of SPLINE_VARIANCE_POINTS equal slices of probability.
+        levels = (jnp.arange(SPLINE_VARIANCE_POINTS, dtype=self.median.dtype) + 0.5) / SPLINE_VARIANCE_POINTS
+        z = (jnp.log(levels) - jnp.log1p(-levels)).reshape((-1,) + (1,) * len(self.batch_shape))
+        values = self.quantile_of_score(z)
+        mean = self.mean()
+        return jnp.mean(jnp.square(values - mean), axis=0)
+
+    def convolve_normal(self, scale):
+        return NormalNoise(self, scale)
+
+
 CURE_HEADS = ("gaussian", "mixture", "flow", "student_t")
 
 
@@ -1591,6 +1712,8 @@ def head_distribution(kind: str, flat, horizon: int = 1) -> Distribution:
         return Histogram(shaped(decoded))
     if kind == "student_t":
         return StudentT(*(shaped(part) for part in decoded))
+    if kind == "quantile_spline":
+        return QuantileSpline(*(shaped(part) for part in decoded))
     if kind == "poisson":
         return Poisson(*(shaped(part) for part in decoded))
     if kind == "negative_binomial":

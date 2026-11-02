@@ -198,6 +198,29 @@ A chain takes a [joint label](observed.md#several-products-that-sell-out-togethe
 
 On freMTPL2's 677,991 motor policies, a chain of a `negative_binomial` claim count and a `hurdle` cost has a joint NLL of 0.467 nats per policy, against 0.615 for the same two heads fitted apart, because it knows that a cost is zero exactly when there was no claim. It ties the actuary's frequency and severity model built by hand, 0.4672 against 0.4673, with the total's calibration the same, and gets there from the column kinds alone. [docs/benchmarks.md](benchmarks.md#chained-claim-counts-and-costs) has the table.
 
+## Features that push one way
+
+A tariff rule may say that a worse claims history can never lower a premium, a credit policy that more income can never raise a default rate. Boosted trees enforce that on the mean. `monotone=` enforces it on the whole distribution:
+
+```python
+model = ASRRegressor(task="quantile_spline", monotone={"BonusMalus": 1, "Price": -1}).fit(X, y)
+```
+
+The named numeric features are kept out of the trunk and added back through a term of their own: for each feature, a piecewise-linear shape over 16 bins at its training quantiles, rising in every bin, open-ended past the first and last. The term goes to the head outputs whose rise moves every quantile up and to nothing else, so `P(y > t | x)` cannot fall as a feature marked `+1` rises, for every threshold `t` and every row, and every quantile rises with it. That is first-order stochastic dominance, which a constraint on each parameter does not give: a rising mean with a falling spread still crosses.
+
+| `task` | What a constrained feature moves |
+|---|---|
+| `regression` | the point |
+| `gaussian`, `student_t` | the location; the scale and degrees of freedom read only the other features |
+| `poisson`, `negative_binomial` | the log mean; the dispersion and a structural zero read only the other features |
+| `quantile_spline` | the median, the slopes above it up, and the slopes below it down, so the spread can widen upward or narrow from below as the feature rises |
+
+The `quantile_spline` head is a quantile function piecewise linear in the logistic score, a median and eight slopes per row, four on each side; its CDF, density, and quantiles are closed forms, and its tails past the last break are exponential. It is the head for a constrained feature that should move the spread as well as the location. The other heads take every quantile up by the same amount, a shift.
+
+The price is that a constrained feature does not interact with the others: its effect is one shape, on the scale of the outputs it reaches, for every row. Mixtures, flows, and histograms are refused, since a feature moving their weights or splines can cross.
+
+On freMTPL2's motor policies, unconstrained heads break dominance in bonus-malus far more often than a guarantee would allow. The test sets each of 2,000 held-out policies' bonus-malus to 12 levels from its 2nd to its 98th percentile and reads `P(y > t)` at a ladder of thresholds, and calls a step a violation where some threshold's probability falls by more than 0.001 as the level rises. The `negative_binomial` claim count does that on 15% of steps and for 72% of policies, by up to 0.025 in probability on average. Every head for the log cost per claim does it for every policy, by 0.04 to 0.06. With `monotone={"BonusMalus": 1}` there are none, at a cost of 0.0013 nats per policy on the count and 0.012 per claim on the `gaussian` cost; the `quantile_spline` cost moved within its spread across seeds, from 1.146 to 1.137. So the constraint is a guarantee to sell to a regulated user, not an accuracy gain, and it is cheap. Whether the cost of a claim should rise with bonus-malus at all is the insurer's call: unconstrained, its mean falls with the level on about a third of steps. [docs/benchmarks.md](benchmarks.md#monotone-constraints-on-fremtpl2) has the table.
+
 ## JAX transforms
 
 A distribution is an Equinox module, so it is a JAX pytree. It goes into `jax.jit` and `jax.vmap` as an argument, and `jax.grad` differentiates through `log_prob`, `cdf`, `quantile`, and, where the class sets `reparameterized = True`, through `sample`. The reparameterized ones are `Normal`, `StudentT`, `Flow`, `LogNormal`, `Gamma`, `LowRankMultivariateNormal`, and `AutoregressiveFlow`, and an `AffineTransformed` of any of them. A mixture, a histogram, a count, and a category draw a discrete choice, so their draws carry no gradient.
