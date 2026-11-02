@@ -15,6 +15,10 @@ Five stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
 - ``groups``: the calibration tables again, each with a group column. Does
   the 80% interval hold within every group after ``calibrate``, and after
   ``calibrate(..., groups=column)``, which calibrates each group on its own?
+  Beside them, LightGBM's 0.1 and 0.9 quantile models with the conformal
+  step once over every calibration row (CQR) and once per group (Mondrian
+  CQR, a margin of its own for each group with as many calibration rows as
+  Ashlar's ``min_group_rows`` asks).
 - ``localize``: the shift test of ``uncertainty`` with a calibration slice.
   Does ``calibrate(..., localize="members")``, which calibrates rows in bins
   of member disagreement, keep the 80% interval on rows past the training
@@ -73,6 +77,7 @@ from benchmark_readme import (
 )
 
 from ashlar import ASRRegressor, tabm_piecewise
+from ashlar.calibrate import MIN_GROUP_ROWS
 
 SEEDS = (0, 1, 2)
 N_DRAWS = 400
@@ -219,6 +224,33 @@ def _by_group(lo, hi, y, groups, min_rows=50):
     return out
 
 
+def _cqr_by_group(predict, x_cal, y_cal, x_test, y_test, column, groups):
+    """CQR's 80% interval within each group: one margin over every calibration row, and one per group (Mondrian).
+
+    A group with at least ``MIN_GROUP_ROWS`` calibration rows gets its own margin, as ``calibrate(..., groups=)``
+    gives such a group a table of its own; every other row keeps the margin of every row.
+    """
+    cal, test = predict(x_cal), predict(x_test)
+    scores = np.maximum(cal[:, 0] - y_cal, y_cal - cal[:, 1])
+    margin = _conformal(scores, 0.8)
+    cal_groups, margins, own = x_cal[column].to_numpy(), np.full(len(y_test), margin), []
+    for key in sorted(set(cal_groups.tolist()), key=str):
+        rows = cal_groups == key
+        if rows.sum() >= MIN_GROUP_ROWS:
+            margins[groups == key] = _conformal(scores[rows], 0.8)
+            own.append(str(key))
+    pooled = (test[:, 0] - margin, test[:, 1] + margin)
+    grouped = (test[:, 0] - margins, test[:, 1] + margins)
+    return {
+        "cqr_raw": _by_group(test[:, 0], test[:, 1], y_test, groups),
+        "cqr_pooled": _by_group(*pooled, y_test, groups),
+        "cqr_pooled_all": _interval(*pooled, y_test),
+        "cqr_grouped": _by_group(*grouped, y_test, groups),
+        "cqr_grouped_all": _interval(*grouped, y_test),
+        "cqr_own_tables": own,
+    }
+
+
 def stage_groups(results):
     out = results.setdefault("groups", {})
     for name, loader in _chosen(CALIBRATION_TABLES).items():
@@ -226,7 +258,8 @@ def stage_groups(results):
         column = GROUP_COLUMNS[name]
         rows = out.setdefault(name, {"rows": int(len(y)), "column": column, "runs": {}})
         for seed in SEEDS:
-            if str(seed) in rows["runs"]:
+            # A run saved before LightGBM's CQR was added runs again.
+            if "cqr_grouped" in rows["runs"].get(str(seed), {}):
                 continue
             x_train, x_cal, x_test, y_train, y_cal, y_test = _three_way(x, y, seed)
             groups = x_test[column].to_numpy()
@@ -245,10 +278,14 @@ def stage_groups(results):
             run["grouped_all"] = _interval(grouped[:, 0], grouped[:, 1], y_test)
             run["own_tables"] = sorted(model.calibration_["groups"])
             run["seconds"] = time.perf_counter() - started
+            started = time.perf_counter()
+            predict = _lgbm_quantiles(x_train, y_train, (0.1, 0.9), seed)
+            run.update(_cqr_by_group(predict, x_cal, y_cal, x_test, y_test, column, groups))
+            run["cqr_seconds"] = time.perf_counter() - started
             rows["runs"][str(seed)] = run
             spread = {
                 key: (min(v["coverage"] for v in run[key].values()), max(v["coverage"] for v in run[key].values()))
-                for key in ("raw", "pooled", "grouped")
+                for key in ("raw", "pooled", "grouped", "cqr_pooled", "cqr_grouped")
             }
             print(name, seed, {key: tuple(round(v, 3) for v in value) for key, value in spread.items()}, flush=True)
             _save(results)
@@ -572,23 +609,40 @@ def stage_report(_results):
         print()
 
 
+GROUP_STAGES = ("raw", "pooled", "grouped", "cqr_raw", "cqr_pooled", "cqr_grouped")
+
+
 def report_groups():
     print("## Coverage within groups\n")
     for name, table in _runs("groups").items():
         runs = list(table["runs"].values())
+        stages = [stage for stage in GROUP_STAGES if all(stage in run for run in runs)]
         print(f"### {name}, {table['rows']:,} rows, groups by {table['column']}, {len(runs)} splits\n")
-        print("| Group | Test rows | Raw | Calibrated on every row | Calibrated per group |\n|---|---:|---:|---:|---:|")
+        print("| Group | Test rows | " + " | ".join(stages) + " |\n|---|---:|" + "---:|" * len(stages))
         keys = sorted({key for run in runs for key in run["pooled"]}, key=str)
         for key in keys:
             have = [run for run in runs if key in run["pooled"]]
-            cells = [_mean_sd([run[stage][key]["coverage"] for run in have], 3) for stage in ("raw", "pooled", "grouped")]
+            cells = [_mean_sd([run[stage][key]["coverage"] for run in have], 3) for stage in stages]
             print(f"| {key} | {int(np.mean([run['pooled'][key]['rows'] for run in have]))} | " + " | ".join(cells) + " |")
-        for stage in ("raw", "pooled", "grouped"):
+        print()
+        for stage in stages:
             worst = [max(abs(v["coverage"] - 0.8) for v in run[stage].values()) for run in runs]
-            print(f"\n{stage}: largest gap from 80% in any group {_mean_sd(worst, 3)}", end="")
-        print(f"\nall rows: every-row calibration {_mean_sd([r['pooled_all']['coverage'] for r in runs], 3)}, "
+            # The root mean square distance from 80% over the groups and splits, and the groups outside 75% to 85%
+            # in the mean over the splits.
+            rms = np.sqrt(np.mean([(v["coverage"] - 0.8) ** 2 for run in runs for v in run[stage].values()]))
+            means = [np.mean([run[stage][key]["coverage"] for run in runs if key in run[stage]]) for key in keys]
+            outside = sum(abs(value - 0.8) > 0.05 for value in means)
+            print(f"{stage}: largest gap from 80% in any group {_mean_sd(worst, 3)}; root mean square {rms:.3f}; "
+                  f"{outside} of {len(keys)} groups outside 75% to 85% on average")
+        print(f"all rows: every-row calibration {_mean_sd([r['pooled_all']['coverage'] for r in runs], 3)}, "
               f"per group {_mean_sd([r['grouped_all']['coverage'] for r in runs], 3)}; width "
-              f"{_mean_sd([r['pooled_all']['width'] for r in runs], 3)} and {_mean_sd([r['grouped_all']['width'] for r in runs], 3)}\n")
+              f"{_mean_sd([r['pooled_all']['width'] for r in runs], 3)} and {_mean_sd([r['grouped_all']['width'] for r in runs], 3)}")
+        if all("cqr_grouped_all" in run for run in runs):
+            print(f"CQR: every-row margin {_mean_sd([r['cqr_pooled_all']['coverage'] for r in runs], 3)}, "
+                  f"per group {_mean_sd([r['cqr_grouped_all']['coverage'] for r in runs], 3)}; width "
+                  f"{_mean_sd([r['cqr_pooled_all']['width'] for r in runs], 3)} and "
+                  f"{_mean_sd([r['cqr_grouped_all']['width'] for r in runs], 3)}")
+        print()
     print("## Coverage past the training range\n")
     for name, table in _runs("localize").items():
         runs = list(table["runs"].values())

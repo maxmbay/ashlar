@@ -29,7 +29,16 @@ orders each ratio's quantile from one fit; the hybrid is refitted per
 ratio; LightGBM's quantile regression is fitted per ratio. Cost in percent
 against the likelihood fit's plug-in order (negative is better), and NLL.
 
-    python examples/benchmark_decide.py kill bike [--seeds 0 1 2 3 4] [--out decide.json]
+**sweep** (the same table and splits, seeds 0 to 2). One mixture fit read
+at eight critical ratios from 0.5 to 0.95 (``predict_order``), against
+LightGBM's quantile regression refitted at each ratio, twice: as in
+**bike** (400 trees at learning rate 0.05, ``lightgbm``) and early-stopped
+like the other benchmarks' trees (up to 4,000 trees at 0.05, stopped after
+100 rounds without improvement on a 20% validation slice of the training
+rows, native categories; ``lightgbm_early``). Cost in percent against the
+mixture's order, and each order's service level. No decision training.
+
+    python examples/benchmark_decide.py kill bike sweep [--seeds 0 1 2 3 4] [--out decide.json]
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ DECISION_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t")
 
 KILL_COSTS = (9.0, 1.0)
 BIKE_COSTS = ((1.0, 1.0), (3.0, 1.0), (9.0, 1.0), (19.0, 1.0))
+SWEEP_LEVELS = (0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
 EPOCHS = 60
 
 
@@ -275,6 +285,62 @@ def bike(seeds, out):
               f"{_ms(group, 'lightgbm_pct', '%')} | {_ms(group, 'nll_nll')} | {_ms(group, 'hybrid_nll')} |")
 
 
+# ---------------------------------------------------------------- sweep
+
+
+def sweep(seeds, out):
+    from benchmark_readme import _align_categories, _fit_gbt
+    from benchmark_uncertainty import bike as load_bike
+
+    X, y = load_bike("cnt")
+    rows = []
+    for seed in seeds:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=seed)
+        start = time.time()
+        model = ASRRegressor(task="mixture", max_epochs=EPOCHS, cyclical={"hr": 24}, random_state=seed).fit(X_train, y_train)
+        fit_seconds = time.time() - start
+        numeric, numeric_test = X_train.copy(), X_test.copy()
+        for column in ("season", "weathersit"):
+            numeric[column] = numeric[column].astype(float)
+            numeric_test[column] = numeric_test[column].astype(float)
+        for level in SWEEP_LEVELS:
+            # A unit short costs level / (1 - level) and a unit over costs 1, so the critical ratio is the level.
+            under, over = level / (1.0 - level), 1.0
+            orders = {"ashlar": model.predict_order(X_test, under, over)}
+            start = time.time()
+            orders["lightgbm"] = _lgbm_quantile(level, seed, numeric, y_train, numeric_test)
+            seconds = {"lightgbm": time.time() - start}
+            start = time.time()
+            tree, frame = _fit_gbt("lightgbm", "regression", True, seed, X_train, y_train, objective="quantile", alpha=level)
+            orders["lightgbm_early"] = tree.predict(_align_categories(frame, X_test))
+            seconds["lightgbm_early"] = time.time() - start
+            costs = {name: _cost(y_test, order, under, over) for name, order in orders.items()}
+            row = {
+                "seed": seed,
+                "level": level,
+                "under": under,
+                "over": over,
+                "cost": costs,
+                "service": {name: float(np.mean(y_test <= order)) for name, order in orders.items()},
+                "pct_vs_ashlar": {name: 100.0 * (cost / costs["ashlar"] - 1.0) for name, cost in costs.items() if name != "ashlar"},
+                "trees": int(tree.best_iteration_ or tree.n_estimators),
+                "seconds": seconds,
+                "fit_seconds": fit_seconds,
+            }
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+    _save(out, "sweep", rows)
+    print("\n| level | costs (short:over) | LightGBM, 400 trees, vs Ashlar | LightGBM early-stopped vs Ashlar | service: Ashlar | LightGBM | early-stopped |")
+    print("|---:|---:|---:|---:|---:|---:|---:|")
+    for level in SWEEP_LEVELS:
+        group = [row for row in rows if row["level"] == level]
+        pct = {name: [row["pct_vs_ashlar"][name] for row in group] for name in ("lightgbm", "lightgbm_early")}
+        service = {name: np.mean([row["service"][name] for row in group]) for name in ("ashlar", "lightgbm", "lightgbm_early")}
+        print(f"| {level:.2f} | {level / (1 - level):.3g}:1 | " +
+              " | ".join(f"{np.mean(v):+.1f}% ± {np.std(v):.1f}" for v in pct.values()) + " | " +
+              " | ".join(f"{100 * v:.1f}%" for v in service.values()) + " |")
+
+
 def _save(out, stage, rows):
     path = Path(out)
     payload = json.loads(path.read_text()) if path.exists() else {}
@@ -293,8 +359,10 @@ def main():
             kill(args.seeds or [0, 1, 2, 3, 4], args.out)
         elif stage == "bike":
             bike(args.seeds or [0, 1, 2], args.out)
+        elif stage == "sweep":
+            sweep(args.seeds or [0, 1, 2], args.out)
         else:
-            raise SystemExit(f"unknown stage {stage!r}: kill or bike")
+            raise SystemExit(f"unknown stage {stage!r}: kill, bike, or sweep")
 
 
 if __name__ == "__main__":
