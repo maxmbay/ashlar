@@ -1,0 +1,10 @@
+at 2c330db (claude/project-thread-lv7yvt)
+seed 0: 69724 training, 12664 calibration and 24423 test days, 31.1% sold out
+  mixture, censored: {'nll': 5.408295170952255, 'q90': 0.7781189862015313, 'cost_value': 0.7640750922862827}, 35 s
+  mixture, sales: {'nll': 6.526532257305621, 'q90': 0.6770666994226754, 'cost_value': 0.7917515083720843}, 33 s
+  mixture, oracle: {'nll': 5.3428747793949, 'q90': 0.8164025713466814, 'cost_value': 0.7040418674191274}, 31 s
+  lightgbm quantile, sales: {'q90': 0.6729721983376326, 'cost_value': 0.7880232059821969}
+  xgboost aft, censored: {'nll': 5.261921484672439, 'q90': 0.8788437128935839, 'cost_value': 0.659509603091883, 'chosen': 'shift 1, normal, depth 3, scale 0.2', 'validation_nll': 0.38327704273168745}
+wrote /Users/maxwellbay/projects/ashlar-readme/examples/readme/artifacts/sold-out/check.json (2 KB)
+wrote /Users/maxwellbay/projects/ashlar-readme/examples/readme/artifacts/sold-out/series.json (109 KB)
+copied /tmp/ashlar-bench/observed-real-stockouts.json to /Users/maxwellbay/projects/ashlar-readme/examples/readme/artifacts/sold-out/stockouts.json
