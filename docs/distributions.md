@@ -219,7 +219,7 @@ The `quantile_spline` head is a quantile function piecewise linear in the logist
 
 The price is that a constrained feature does not interact with the others: its effect is one shape, on the scale of the outputs it reaches, for every row. Mixtures, flows, and histograms are refused, since a feature moving their weights or splines can cross.
 
-MONOTONE_RESULTS
+On freMTPL2's motor policies, unconstrained heads break dominance in bonus-malus far more often than a guarantee would allow. The test sets each of 2,000 held-out policies' bonus-malus to 12 levels from its 2nd to its 98th percentile and reads `P(y > t)` at a ladder of thresholds, and calls a step a violation where some threshold's probability falls by more than 0.001 as the level rises. The `negative_binomial` claim count does that on 15% of steps and for 72% of policies, by up to 0.025 in probability on average. Every head for the log cost per claim does it for every policy, by 0.04 to 0.06. With `monotone={"BonusMalus": 1}` there are none, at a cost of 0.0013 nats per policy on the count and 0.012 per claim on the `gaussian` cost; the `quantile_spline` cost moved within its spread across seeds, from 1.146 to 1.137. So the constraint is a guarantee to sell to a regulated user, not an accuracy gain, and it is cheap. Whether the cost of a claim should rise with bonus-malus at all is the insurer's call: unconstrained, its mean falls with the level on about a third of steps. [docs/benchmarks.md](benchmarks.md#monotone-constraints-on-fremtpl2) has the table.
 
 ## JAX transforms
 

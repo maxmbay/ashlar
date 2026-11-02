@@ -471,6 +471,29 @@ From [`examples/benchmark_chain.py`](../examples/benchmark_chain.py). French mot
 
 The chain beats the independent heads by 0.147 nats per policy, fifteen times the issue's bar of 0.01, and its total is far better calibrated: the independent hurdle cannot know that a cost is zero exactly when the count is, so drawn apart they give a policy a positive total 0.24% of the time against 3.66%. The chain ties the actuary's model built by hand, a count model and a log-normal cost fitted on the policies with claims, with the cost set to zero where there was none: its joint NLL is 0.0001 nats better, inside the spread across splits, and it learns the same structure from the column kinds alone. Both put too little mass between 1,000 and 5,000 euros and too much above. The mean total is 0.96 to 0.98 of the observed on split 0 and about 0.61 on splits 1 and 2, for both models alike; freMTPL2's costs have a very long tail, and a handful of test claims in the millions decide the sum.
 
+## Monotone constraints on freMTPL2
+
+From [`examples/benchmark_monotone.py`](../examples/benchmark_monotone.py). French motor insurance (freMTPL2): the claim count of a 200,000-policy sample of each training split, and the log cost per claim of every training policy with a claim, three random 80/20 splits, mean ± standard deviation. Each of 2,000 test policies has its bonus-malus (or vehicle power) set to 12 levels from the 2nd to the 98th percentile, and `P(y > t)` is read at a ladder of thresholds (a count above 0, 1, and 2; the log cost at its 5th to 95th percentiles). A step violates dominance where some threshold's probability moves against the feature's overall direction by more than 0.001; the direction is the sign of the mean's average change. Largest move: the mean over policies of the largest such move. Mean against: the share of steps where the mean itself moves against the direction.
+
+| Outcome | Head | `monotone` | NLL ↓ | Feature | Steps violating | Policies violating | Largest move | Mean against | CPU s |
+|---|---|---|---:|---|---:|---:|---:|---:|---:|
+| claim count | `negative_binomial` | none | **0.1525 ± 0.0019** | BonusMalus | 15.0% | 71.7% | 0.0245 | 20.1% | 293 |
+| | | | | VehPower | 12.1% | 36.2% | 0.0012 | 29.2% | |
+| claim count | `negative_binomial` | `BonusMalus` rising | 0.1538 ± 0.0020 | BonusMalus | **0** | **0** | **0** | **0** | 301 |
+| | | | | VehPower | 15.7% | 46.4% | 0.0015 | 31.8% | |
+| log cost | `gaussian` | none | **1.4999 ± 0.0139** | BonusMalus | 72.6% | 100% | 0.0407 | 33.0% | 28 |
+| | | | | VehPower | 73.0% | 100% | 0.0103 | 22.0% | |
+| log cost | `gaussian` | `BonusMalus` rising | 1.5122 ± 0.0121 | BonusMalus | **0** | **0** | **0** | **0** | 40 |
+| | | | | VehPower | 66.0% | 100% | 0.0155 | 36.5% | |
+| log cost | `mixture` | none | **0.6738 ± 0.0085** | BonusMalus | 81.7% | 100% | 0.0578 | 28.9% | 49 |
+| | | | | VehPower | 59.8% | 95.2% | 0.0215 | 20.0% | |
+| log cost | `quantile_spline` | none | 1.1455 ± 0.0378 | BonusMalus | 62.9% | 100% | 0.0604 | 22.9% | 48 |
+| | | | | VehPower | 39.2% | 94.0% | 0.0094 | 25.0% | |
+| log cost | `quantile_spline` | `BonusMalus` rising | 1.1368 ± 0.0155 | BonusMalus | **0** | **0** | **0** | **0** | 62 |
+| | | | | VehPower | 49.8% | 87.9% | 0.0077 | 16.6% | |
+
+The constraint leaves no violation in bonus-malus on any split and costs little: 0.0013 nats per policy on the count, 0.012 per claim on the gaussian cost. The spline's constrained mean is lower only because one split's unconstrained fit was poor (1.197 against 1.150); on the other two the constraint cost 0.008 and 0.013. Vehicle power, left unconstrained, keeps violating, as it should. The log costs are lumpy, with many claims at a few fixed amounts, which is why the mixture's likelihood is far ahead of the smooth heads; it cannot be constrained, since a feature moving its weights can cross.
+
 ## Labels that say what was observed
 
 From [`examples/benchmark_observed.py`](../examples/benchmark_observed.py). Three simulations, so the true values are known and every fit is scored against them. Five seeds, 0 to 4, mean ± standard deviation across seeds. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments. [docs/observed.md](observed.md) describes the labels.
