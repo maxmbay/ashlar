@@ -23,6 +23,7 @@ from ashlar.distributions import (
 )
 from ashlar.errors import AshlarError, ShapeError
 from ashlar.objectives import make_joint_observed_objective
+from micro import MICRO
 
 INF = np.inf
 
@@ -207,18 +208,22 @@ def _trapezoid(values, grid):
 def test_flow_box_matches_quadrature_of_its_density():
     flow = _flow()
 
+    # Compiled whole: run op by op, each new grid shape would compile every operation of the flow again.
+    @jax.jit
     def density(first, second):
         grid = jnp.stack(jnp.broadcast_arrays(jnp.asarray(first, jnp.float32), jnp.asarray(second, jnp.float32)), axis=-1)
         return jnp.exp(flow.log_prob(grid.reshape(-1, 1, 2))).reshape(grid.shape[:-1])
 
-    def box(lower, upper, count=256):
-        return float(flow.log_box(jnp.asarray(lower)[None, None], jnp.asarray(upper)[None, None], box_points(count, 2))[0, 0])
+    log_box = jax.jit(lambda lower, upper, points: flow.log_box(lower[None, None], upper[None, None], points)[0, 0])
 
-    second = jnp.linspace(-1.0, 0.8, 20001)
+    def box(lower, upper, count=256):
+        return float(log_box(jnp.asarray(lower), jnp.asarray(upper), box_points(count, 2)))
+
+    second = jnp.linspace(-1.0, 0.8, 2001)
     assert box([0.3, -1.0], [0.3, 0.8], 1) == pytest.approx(float(jnp.log(_trapezoid(density(0.3, second), second))), abs=1e-4)
-    first = jnp.linspace(-1.0, 0.5, 20001)
+    first = jnp.linspace(-1.0, 0.5, 2001)
     assert box([-1.0, 0.2], [0.5, 0.2]) == pytest.approx(float(jnp.log(_trapezoid(density(first, 0.2), first))), abs=5e-4)
-    first, second = jnp.linspace(-0.5, 0.7, 1501), jnp.linspace(-9.0, 0.4, 1501)
+    first, second = jnp.linspace(-0.5, 0.7, 301), jnp.linspace(-9.0, 0.4, 601)
     inner = jax.vmap(lambda row: _trapezoid(row, second))(density(first[:, None], second[None, :]))
     assert box([-0.5, -INF], [0.7, 0.4]) == pytest.approx(float(jnp.log(_trapezoid(inner, first))), abs=5e-4)
     point = jnp.asarray([[[0.1, -0.3]]])
@@ -270,16 +275,16 @@ def _shelves(n, seed):
 @pytest.mark.slow
 @pytest.mark.parametrize("task", ["multivariate_gaussian", "multivariate_mixture", "multivariate_flow"])
 def test_a_censored_joint_fit_recovers_the_demand_behind_the_sales(task):
-    x, demand, sales, sold_out = _shelves(1600, seed=5)
-    train, test = slice(0, 1200), slice(1200, None)
+    x, demand, sales, sold_out = _shelves(1000, seed=5)
+    train, test = slice(0, 800), slice(800, None)
     label = observed.censored(sales, sold_out)
-    censored = ASRRegressor(task=task, max_epochs=15, random_state=0).fit(x[train], label[train])
-    naive = ASRRegressor(task=task, max_epochs=15, random_state=0).fit(x[train], sales[train])
+    censored = ASRRegressor(task=task, max_epochs=30, learning_rate=1e-2, **MICRO).fit(x[train], label[train])
+    naive = ASRRegressor(task=task, max_epochs=30, learning_rate=1e-2, **MICRO).fit(x[train], sales[train])
     assert censored.log_prob(x[test], demand[test]).mean() > naive.log_prob(x[test], demand[test]).mean() + 0.5
     errors = np.abs(censored.predict(x[test]) - demand[test]).mean(), np.abs(naive.predict(x[test]) - demand[test]).mean()
     assert errors[0] < errors[1]
     values = censored.log_prob(x[test], label[test])
-    assert values.shape == (400,) and np.isfinite(values).all()
+    assert values.shape == (200,) and np.isfinite(values).all()
     assert censored.score(x[test], label[test]) == pytest.approx(values.mean(), rel=1e-6)
 
 
@@ -287,37 +292,38 @@ def test_a_censored_joint_fit_recovers_the_demand_behind_the_sales(task):
 def test_the_joint_mixture_task_predicts_samples_and_saves(tmp_path):
     from ashlar import ASRModel
 
-    x, demand, sales, sold_out = _shelves(600, seed=6)
+    x, demand, sales, sold_out = _shelves(150, seed=6)
     label = observed.censored(sales, sold_out)
-    model = ASRRegressor(task="multivariate_mixture", head_kwargs={"components": 3}, max_epochs=3, random_state=0)
-    model.fit(x[:500], label[:500], validation=(x[500:], label[500:]))
-    dist = model.predict_dist(x[500:])
-    assert dist.batch_shape == (100,) and dist.event_shape == (3,)
-    assert np.allclose(np.asarray(dist.mean()), model.predict(x[500:]), atol=1e-3)
-    assert model.sample(x[500:504], n=7).shape == (7, 4, 3)
-    assert model.predict_quantiles(x[500:504], [0.1, 0.9]).shape == (4, 3, 2)
-    assert model.predict_uncertainty(x[500:504])["total"].shape == (4, 3)
+    model = ASRRegressor(task="multivariate_mixture", head_kwargs={"components": 3}, max_epochs=2, **MICRO)
+    model.fit(x[:100], label[:100], validation=(x[100:], label[100:]))
+    held = slice(100, None)
+    dist = model.predict_dist(x[held])
+    assert dist.batch_shape == (50,) and dist.event_shape == (3,)
+    assert np.allclose(np.asarray(dist.mean()), model.predict(x[held]), atol=1e-3)
+    assert model.sample(x[held], n=7).shape == (7, 50, 3)
+    assert model.predict_quantiles(x[held], [0.1, 0.9]).shape == (50, 3, 2)
+    assert model.predict_uncertainty(x[held])["total"].shape == (50, 3)
     restored = ASRModel.load(model.save(tmp_path / "mixture"))
-    assert np.allclose(restored.log_prob(x[500:], label[500:]), model.log_prob(x[500:], label[500:]), atol=1e-4)
-    exact = model.log_prob(x[500:], observed.exact(demand[500:]))
-    assert np.allclose(exact, model.log_prob(x[500:], demand[500:]), atol=1e-4)
+    assert np.allclose(restored.log_prob(x[held], label[held]), model.log_prob(x[held], label[held]), atol=1e-4)
+    exact = model.log_prob(x[held], observed.exact(demand[held]))
+    assert np.allclose(exact, model.log_prob(x[held], demand[held]), atol=1e-4)
 
 
 def test_joint_labels_that_cannot_be_trained_are_refused():
-    x, _demand, sales, sold_out = _shelves(200, seed=7)
+    x, _demand, sales, sold_out = _shelves(64, seed=7)
     label = observed.censored(sales, sold_out)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="multivariate_gaussian", max_epochs=1).fit(x, observed.censored(sales[:, 0], sold_out[:, 0]))
+        ASRRegressor(task="multivariate_gaussian", max_epochs=1, **MICRO).fit(x, observed.censored(sales[:, 0], sold_out[:, 0]))
     with pytest.raises(AshlarError):
-        ASRRegressor(task="gaussian", max_epochs=1).fit(x, label)
+        ASRRegressor(task="gaussian", max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="multivariate_flow", head_kwargs={"depth": 2}, max_epochs=1).fit(x, label)
+        ASRRegressor(task="multivariate_flow", head_kwargs={"depth": 2}, max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(ShapeError):
-        ASRRegressor(task="multivariate_gaussian", n_events=2, max_epochs=1).fit(x, label)
-    model = ASRRegressor(task="multivariate_gaussian", max_epochs=1).fit(x, label)
+        ASRRegressor(task="multivariate_gaussian", n_events=2, max_epochs=1, **MICRO).fit(x, label)
+    model = ASRRegressor(task="multivariate_gaussian", max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(AshlarError):
         model.calibrate(x, label)
     with pytest.raises(AshlarError):
         model.log_prob(x, label[:, :2])
-    deep = ASRRegressor(task="multivariate_flow", head_kwargs={"depth": 2}, max_epochs=1).fit(x, observed.exact(sales))
+    deep = ASRRegressor(task="multivariate_flow", head_kwargs={"depth": 2}, max_epochs=1, **MICRO).fit(x, observed.exact(sales))
     assert np.allclose(deep.log_prob(x, observed.exact(sales)), deep.log_prob(x, sales), atol=1e-4)

@@ -1,9 +1,17 @@
-"""Unit tests run on CPU unless the caller already chose a backend."""
+"""Unit tests run on CPU unless the caller already chose a backend.
+
+Most of a test's time is XLA compiling small programs, and JAX compiles each
+operation it runs eagerly on its own. The tests' programs are tiny, so LLVM's
+optimizations cost more than they save: level 0 compiles them faster. Set
+``XLA_FLAGS`` yourself to override it.
+"""
 
 import gc
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+if "xla_backend_optimization_level" not in os.environ.get("XLA_FLAGS", ""):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " --xla_backend_optimization_level=0").strip()
 
 import jax  # noqa: E402
 import pytest  # noqa: E402
