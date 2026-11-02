@@ -398,6 +398,217 @@ def run_catboost_uncertainty(table, seed):
     return record
 
 
+# ---------------------------------------------------------------- distributional trees
+
+# LightGBMLSS (März 2023) grows one LightGBM tree per distribution parameter
+# each round, on the gradient and Hessian of the negative log-likelihood.
+# NGBoost (Duan et al. 2020) fits a small tree to each parameter's natural
+# gradient. Both pin older torch, NumPy, pandas, and scikit-learn than the
+# rest of this script, so they run from their own environment:
+#
+#   python -m venv lss && lss/bin/pip install lightgbmlss==0.6.1 ngboost==0.5.11 lightgbm==4.7.0 pyarrow
+#   GBM_THREADS=6 lss/bin/python examples/benchmark_large.py --tables airlines_delay \
+#       --models lightgbmlss_gaussian lightgbmlss_studentt lightgbmlss_mixture ngboost --seeds 0 1 2
+#
+# The target is standardized with the fitting rows' mean and spread, and each
+# family starts from its unconditional fit (``initialize=True``); otherwise
+# LightGBMLSS starts every parameter at 0.5, far from a delay in minutes.
+# LightGBM's ``max_delta_step=0.5`` caps each tree's step on the raw
+# parameters: without it the mixture's Newton steps diverge within a few
+# rounds, and it changes the Gaussian and the Student-t very little.
+# Scores are in the target's units: CRPS in closed form (Gaussian, Student-t,
+# and the Gaussian mixture), NLL, and the 0.1, 0.5, 0.9 quantiles in closed
+# form or by bisection on the mixture's CDF.
+LSS_MIXTURE_COMPONENTS = 3
+NGBOOST_ROWS = 200_000
+PREDICTIONS = CACHE / "predictions"
+
+
+def _normal_abs(mu, var):
+    """E|X| for X ~ N(mu, var)."""
+    from scipy.stats import norm
+
+    sd = np.sqrt(var)
+    z = mu / sd
+    return mu * (2 * norm.cdf(z) - 1) + 2 * sd * norm.pdf(z)
+
+
+def crps_mixture(weight, loc, scale, y):
+    """Closed-form CRPS of a Gaussian mixture per row (Grimit et al. 2006). Arrays are ``(rows, components)``."""
+    first = np.sum(weight * _normal_abs(y[:, None] - loc, scale**2), axis=1)
+    second = np.zeros(len(y))
+    for i in range(loc.shape[1]):
+        for j in range(loc.shape[1]):
+            second += weight[:, i] * weight[:, j] * _normal_abs(loc[:, i] - loc[:, j], scale[:, i] ** 2 + scale[:, j] ** 2)
+    return float(np.mean(first - 0.5 * second))
+
+
+def crps_student_t(df, loc, scale, y):
+    """Closed-form CRPS of a Student-t with ``df > 1`` (Jordan, Krüger and Lerch 2019)."""
+    from scipy.special import beta
+    from scipy.stats import t as student
+
+    z = (y - loc) / scale
+    tail = 2 * np.sqrt(df) * beta(0.5, df - 0.5) / ((df - 1) * beta(0.5, df / 2) ** 2)
+    per_row = scale * (z * (2 * student.cdf(z, df) - 1) + 2 * student.pdf(z, df) * (df + z * z) / (df - 1) - tail)
+    return float(np.mean(per_row))
+
+
+def mixture_quantiles(weight, loc, scale, levels=LEVELS, steps=80):
+    """Quantiles of each row's Gaussian mixture by bisection on its CDF, ``(rows, len(levels))``."""
+    from scipy.stats import norm
+
+    out = []
+    for level in levels:
+        lo = np.min(loc - 12 * scale, axis=1)
+        hi = np.max(loc + 12 * scale, axis=1)
+        for _ in range(steps):
+            mid = 0.5 * (lo + hi)
+            below = np.sum(weight * norm.cdf((mid[:, None] - loc) / scale), axis=1) < level
+            lo, hi = np.where(below, mid, lo), np.where(below, hi, mid)
+        out.append(0.5 * (lo + hi))
+    return np.stack(out, axis=1)
+
+
+def mixture_nll(weight, loc, scale, y):
+    from scipy.special import logsumexp
+
+    log = np.log(np.maximum(weight, 1e-300)) - 0.5 * ((y[:, None] - loc) / scale) ** 2 - np.log(scale * math.sqrt(2 * math.pi))
+    return float(-np.mean(logsumexp(log, axis=1)))
+
+
+def _save_predictions(table, name, seed, **arrays):
+    """Each scored row's predicted parameters, kept outside the repository for figures that need them."""
+    PREDICTIONS.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(PREDICTIONS / f"{table}-{name}-seed{seed}.npz", **arrays)
+
+
+def run_lightgbmlss(family, table, seed):
+    """LightGBMLSS with a Gaussian, a Student-t, or a mixture of Gaussians, early-stopped like the trees."""
+    import lightgbm
+    import torch
+    from lightgbmlss.distributions.Gaussian import Gaussian
+    from lightgbmlss.distributions.Mixture import Mixture
+    from lightgbmlss.distributions.StudentT import StudentT
+    from lightgbmlss.model import LightGBMLSS
+
+    torch.set_num_threads(GBM_THREADS)
+    task, x_train, x_test, y_train, y_test = splits(table, seed)
+    start = time.time()
+    frame = _tree_frame(x_train)
+    fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
+    center, spread = float(np.mean(fit_y)), float(np.std(fit_y))
+    if family == "gaussian":
+        dist = Gaussian(stabilization="None", response_fn="exp", loss_fn="nll", initialize=True)
+    elif family == "studentt":
+        dist = StudentT(stabilization="None", response_fn="exp", loss_fn="nll", initialize=True)
+    elif family == "mixture":
+        dist = Mixture(Gaussian(response_fn="exp"), M=LSS_MIXTURE_COMPONENTS, hessian_mode="individual", tau=1.0,
+                       initialize=True)
+    else:
+        raise SystemExit(f"unknown LightGBMLSS family {family}")
+    model = LightGBMLSS(dist)
+    train = lightgbm.Dataset(fit_x, label=(fit_y - center) / spread, free_raw_data=False)
+    valid = lightgbm.Dataset(val_x, label=(val_y - center) / spread, reference=train, free_raw_data=False)
+    params = {"learning_rate": 0.05, "max_delta_step": 0.5, "num_threads": GBM_THREADS, "verbose": -1}
+    model.train(params, train, num_boost_round=4000, valid_sets=[valid],
+                callbacks=[lightgbm.early_stopping(100, verbose=False)])
+    seconds = time.time() - start
+    test = _align(frame, _tree_frame(x_test))
+    raw = model.predict(test, pred_type="parameters", n_samples=1)
+    record = {"seconds": round(seconds, 1), "trees": int(model.booster.best_iteration)}
+    rows = dist_rows(len(y_test), seed)
+    yd = y_test[rows]
+    if family == "mixture":
+        m = LSS_MIXTURE_COMPONENTS
+        loc = center + spread * raw[[f"loc_{i}" for i in range(1, m + 1)]].to_numpy(np.float64)
+        scale = spread * raw[[f"scale_{i}" for i in range(1, m + 1)]].to_numpy(np.float64)
+        noisy = raw[[f"mix_prob_{i}" for i in range(1, m + 1)]].to_numpy(np.float64)
+        noisy = noisy / noisy.sum(axis=1, keepdims=True)
+        # LightGBMLSS adds Gumbel noise to the weights when it predicts (a Gumbel softmax with a fixed
+        # seed), so two equal rows get different mixtures. The scores use the plain softmax of the
+        # predicted weight logits, which scores better; the noisy weights' scores are kept beside them.
+        score = model.booster.predict(test, raw_score=True).reshape(-1, model.dist.n_dist_param)
+        logits = score[:, 2 * m:] + np.asarray(model.start_values, dtype=np.float64)[None, 2 * m:]
+        weight = np.exp(logits - logits.max(axis=1, keepdims=True))
+        weight = weight / weight.sum(axis=1, keepdims=True)
+        record.update(point_scores(np.sum(weight * loc, axis=1), y_test))
+        w, lo, sc = weight[rows], loc[rows], scale[rows]
+        record["crps"] = crps_mixture(w, lo, sc, yd)
+        record["nll"] = mixture_nll(w, lo, sc, yd)
+        record.update(interval(mixture_quantiles(w, lo, sc), yd))
+        record["crps_gumbel_weights"] = crps_mixture(noisy[rows], lo, sc, yd)
+        record["nll_gumbel_weights"] = mixture_nll(noisy[rows], lo, sc, yd)
+        _save_predictions(table, f"lightgbmlss_{family}", seed, rows=rows, weight=w.astype(np.float32),
+                          loc=lo.astype(np.float32), scale=sc.astype(np.float32))
+        return record
+    loc = center + spread * raw["loc"].to_numpy(np.float64)
+    scale = spread * raw["scale"].to_numpy(np.float64)
+    record.update(point_scores(loc, y_test))
+    ld, sd = loc[rows], scale[rows]
+    if family == "gaussian":
+        record["crps"] = crps_normal(ld, sd, yd)
+        record["nll"] = float(np.mean(0.5 * np.log(2 * np.pi * sd**2) + 0.5 * ((yd - ld) / sd) ** 2))
+        record.update(interval(ld[:, None] + sd[:, None] * np.array([-Z80, 0.0, Z80]), yd))
+        _save_predictions(table, f"lightgbmlss_{family}", seed, rows=rows, loc=ld.astype(np.float32),
+                          scale=sd.astype(np.float32))
+        return record
+    from scipy.stats import t as student
+
+    df = raw["df"].to_numpy(np.float64)[rows]
+    record["df_median"] = float(np.median(df))
+    record["crps"] = crps_student_t(df, ld, sd, yd)
+    record["nll"] = float(-np.mean(student.logpdf((yd - ld) / sd, df) - np.log(sd)))
+    record.update(interval(ld[:, None] + sd[:, None] * np.stack([student.ppf(q, df) for q in LEVELS], axis=1), yd))
+    _save_predictions(table, f"lightgbmlss_{family}", seed, rows=rows, df=df.astype(np.float32),
+                      loc=ld.astype(np.float32), scale=sd.astype(np.float32))
+    return record
+
+
+def run_ngboost(table, seed):
+    """NGBoost with a normal, on a 200,000-row sample of the training rows: depth-3 trees on the natural gradient.
+
+    Categories become their integer codes (unseen ones -1) and missing numbers the training median, since
+    scikit-learn's trees read only numbers.
+    """
+    from ngboost import NGBRegressor
+    from ngboost.distns import Normal
+
+    task, x_train, x_test, y_train, y_test = splits(table, seed)
+    start = time.time()
+    frame = _tree_frame(x_train)
+    keep = np.sort(np.random.default_rng(seed).choice(len(y_train), size=min(NGBOOST_ROWS, len(y_train)), replace=False))
+    medians = {c: frame[c].median() for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c].dtype)}
+
+    def numbers(f):
+        f = _align(frame, f)
+        out = np.empty(f.shape, dtype=np.float64)
+        for k, column in enumerate(f.columns):
+            if isinstance(f[column].dtype, pd.CategoricalDtype):
+                out[:, k] = f[column].cat.codes.to_numpy()
+            else:
+                out[:, k] = f[column].fillna(medians[column]).to_numpy(np.float64)
+        return out
+
+    sample, sample_y = numbers(frame.iloc[keep]), y_train[keep]
+    fit_x, val_x, fit_y, val_y = train_test_split(sample, sample_y, test_size=VALIDATION, random_state=seed)
+    model = NGBRegressor(Dist=Normal, n_estimators=4000, learning_rate=0.05, random_state=seed, verbose=False)
+    model.fit(fit_x, fit_y, X_val=val_x, Y_val=val_y, early_stopping_rounds=100)
+    seconds = time.time() - start
+    best = getattr(model, "best_val_loss_itr", None)
+    params = model.pred_dist(numbers(_tree_frame(x_test)), max_iter=best).params
+    loc, scale = np.asarray(params["loc"], np.float64), np.asarray(params["scale"], np.float64)
+    record = {"seconds": round(seconds, 1), "trees": int(best + 1) if best is not None else len(model.base_models),
+              "training_rows": int(len(keep))}
+    record.update(point_scores(loc, y_test))
+    rows = dist_rows(len(y_test), seed)
+    yd, ld, sd = y_test[rows], loc[rows], scale[rows]
+    record["crps"] = crps_normal(ld, sd, yd)
+    record["nll"] = float(np.mean(0.5 * np.log(2 * np.pi * sd**2) + 0.5 * ((yd - ld) / sd) ** 2))
+    record.update(interval(ld[:, None] + sd[:, None] * np.array([-Z80, 0.0, Z80]), yd))
+    return record
+
+
 # ---------------------------------------------------------------- ashlar
 
 
@@ -486,13 +697,19 @@ def run_neural(name, table, seed):
 
 
 def model_runner(name):
-    """``lightgbm``, ``xgboost``, ``catboost``, ``catboost_uncertainty``, ``ashlar``, or ``ashlar_<head>``."""
+    """``lightgbm``, ``xgboost``, ``catboost``, ``catboost_uncertainty``, ``lightgbmlss_<family>``,
+    ``ngboost``, a PyTabKit name, ``ashlar``, or ``ashlar_<head>``."""
     if name in {"lightgbm", "xgboost", "catboost"}:
         return lambda table, seed, overrides: run_tree(name, table, seed)
     if name in NEURAL:
         return lambda table, seed, overrides: run_neural(name, table, seed)
     if name == "catboost_uncertainty":
         return lambda table, seed, overrides: run_catboost_uncertainty(table, seed)
+    if name.startswith("lightgbmlss_"):
+        family = name.split("_", 1)[1]
+        return lambda table, seed, overrides: run_lightgbmlss(family, table, seed)
+    if name == "ngboost":
+        return lambda table, seed, overrides: run_ngboost(table, seed)
     if name == "ashlar":
         return lambda table, seed, overrides: run_ashlar(table, seed, overrides=overrides)
     if name == "ashlar_tabm":
@@ -511,6 +728,10 @@ LABELS = {
     "xgboost": "XGBoost",
     "catboost": "CatBoost",
     "catboost_uncertainty": "CatBoost, `RMSEWithUncertainty`",
+    "lightgbmlss_gaussian": "LightGBMLSS, Gaussian",
+    "lightgbmlss_studentt": "LightGBMLSS, Student-t",
+    "lightgbmlss_mixture": f"LightGBMLSS, mixture of {LSS_MIXTURE_COMPONENTS} Gaussians",
+    "ngboost": "NGBoost, normal, 200,000 training rows",
     "realmlp": "RealMLP (pytabkit)",
     "tabm_pytabkit": "TabM (pytabkit)",
     "ftt": "FT-Transformer (pytabkit)",
@@ -606,7 +827,8 @@ def main():
     for table in args.tables:
         task = TABLES[table][0]
         for name in args.models:
-            if task == "classification" and (name.startswith("ashlar_") or name == "catboost_uncertainty"):
+            distributional = name.startswith(("ashlar_", "lightgbmlss_")) or name in ("catboost_uncertainty", "ngboost")
+            if task == "classification" and distributional:
                 continue
             for seed in args.seeds:
                 key = (table, name, args.variant, seed)
