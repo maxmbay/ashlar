@@ -21,6 +21,12 @@ Five stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
   range better than one calibration of every row? Beside them, an interval
   scaled by the members' spread, and each interval's coverage within each
   bin of member disagreement.
+- ``extrapolate``: the shift test of ``localize`` again, once per way of
+  scaling the numeric columns: the recipe's quantile map, which stops at the
+  edge of the training range; the same map with ``numeric_clip=None``, which
+  continues it on a straight line; robust scaling without its clip; and
+  standard scaling. Does a model that keeps moving past the edge make errors
+  its interval can hold? ``--variants`` picks some of them.
 
 Every table is a public GitHub mirror. Three seeds, 0, 1, and 2. A finished
 seed is skipped on a rerun.
@@ -320,6 +326,86 @@ def stage_localize(results):
             _save(results)
 
 
+# ---------------------------------------------------------------- stage: extrapolate
+
+
+# How each run scales its numeric columns, as keyword arguments to tabm_piecewise.
+EXTRAPOLATE_VARIANTS = {
+    "quantile_clip": {},
+    "quantile_linear": {"numeric_clip": None},
+    "robust_linear": {"numeric_scaling": "robust", "numeric_clip": None},
+    "standard": {"numeric_scaling": "standard"},
+}
+VARIANTS: list[str] = []
+
+
+def stage_extrapolate(results):
+    out = results.setdefault("extrapolate", {})
+    variants = {name: kwargs for name, kwargs in EXTRAPOLATE_VARIANTS.items() if not VARIANTS or name in VARIANTS}
+    for name, (loader, shift_column) in _chosen(UNCERTAINTY_TABLES).items():
+        x, y = loader()
+        rows = out.setdefault(name, {"rows": int(len(y)), "shift_column": shift_column, "runs": {}})
+        # The same split as localize: train and calibrate below the column's 80th percentile, test inside and above it.
+        column = x[shift_column].to_numpy(np.float64)
+        inside = column <= np.quantile(column, 0.8)
+        xi, yi = x[inside].reset_index(drop=True), y[inside]
+        x_out, y_out = x[~inside].reset_index(drop=True), y[~inside]
+        for seed in SEEDS:
+            x_fit, x_cal, x_in, y_fit, y_cal, y_in = _three_way(xi, yi, seed)
+            held_out = (("in_range", x_in, y_in), ("above_range", x_out, y_out))
+            for variant, kwargs in variants.items():
+                runs = rows["runs"].setdefault(variant, {})
+                if str(seed) in runs:
+                    continue
+                started = time.perf_counter()
+                model = tabm_piecewise(task="gaussian", random_state=seed, **kwargs).fit(x_fit, y_fit)
+                run = {}
+                for where, xs, ys in held_out:
+                    parts = model.predict_uncertainty(xs, n_samples=200, seed=seed)
+                    error = model.predict(xs) - ys
+                    run[f"{where}_rmse"] = float(np.sqrt(np.mean(np.square(error))))
+                    run[f"{where}_epistemic"] = float(np.mean(parts["epistemic"]))
+                    run[f"{where}_aleatoric"] = float(np.mean(parts["aleatoric"]))
+                    interval = model.predict_interval(xs, 0.8, n_samples=N_DRAWS, seed=seed, calibrated=False)
+                    run[f"raw_{where}"] = _interval(interval[:, 0], interval[:, 1], ys)
+                model.calibrate(x_cal, y_cal, n_samples=N_DRAWS, seed=seed)
+                for where, xs, ys in held_out:
+                    interval = model.predict_interval(xs, 0.8, n_samples=N_DRAWS, seed=seed, calibrated=True)
+                    run[f"pooled_{where}"] = _interval(interval[:, 0], interval[:, 1], ys)
+                run["seconds"] = time.perf_counter() - started
+                runs[str(seed)] = run
+                print(name, seed, variant, round(run["seconds"]), json.dumps({
+                    key: round(value["coverage"], 3) if isinstance(value, dict) else round(value, 4)
+                    for key, value in run.items() if key != "seconds"
+                }), flush=True)
+                _save(results)
+
+
+def report_extrapolate():
+    tables = _runs("extrapolate")
+    if not tables:
+        return
+    print("## Spread past the training range\n")
+    print("| Table | Scaling | RMSE in → above | Epistemic in → above | Aleatoric in → above | Coverage above: raw | calibrated | Width above, calibrated | In range, calibrated |")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    for name, table in tables.items():
+        for variant, by_seed in table["runs"].items():
+            runs = list(by_seed.values())
+
+            def pair(key, digits=3):
+                return f"{np.mean([r[f'in_range_{key}'] for r in runs]):.{digits}f} → {np.mean([r[f'above_range_{key}'] for r in runs]):.{digits}f}"
+
+            cells = [
+                pair("rmse"), pair("epistemic"), pair("aleatoric"),
+                _mean_sd([r["raw_above_range"]["coverage"] for r in runs], 3),
+                _mean_sd([r["pooled_above_range"]["coverage"] for r in runs], 3),
+                _mean_sd([r["pooled_above_range"]["width"] for r in runs], 3),
+                _mean_sd([r["pooled_in_range"]["coverage"] for r in runs], 3),
+            ]
+            print(f"| {name} ({len(runs)}) | {variant} | " + " | ".join(cells) + " |")
+    print()
+
+
 # ---------------------------------------------------------------- stage: counts
 
 
@@ -561,6 +647,7 @@ STAGES = {
     "uncertainty": stage_uncertainty,
     "groups": stage_groups,
     "localize": stage_localize,
+    "extrapolate": stage_extrapolate,
 }
 
 
@@ -568,11 +655,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=[*STAGES, "all", "report"], default="all")
     parser.add_argument("--tables", nargs="*", default=[], help="Only these tables, written to their own file.")
+    parser.add_argument("--variants", nargs="*", default=[], help=f"extrapolate only: some of {', '.join(EXTRAPOLATE_VARIANTS)}.")
     args = parser.parse_args()
     TABLES[:] = args.tables
+    VARIANTS[:] = args.variants
     if args.stage == "report":
         stage_report(None)
         report_groups()
+        report_extrapolate()
         return
     for name, stage in STAGES.items():
         if args.stage in {name, "all"}:

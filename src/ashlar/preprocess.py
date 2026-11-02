@@ -17,6 +17,13 @@ recorded. ``numeric_scaling='quantile'`` replaces that map: the same
 median-filled training rows are fit with a ``QuantileTransformer`` to a
 normal margin.
 
+``numeric_clip`` sizes the robust clip, in interquartile units (3 by
+default). ``numeric_clip=None`` turns every clip off, so values past the
+training range keep moving: robust scaling becomes linear, and the quantile
+maps continue past their outermost knots on a straight line, at the slope a
+normal margin with the column's interquartile range would have, instead of
+stopping at ±5.2. Standard scaling never clips.
+
 ``FeatureEncoder.fit(..., embeddings=None)`` learns an embedding for every
 categorical column that is not a set feature. ``embeddings=[]`` one-hots
 those columns. A non-empty list embeds the named columns and one-hots the
@@ -42,6 +49,8 @@ from ashlar.errors import AshlarError
 _QUANTILE_COUNT = 1000
 _BOUNDS_THRESHOLD = 1e-7
 _ROBUST_CLIP = 3.0
+# Interquartile range of a standard normal, 2 * ppf(0.75): the quantile maps' linear tails use 1.349 / IQR.
+_NORMAL_IQR = 1.3489795003921634
 NUMERIC_SCALINGS = ("standard", "robust", "quantile", "quantile_tabr")
 # scipy.stats.norm.ppf at sklearn's BOUNDS_THRESHOLD halo. JAX's float32 ppf
 # of that edge is about 0.03 low, so the clip is the scipy value.
@@ -88,7 +97,9 @@ class NumericTransform(Module):
     Quantile knots have shape ``(n_quantiles, n_numeric)`` and are unused
     unless ``scaling`` is ``quantile`` or ``quantile_tabr``. The quantile
     forward follows ``QuantileTransformer._transform_col`` for
-    ``output_distribution='normal'``.
+    ``output_distribution='normal'``. ``clip`` is the robust soft clip in
+    interquartile units; ``None`` removes it, and gives the quantile maps
+    linear tails past their outermost knots.
     """
 
     median: jax.Array
@@ -97,6 +108,7 @@ class NumericTransform(Module):
     quantiles: jax.Array
     references: jax.Array
     scaling: str = eqx.field(static=True)
+    clip: float | None = eqx.field(static=True, default=3.0)
 
     def __call__(self, raw):
         if raw.shape[-1] != self.mean.shape[0]:
@@ -108,10 +120,12 @@ class NumericTransform(Module):
         else:
             values = jnp.where(jnp.isnan(raw), self.median, raw)
         if self.scaling in {"quantile", "quantile_tabr"} and self.mean.shape[0] > 0:
-            return _quantile_normal(values, self.quantiles, self.references)
+            return _quantile_normal(values, self.quantiles, self.references, linear_tails=self.clip is None)
         if self.scaling == "robust":
             scaled = (values - self.median) / self.std
-            return scaled / jnp.sqrt(1.0 + (scaled * scaled) / (_ROBUST_CLIP * _ROBUST_CLIP))
+            if self.clip is None:
+                return scaled
+            return scaled / jnp.sqrt(1.0 + (scaled * scaled) / (self.clip * self.clip))
         return (values - self.mean) / self.std
 
 
@@ -119,8 +133,41 @@ def _normal_clips() -> tuple[float, float]:
     return _CLIP_MIN, _CLIP_MAX
 
 
-def _quantile_normal(filled, quantiles, references):
-    """Map ``(row, column)`` through per-column knots onto a clipped normal."""
+def check_numeric_clip(numeric_clip, numeric_scaling: str):
+    """Raise unless ``numeric_clip`` is ``None`` or a positive number that this scaling can use."""
+    if numeric_clip is None:
+        return
+    if isinstance(numeric_clip, bool) or not isinstance(numeric_clip, (int, float, np.integer, np.floating)):
+        raise AshlarError("numeric_clip must be a positive number or None.")
+    if not np.isfinite(numeric_clip) or numeric_clip <= 0:
+        raise AshlarError("numeric_clip must be a positive number or None.")
+    if numeric_scaling != "robust" and float(numeric_clip) != _ROBUST_CLIP:
+        raise AshlarError(
+            f"numeric_clip sizes the robust soft clip. With numeric_scaling={numeric_scaling!r} it is 3.0, "
+            "the scaling's own edge, or None, which lets values past the training range keep moving."
+        )
+
+
+def _tail_slope(knots, references):
+    """Slope of a column's linear tails: a normal margin's, ``1.349 / IQR``, from the knots.
+
+    A zero interquartile range uses half the range, and a constant column uses 1, as ``_robust_divisor`` does.
+    """
+    lower = jnp.interp(0.25, references, knots)
+    upper = jnp.interp(0.75, references, knots)
+    divisor = upper - lower
+    divisor = jnp.where(divisor > 0, divisor, 0.5 * (knots[-1] - knots[0]))
+    divisor = jnp.where(divisor > 0, divisor, 1.0)
+    return _NORMAL_IQR / divisor
+
+
+def _quantile_normal(filled, quantiles, references, linear_tails: bool = False):
+    """Map ``(row, column)`` through per-column knots onto a clipped normal.
+
+    ``linear_tails`` continues the map past the outermost knots on a straight
+    line from the clip, at ``_tail_slope``, so a value beyond the training range
+    still moves.
+    """
     clip_min, clip_max = _normal_clips()
 
     def column(values, knots):
@@ -137,8 +184,12 @@ def _quantile_normal(filled, quantiles, references):
         upper = values + upper_tol > upper_x
         mapped = jnp.where(upper, jnp.asarray(1.0, dtype=mapped.dtype), mapped)
         mapped = jnp.where(lower, jnp.asarray(0.0, dtype=mapped.dtype), mapped)
-        normal = jax.scipy.stats.norm.ppf(mapped)
-        return jnp.clip(normal, clip_min, clip_max)
+        normal = jnp.clip(jax.scipy.stats.norm.ppf(mapped), clip_min, clip_max)
+        if not linear_tails:
+            return normal
+        slope = _tail_slope(knots, references)
+        normal = jnp.where(values > upper_x, clip_max + (values - upper_x) * slope, normal)
+        return jnp.where(values < lower_x, clip_min - (lower_x - values) * slope, normal)
 
     return jax.vmap(column, in_axes=(1, 1), out_axes=1)(filled, quantiles)
 
@@ -216,14 +267,17 @@ class FeatureEncoder:
         numeric_scaling: str = "robust",
         quantiles: np.ndarray | None = None,
         references: np.ndarray | None = None,
+        numeric_clip: float | None = _ROBUST_CLIP,
     ):
         if numeric_scaling not in NUMERIC_SCALINGS:
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
+        check_numeric_clip(numeric_clip, numeric_scaling)
         self.columns = columns
         self.categorical = set() if categorical is None else set(categorical)
         self.numeric_scaling = numeric_scaling
+        self.numeric_clip = None if numeric_clip is None else float(numeric_clip)
         numeric = [column for column in columns if column.role == "numeric"]
         if numeric_scaling in {"quantile", "quantile_tabr"}:
             if quantiles is None or references is None:
@@ -240,6 +294,7 @@ class FeatureEncoder:
             quantiles=quantile_knots,
             references=quantile_references,
             scaling=numeric_scaling,
+            clip=self.numeric_clip,
         )
 
     @property
@@ -294,6 +349,7 @@ class FeatureEncoder:
         set_features: list[str] | None = None,
         set_max_length: int = 8,
         numeric_scaling: str = "robust",
+        numeric_clip: float | None = _ROBUST_CLIP,
     ) -> "FeatureEncoder":
         names, columns = frame_columns(data)
         requested = set(categorical or [])
@@ -306,6 +362,7 @@ class FeatureEncoder:
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
+        check_numeric_clip(numeric_clip, numeric_scaling)
         overlap = embedded.intersection(sets)
         if overlap:
             raise AshlarError(
@@ -376,6 +433,7 @@ class FeatureEncoder:
             numeric_scaling=numeric_scaling,
             quantiles=quantiles,
             references=references,
+            numeric_clip=numeric_clip,
         )
 
     def transform(self, data) -> EncodedBatch:
@@ -479,6 +537,7 @@ class FeatureEncoder:
             ],
             "categorical": sorted(self.categorical),
             "numeric_scaling": self.numeric_scaling,
+            "numeric_clip": self.numeric_clip,
         }
         if self.numeric_scaling in {"quantile", "quantile_tabr"}:
             payload["quantiles"] = np.asarray(self.numeric_transform.quantiles).tolist()
@@ -506,6 +565,8 @@ class FeatureEncoder:
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             quantiles=None if payload.get("quantiles") is None else np.asarray(payload["quantiles"], dtype=np.float64),
             references=None if payload.get("references") is None else np.asarray(payload["references"], dtype=np.float64),
+            # A schema saved before numeric_clip existed used the robust clip of 3 and the quantile maps' edge.
+            numeric_clip=payload.get("numeric_clip", _ROBUST_CLIP),
         )
 
 

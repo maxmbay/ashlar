@@ -121,7 +121,14 @@ from ashlar.distributions import (
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
-from ashlar.preprocess import NUMERIC_SCALINGS, EncodedBatch, FeatureEncoder, frame_columns, target_array
+from ashlar.preprocess import (
+    NUMERIC_SCALINGS,
+    EncodedBatch,
+    FeatureEncoder,
+    check_numeric_clip,
+    frame_columns,
+    target_array,
+)
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
 from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer, pack_units
@@ -481,6 +488,15 @@ class ASRModel(BaseEstimator):
         train-only normal quantile transform. Scaling does not change the
         backbone, the learning rate, or the penalties. Linear-ReLU numeric
         embeddings stay off unless ``num_embeddings`` is set.
+    numeric_clip:
+        The robust soft clip, in interquartile units (default 3). A larger
+        number widens it. ``None`` turns every clip off, so a value past the
+        training range keeps moving the model instead of landing on the edge:
+        robust scaling becomes linear, and the quantile maps continue past
+        their outermost knots on a straight line at ``1.349 / IQR`` per unit,
+        the slope of a normal margin. Standard scaling never clips. Use
+        ``None`` when rows may fall outside the training range (see
+        ``docs/benchmarks.md``, "Spread past the training range").
     learning_rate_schedule:
         ``constant`` (default) keeps the AdamW rate fixed. ``linear`` decays
         that same rate to zero across the epoch budget. ``surface`` warms up
@@ -584,6 +600,7 @@ class ASRModel(BaseEstimator):
         gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
         numeric_scaling: str = "robust",
+        numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
         class_weight=None,
         categorical: list[str] | None = None,
@@ -628,6 +645,7 @@ class ASRModel(BaseEstimator):
         self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
         self.numeric_scaling = numeric_scaling
+        self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
         self.class_weight = class_weight
         self.categorical = categorical
@@ -686,6 +704,7 @@ class ASRModel(BaseEstimator):
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
+        check_numeric_clip(self.numeric_clip, self.numeric_scaling)
         if self.standardize_target and self.task not in _SCALED_TASKS:
             raise AshlarError(
                 "standardize_target is a regression label z-score. It applies to regression and the distribution tasks, "
@@ -1077,6 +1096,7 @@ class ASRModel(BaseEstimator):
             set_features=list(self.set_features or []),
             set_max_length=int(self.set_max_length),
             numeric_scaling=self.numeric_scaling,
+            numeric_clip=self.numeric_clip,
         )
         if self.num_embeddings is not None and encoder.n_numeric == 0:
             raise AshlarError("num_embeddings was requested, but the training partition has no numeric columns.")
@@ -1237,6 +1257,7 @@ class ASRModel(BaseEstimator):
             set_features=list(self.set_features or []),
             set_max_length=int(self.set_max_length),
             numeric_scaling=self.numeric_scaling,
+            numeric_clip=self.numeric_clip,
         )
         n_events, n_classes = self._output_sizes(y_train_model, classes)
         encoded = encoder.transform(train_frame)
@@ -3302,6 +3323,7 @@ class ASRModel(BaseEstimator):
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
             "numeric_scaling": self.numeric_scaling,
+            "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
             "max_epochs": self.max_epochs,
             "patience": self.patience,
@@ -3372,6 +3394,7 @@ class ASRModel(BaseEstimator):
             cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
+            numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],
             class_weight=payload["class_weight"],
             categorical=payload.get("categorical"),
