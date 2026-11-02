@@ -189,7 +189,7 @@ def compute(seed: int = SEED, stores: int = STORES, candidates: int = CANDIDATES
 
 FIGURE = "forecast-paths"
 SHOWN = 40  # paths drawn of each kind
-HISTORY_SHOWN = 21  # days of history drawn before the origin
+HISTORY_SHOWN = 11  # days of history drawn before the origin
 ASHLAR_HEADS = ("joint", "independent", "joint_flow")
 
 
@@ -289,10 +289,11 @@ def draw():
         ax.tick_params(labelbottom=False)
         k.style(ax, frame="lb", grid="y")
         k.panel_title(ax, title, color=k.TEAL_DARK if colour == k.TEAL else k.CLAY_DARK, raise_by=0.08)
-    k.value(top, lookback - 1.0, reach * 0.95, "the last 21 days", k.DATA_DARK, ha="right", va="top", size=12)
+    k.value(top, lookback - 1.0, reach * 0.95, f"the last {HISTORY_SHOWN} days", k.DATA_DARK, ha="right", va="top",
+            size=12)
     k.value(top, len(days) - 0.7, reach * 0.95, "the next 12, realized", k.INK, ha="right", va="top",
             size=12).set_path_effects(halo)
-    k.value(bottom, start + 0.3, reach * 0.95, "dark: the paths with the highest and lowest totals of the 40", k.MUTED,
+    k.value(bottom, start + 0.3, reach * 0.95, "dark: the highest and lowest totals", k.MUTED,
             ha="left", va="top", size=12).set_path_effects(halo)
 
     # Under the paths: the days the model is told about, history and ahead alike.
@@ -358,6 +359,21 @@ def draw():
                     f"Brier {numbers['deepar_peak_brier']:.3f} against {numbers['best_peak_brier']:.3f}, and none "
                     f"beats always saying {k.pct(rate)}, {numbers['base_rate_brier']:.3f}.", line=0)
     k.save(fig, FIGURE)
+
+    def mark(ax):
+        days_shown = np.arange(lookback - 10, len(days))
+        segments = [np.c_[np.r_[lookback - 1, ahead], np.r_[sales[lookback - 1], path]] for path in joint[:SHOWN]]
+        ax.add_collection(LineCollection(segments, colors=k.TEAL, linewidths=1.0, alpha=0.4, zorder=2))
+        ax.plot(days_shown[days_shown < lookback], sales[days_shown[days_shown < lookback]], color=k.DATA_DARK, lw=2.4,
+                zorder=3)
+        ax.plot(np.r_[lookback - 1, ahead], np.r_[sales[lookback - 1], realized], color=k.INK, lw=2.6, zorder=4)
+        ax.set_xlim(days_shown[0] - 0.3, len(days) - 0.7)
+        ax.set_ylim(0, reach)
+
+    k.thumb("forecast", "Forecasts, in progress", [
+        (k.num(numbers["joint_total_crps"]), k.TEAL), (" total CRPS, against ", k.MUTED),
+        (k.num(numbers["deepar_total_crps"]), k.CLAY), (" for DeepAR", k.MUTED),
+    ], mark)
 
 
 WORDS = {2: "two", 3: "three", 4: "four", 5: "five"}
