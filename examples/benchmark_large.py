@@ -344,12 +344,14 @@ def _tree_count(model):
     return -1
 
 
-def run_catboost_uncertainty(table, seed):
-    """CatBoost's own distributional regression: a mean and a variance per row (RMSEWithUncertainty)."""
+def fit_catboost_uncertainty(x_train, y_train, seed, path=None):
+    """CatBoost's own distributional regression, early-stopped like the trees: a mean and a variance per row.
+
+    Returns the model and ``predict(x) -> (loc, scale)``. With ``path``, a
+    model saved there is loaded instead of fitted, and a new fit is saved there.
+    """
     import catboost
 
-    task, x_train, x_test, y_train, y_test = splits(table, seed)
-    start = time.time()
     frame = _tree_frame(x_train)
     cats = [c for c in frame.columns if isinstance(frame[c].dtype, pd.CategoricalDtype)]
 
@@ -359,15 +361,33 @@ def run_catboost_uncertainty(table, seed):
             f[c] = f[c].astype(object).where(f[c].notna(), "__missing__").astype(str)
         return f
 
-    fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
-    model = catboost.CatBoostRegressor(iterations=4000, learning_rate=0.05, od_type="Iter", od_wait=100,
-                                       random_seed=seed, thread_count=GBM_THREADS, verbose=False,
-                                       cat_features=cats, loss_function="RMSEWithUncertainty")
-    model.fit(prep(fit_x), fit_y, eval_set=(prep(val_x), val_y), use_best_model=True)
+    if path is not None and Path(path).exists():
+        model = catboost.CatBoostRegressor()
+        model.load_model(str(path))
+    else:
+        fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
+        model = catboost.CatBoostRegressor(iterations=4000, learning_rate=0.05, od_type="Iter", od_wait=100,
+                                           random_seed=seed, thread_count=GBM_THREADS, verbose=False,
+                                           cat_features=cats, loss_function="RMSEWithUncertainty")
+        model.fit(prep(fit_x), fit_y, eval_set=(prep(val_x), val_y), use_best_model=True)
+        if path is not None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            model.save_model(str(path))
+
+    def predict(x):
+        pred = model.predict(prep(_align(frame, _tree_frame(x))))
+        return pred[:, 0], np.sqrt(np.maximum(pred[:, 1], 1e-12))
+
+    return model, predict
+
+
+def run_catboost_uncertainty(table, seed):
+    """CatBoost's own distributional regression: a mean and a variance per row (RMSEWithUncertainty)."""
+    task, x_train, x_test, y_train, y_test = splits(table, seed)
+    start = time.time()
+    model, predict = fit_catboost_uncertainty(x_train, y_train, seed)
     seconds = time.time() - start
-    pred = model.predict(prep(_align(frame, _tree_frame(x_test))))
-    loc, var = pred[:, 0], pred[:, 1]
-    scale = np.sqrt(np.maximum(var, 1e-12))
+    loc, scale = predict(x_test)
     record = {"seconds": round(seconds, 1), "trees": int(model.get_best_iteration()) + 1}
     record.update(point_scores(loc, y_test))
     rows = dist_rows(len(y_test), seed)
