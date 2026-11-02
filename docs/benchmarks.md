@@ -536,6 +536,8 @@ Conformal calibration is not Ashlar's alone: the same step brings LightGBM's qua
 
 A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated mixture covers between 77.6% and 82.2% on single splits.
 
+Rerun for the README's figure in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026, like the run above (`python examples/readme/intervals.py compute`): every coverage and width in this section came out the same at the digits shown. As a share of CQR's width at the same coverage, the calibrated mixture's 80% interval is 94% on California, 98% on diamonds, 85% on bike rentals, and 102% on abalone.
+
 ### Coverage within groups
 
 One calibration holds 80% over all rows, not necessarily within each kind of row. From the same script, stage `groups`, on the same tables and splits, with one column of each table as the groups: California by distance to the ocean, diamonds by cut, abalone by sex, taxi tips by the taxi's color (yellow or green), and bike rentals by hour of day. The column is also a feature of each table. The model is `ASRRegressor(task="mixture", random_state=seed)`, scored within each group with at least 50 test rows before calibration, after one calibration of every calibration row, and after `calibrate(X_cal, y_cal, groups=column)`, which gives each group with at least 100 calibration rows a table of its own. Calibration and test rows are each 20% of the table, so a group has about as many of one as of the other. A group's coverage is its mean over the three splits; the last column is the group furthest from 80% on each split, averaged over the splits. Unlike the rest of this script, this stage ran on the M3 Pro laptop of [How it was run](#how-it-was-run), beside other jobs.
@@ -552,6 +554,24 @@ One calibration holds 80% over all rows, not necessarily within each kind of row
 - **Hour of day on bike rentals is the exception.** One calibration leaves the night hours too wide (85.1% at 3:00 and 86.6% at 4:00) and some busy hours too narrow (72.8% at 14:00, 73.9% at 7:00), with 5 of the 24 hours outside 75% to 85%. A table per hour brings those four to 80.3%, 81.0%, 75.1%, and 78.7%, and leaves 1 hour outside: 23:00, at 72.0% both ways, which moves by 7 points from split to split.
 - **A table per group is noisier, since it has fewer rows.** Each hour has about 145 calibration rows, so its own conformal level misses by about 3 points either way, and on a single split the furthest hour is 13.1 points from 80% after calibrating per hour, against 8.8 after one calibration. Averaged over the three splits, the hours are 3.6 points from 80% (root mean square) after one calibration, more than the 1.9 that 145 test rows per hour explain, and 2.7 after one per hour, which their calibration and test rows explain by chance alone. A group needs several hundred calibration rows before its table is reliably closer than one table of every row on a single split, unless one calibration is far off for it; `min_group_rows` (100 by default) is the floor below which a group reads the table of every row.
 - Calibrating per group widens an interval only where a group needed it: the bike rentals' 80% interval goes from 72.4 to 74.8 rentals on average, and the other four tables' widths change by under 1%. Over all rows the per-group tables hold 79.0% to 80.6%, as one calibration does (78.6% to 80.3%).
+
+### Per hour, beside LightGBM CQR
+
+The README's figure puts LightGBM beside the bike-rentals row above: the same stage, splits, and mixture, and LightGBM's early-stopped 0.1 and 0.9 quantile models from [Calibrated intervals](#calibrated-intervals), conformalized on the same calibration rows three ways. One margin for every row is CQR. One margin on the score divided by each row's own 0.1-to-0.9 width stretches the interval where the trees' spread is wide. A margin per hour from that hour's calibration rows is Mondrian CQR, with the same floor of 100 rows as `min_group_rows`. It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026 (`python examples/readme/intervals.py compute`), not on the laptop, and its mixture fits differ from the laptop's: one calibration leaves 3 hours outside 75% to 85%, not 5, and a table per hour also leaves 3 (12:00, 16:00, and 23:00), not 1. An hour's coverage is its mean over the three splits; the RMS is over the 24 hours; the furthest hour is the one furthest from 80% on each split, averaged over the splits.
+
+| Method | Hours outside 75% to 85% | Hourly coverage, lowest to highest | RMS points from 80% | Furthest hour on a split | All rows | 80% width, rentals |
+|---|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture`, raw | 8 | 70.8% to 84.9% | 4.7 | 11.4 | – | – |
+| Ashlar, one calibration | 3 | 73.5% to 86.5% | 2.9 | 10.4 | 79.5% | 73.5 |
+| Ashlar, a table per hour | 3 | 72.6% to 84.8% | 3.4 | 11.9 | 79.7% | 75.4 |
+| LightGBM 0.1 and 0.9 models, raw | 24 | 56.1% to 72.0% | 15.3 | 27.4 | – | – |
+| LightGBM CQR, one margin | 14 | 71.0% to 97.9% | 7.8 | 17.9 | 79.3% | 86.8 |
+| LightGBM CQR, margin scaled by width | 6 | 70.0% to 89.6% | 4.5 | 13.8 | 79.0% | 99.2 |
+| LightGBM CQR, a margin per hour | 2 | 72.1% to 86.3% | 2.8 | 10.0 | 79.6% | 92.3 |
+
+- **One calibration holds hour by hour for Ashlar's mixture and not for LightGBM's quantile models.** Both cover 79% to 80% of all rows. The mixture keeps 21 of the 24 hours inside 75% to 85%. CQR's one margin keeps 10: it is too wide at night (89.8% to 97.9% from 1:00 to 5:00, when few bikes are out) and too narrow in the day (71.0% at 14:00).
+- **The trees need the conditioning spelled out, and it costs width.** A margin per hour brings CQR to 22 of 24 hours, at 92.3 rentals wide against the mixture's 73.5 after one calibration, 26% wider. Scaling the margin by each row's width reaches 18 of 24 at 99.2 rentals, 35% wider.
+- **On this run a table per hour does not help the mixture.** It leaves 3 hours outside either way and moves the RMS from 2.9 to 3.4 points, the noise of about 145 calibration rows an hour described above; it widens the interval from 73.5 to 75.4 rentals.
 
 ## Count heads
 
@@ -1111,6 +1131,50 @@ Seeds 0 to 2, 80/20 split, the `mixture` head. Cost against the likelihood fit's
 
 The hybrid is a little cheaper at every ratio but never by 1%. LightGBM's quantile regression, fitted per ratio, costs 6% to 23% more than the mixture's plug-in order, and more the further into the tail the order sits.
 
+### Hourly bike rentals, eight cost ratios from one fit
+
+`examples/benchmark_decide.py sweep`, for the README's figure. One `mixture` fit per split (60 epochs, `cyclical={"hr": 24}`) is read at eight critical ratios with `predict_order(X, under, over)`, a unit over costing 1 and a unit short `level / (1 - level)`. LightGBM's quantile regression is refitted at every ratio two ways: the four-ratio table's 400 trees at learning rate 0.05 with season and weather as numbers, and early-stopped (learning rate 0.05, up to 4,000 trees, 100 rounds of patience on 20% of the training rows, native categories). Seeds 0 to 2, 80/20 splits; each cell is LightGBM's newsvendor cost on the held-out hours above the one fit's, mean ± standard deviation, then each method's service level (the share of hours with demand at or below the order). It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026.
+
+| level | costs (short:over) | LightGBM, 400 trees | LightGBM, early-stopped | early-stopped trees | service: Ashlar | 400 trees | early-stopped |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.50 | 1:1 | +6.4% ± 2.3 | +0.9% ± 0.9 | 1,975 to 3,978 | 49.4% | 49.6% | 49.9% |
+| 0.60 | 1.5:1 | +8.2% ± 2.1 | +2.8% ± 1.3 | 2,068 to 3,152 | 58.7% | 58.9% | 57.4% |
+| 0.70 | 2.3:1 | +8.0% ± 1.8 | +4.3% ± 0.7 | 1,984 to 3,511 | 68.1% | 67.5% | 64.2% |
+| 0.75 | 3:1 | +7.8% ± 2.0 | +4.7% ± 1.2 | 1,449 to 2,417 | 72.9% | 71.3% | 69.1% |
+| 0.80 | 4:1 | +8.0% ± 0.3 | +6.2% ± 0.5 | 1,540 to 2,250 | 77.5% | 76.4% | 72.7% |
+| 0.85 | 5.7:1 | +8.5% ± 0.2 | +8.9% ± 1.5 | 725 to 1,235 | 82.5% | 81.6% | 78.9% |
+| 0.90 | 9:1 | +12.1% ± 1.8 | +13.4% ± 2.5 | 761 to 1,017 | 87.8% | 86.6% | 83.9% |
+| 0.95 | 19:1 | +22.8% ± 3.6 | +28.4% ± 5.3 | 466 to 670 | 93.4% | 92.0% | 90.3% |
+
+The 400-tree column reproduces the four-ratio table (+6.1%, +7.5%, +12.2%, and +22.6% there). Early stopping closes most of the gap near the median, where LightGBM is level with the one fit (+0.9% ± 0.9 at 1:1), but not in the tail: it stops earlier there and costs 28% more at 19:1. Taking LightGBM's better setting at each ratio, it costs 1% to 23% more than reading the one fit, more the further into the tail, and needs a model for every ratio. The early-stopped models also order too little in the tail: 90.3% service at 0.95 against the one fit's 93.4%.
+
+## Explanations beside SHAP
+
+`examples/benchmark_explain.py`. On hourly bike rentals, seeds 0 to 2, 80/20 splits, a `mixture` head (40 epochs) is fitted and `explain` attributes four numbers of each of 2,000 held-out hours to the features: the mean, the median, the width of the 80% interval, and P(rentals > 500), with 2,000 training rows as the background. Beside it is the gradient-boosting way, SHAP's `TreeExplainer` on early-stopped LightGBM (learning rate 0.05, up to 4,000 trees, 100 rounds of patience): an L2 model for the mean; SHAP of a 0.9 quantile model minus SHAP of a 0.1 quantile model for the width, since SHAP values add; and a classifier of rentals > 500, in probability, interventional against training rows. It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026. Each `explain` call took 15 to 26 seconds on the 2,000 rows at 256 steps; SHAP on the four LightGBM models took about 30 seconds.
+
+There is no true attribution to score against, so this shows what each method can attribute, not a score. Each cell is a feature's mean absolute attribution, mean over the splits, in rentals (mean and width) or probability (P(rentals > 500)), with its share of the column in brackets. The median's column is left out: it matches the mean's (Spearman 1.00).
+
+| feature | mean: LightGBM SHAP | mean: Ashlar | 80% width: LightGBM SHAP of 0.9 − 0.1 | 80% width: Ashlar | P(rentals > 500): LightGBM classifier SHAP | P(rentals > 500): Ashlar |
+|---|---:|---:|---:|---:|---:|---:|
+| hour | 104 (40%) | 104 (34%) | 42.2 (37%) | 41.5 (29%) | 0.069 (45%) | 0.130 (41%) |
+| year | 42.3 (16%) | 51.7 (17%) | 17.9 (16%) | 14.9 (10%) | 0.029 (19%) | 0.051 (16%) |
+| working day | 19.6 (8%) | 33.2 (11%) | 10.6 (9%) | 24.6 (17%) | 0.011 (7%) | 0.038 (12%) |
+| temperature | 27.3 (11%) | 27 (9%) | 5.78 (5%) | 9.33 (7%) | 0.009 (6%) | 0.020 (6%) |
+| weather | 8.7 (3%) | 18.7 (6%) | 3.94 (3%) | 16.1 (11%) | 0.003 (2%) | 0.014 (4%) |
+| humidity | 11.6 (4%) | 16.9 (6%) | 11.4 (10%) | 8.49 (6%) | 0.007 (4%) | 0.014 (4%) |
+| month | 8.16 (3%) | 14.4 (5%) | 5.6 (5%) | 5.86 (4%) | 0.005 (3%) | 0.012 (4%) |
+| season | 13.2 (5%) | 13 (4%) | 2.74 (2%) | 5.35 (4%) | 0.003 (2%) | 0.011 (4%) |
+| weekday | 8.23 (3%) | 11.7 (4%) | 3.61 (3%) | 8.12 (6%) | 0.005 (3%) | 0.011 (4%) |
+| feels-like temperature | 11.9 (5%) | 10.4 (3%) | 8 (7%) | 4.87 (3%) | 0.009 (6%) | 0.011 (3%) |
+| wind speed | 3.21 (1%) | 4.29 (1%) | 1.6 (1%) | 1.98 (1%) | 0.001 (1%) | 0.003 (1%) |
+| holiday | 0.767 (0%) | 1.17 (0%) | 0.992 (1%) | 0.696 (0%) | 0.000 (0%) | 0.001 (0%) |
+
+- **Both put hour first, and year second in every column but Ashlar's width, where working day is second.** On the mean they agree closely (Spearman 0.85 between the two columns, averaged over the splits) and give hour the same 104 rentals; on P(rentals > 500) the Spearman is 0.80.
+- **The width ranks the features differently from the mean.** In Ashlar's explanation working day takes 17% of the width against 11% of the mean, and weather 11% against 6%, while year falls from 17% to 10%. SHAP of LightGBM's quantile models ranks the width differently again (Spearman 0.73 with Ashlar's): humidity third and weather eighth.
+- **LightGBM needs a model per question.** The width takes two quantile models, and the 0.9 model fell below the 0.1 model on 0.35% of the held-out hours (0.29% to 0.43% by split); the tail takes a classifier for each threshold. Ashlar reads all of them off one fit.
+- **Two settings of `explain` matter here.** The hour enters both models as a plain number. With `cyclical={"hr": 24}` the baseline of its sine and cosine columns is their separate medians, near the centre of the circle, an hour the network never saw; on a first run that way, one split gave hour twice the attribution of the mean that the other two did (231 rentals against 114 and 133). And `steps=256`: the straight path from the baseline hour (12:00) to a row's hour crosses the rush-hour peaks, and at the default 32 steps the integral missed 43% of how far P(rentals > 500) moved from the baseline on one split. At 256 steps the gap (`numeric_gap()`) is 0.8% to 4.5% of that move.
+- The two kinds of attribution stand on different footings. SHAP's are against the average prediction over the background; `explain`'s are against the row with every numeric feature at its median, and each categorical column (season, weather) is set to every reference category in turn, with equal weight.
+
 ## Missing and noisy inputs
 
 `examples/benchmark_inputs.py`, issue #35's test. A `mixture` head with default settings is fitted on 64% of the rows and calibrated on 11% (complete rows), then tested on 25%. Seeds 0 to 2, means. Run on an M3 Pro laptop, CPU only, in 3.5 minutes. "Median" is the default fill; "draws" is `with_uncertain_inputs(32)`.
@@ -1131,6 +1195,32 @@ A share of the test rows' numeric cells is masked at random.
 | bike rentals | 50% | 48.3% | 74.8 | 6.328 | 83.5% | 187 | 5.148 |
 
 The median's interval keeps its width and loses its coverage, down to 38% on California at half the cells. The draws' interval widens with the share missing and holds 81% to 84%, a little over, since the copula of the numeric features does not see the categorical ones. At 30% missing on California, the issue's target number, the draws cover 82.4%, against 48.3% for the median.
+
+### Masked cells beside LightGBM
+
+The README's figure reruns the masked cells with LightGBM beside them, in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026 (`python examples/benchmark_inputs.py mask --seeds 0 1 2`), so its Ashlar numbers differ a little from the laptop's above (California at 30%: 82.9% against 50.5% for the median fill, there 82.4% against 48.3%). LightGBM is two early-stopped quantile models at 0.1 and 0.9 with CQR, two ways. Given NaN: fitted and calibrated on the same complete rows as Ashlar, then given NaN for a blank cell at test time. Trained with blanks: fitted and calibrated with the same share of its own rows' numeric cells blanked at random, refitted for each share. Each cell is the 80% interval's coverage · its mean width · the pinball loss averaged over the 0.1, 0.5, and 0.9 quantiles, mean of seeds 0 to 2. California's width is in $100k.
+
+California:
+
+| blank cells | median fill | `with_uncertain_inputs(32)` | LightGBM given NaN | LightGBM trained with blanks |
+|---:|---:|---:|---:|---:|
+| 0% | 80.2% · 0.94 · 0.098 | 80.3% · 0.94 · 0.097 | 80.4% · 1.01 · 0.101 | – |
+| 10% | 66.9% · 1.04 · 0.177 | 81.3% · 1.23 · 0.116 | 73.6% · 1.22 · 0.179 | 79.3% · 1.14 · 0.116 |
+| 30% | 50.5% · 1.19 · 0.288 | 82.9% · 1.78 · 0.155 | 68.0% · 1.55 · 0.262 | 79.7% · 1.41 · 0.141 |
+| 50% | 40.6% · 1.28 · 0.362 | 83.3% · 2.31 · 0.196 | 66.8% · 1.75 · 0.302 | 79.9% · 1.69 · 0.167 |
+
+Bike rentals:
+
+| blank cells | median fill | `with_uncertain_inputs(32)` | LightGBM given NaN | LightGBM trained with blanks |
+|---:|---:|---:|---:|---:|
+| 0% | 80.2% · 74 · 7.8 | 80.2% · 74 · 7.8 | 80.9% · 87 · 8.4 | – |
+| 10% | 72.4% · 74 · 10.8 | 81.6% · 98 · 9.6 | 66.9% · 84 · 14.8 | 80.4% · 111 · 10.5 |
+| 30% | 58.7% · 74 · 17.5 | 82.8% · 143 · 13.2 | 48.0% · 77 · 26.9 | 79.6% · 140 · 13.3 |
+| 50% | 48.3% · 74 · 24.0 | 83.1% · 186 · 17.0 | 36.4% · 68 · 38.4 | 80.8% · 168 · 16.0 |
+
+- **LightGBM given NaN does not hold.** A feature with no blanks in training has no learned direction for a missing value, so LightGBM reads NaN as zero. Its coverage falls to 68% on California and 48% on bike rentals at 30% blank.
+- **LightGBM trained with blanks holds about 80% at every share, and on California it is narrower.** At 30% blank its interval is 1.41 wide against 1.78 for the draws, with a lower pinball loss (0.141 against 0.155). On bike rentals the two are level (140 against 143 rentals, pinball 13.3 against 13.2). It needs the share of blanks in advance and a fit for each share, and it drifts below 80% on the rows with the most blanks: at 10% blank, California rows with three or more blank cells are covered 77.3% of the time, against 81.4% by the draws.
+- `with_uncertain_inputs(32)` needs no refit and covers 81% to 83% at every share, a little over 80% for the reason above.
 
 ### Noisy cells
 
