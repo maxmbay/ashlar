@@ -185,8 +185,182 @@ def compute(seed: int = SEED, stores: int = STORES, candidates: int = CANDIDATES
         print(f"wrote {path.relative_to(REPO)} ({path.stat().st_size / 1024:.0f} KB)", flush=True)
 
 
+# ---------------------------------------------------------------- draw
+
+FIGURE = "forecast-paths"
+SHOWN = 40  # paths drawn of each kind
+HISTORY_SHOWN = 21  # days of history drawn before the origin
+ASHLAR_HEADS = ("joint", "independent", "joint_flow")
+
+
+def seed_mean(saved: dict, model: str, *keys):
+    """The mean over the saved seeds of ``saved[model][seed][keys...]``, or None."""
+    values = []
+    for run in saved.get(model, {}).values():
+        for key in keys:
+            run = run.get(key) if isinstance(run, dict) else None
+        if run is not None:
+            values.append(float(run))
+    return float(np.mean(values)) if values else None
+
+
+def headline(saved: dict) -> dict:
+    """The numbers the figure prints, each a mean over the benchmark's saved seeds."""
+    calibrated_peak = {name: seed_mean(saved, name, "paths", "peak", "calibrated_brier") for name in ASHLAR_HEADS}
+    calibrated_peak = {name: value for name, value in calibrated_peak.items() if value is not None}
+    best = min(calibrated_peak, key=calibrated_peak.get) if calibrated_peak else None
+    rate = seed_mean(saved, "joint", "paths", "peak", "event_rate")
+    return {
+        "joint_total_coverage": seed_mean(saved, "joint", "paths", "total", "coverage"),
+        "marginal_total_coverage": seed_mean(saved, "joint_marginals", "paths", "total", "coverage"),
+        "joint_total_crps": seed_mean(saved, "joint", "paths", "total", "crps"),
+        "deepar_total_crps": seed_mean(saved, "deepar", "paths", "total", "crps"),
+        "joint_daily": seed_mean(saved, "joint", "daily", "quantile_loss"),
+        "lags_daily": seed_mean(saved, "no_covariates", "daily", "quantile_loss"),
+        "chronos_daily": seed_mean(saved, "chronos2", "daily", "quantile_loss"),
+        "deepar_peak_brier": seed_mean(saved, "deepar", "paths", "peak", "brier"),
+        "best_peak_brier": calibrated_peak.get(best),
+        "best_peak_head": best,
+        "peak_rate": rate,
+        "base_rate_brier": None if rate is None else rate * (1 - rate),
+        "seeds": len(saved.get("joint", {})),
+    }
+
+
 def draw():
-    raise SystemExit("the draw stage arrives with the style kit, examples/readme/style.py")
+    import matplotlib.patheffects as path_effects
+    from matplotlib.collections import LineCollection
+    from matplotlib.ticker import FixedLocator, FuncFormatter
+
+    import style as k
+
+    meta = k.load_json(FIGURE, "meta")
+    first = k.load_npz(FIGURE, "paths-0")
+    numbers = headline(meta["saved"])
+    joint = np.asarray(first["joint"], dtype=np.float64)
+    loose = np.asarray(first["independent"], dtype=np.float64)
+    realized = np.asarray(first["realized"], dtype=np.float64)
+    sales = np.asarray(first["sales"], dtype=np.float64)
+    days = pd.to_datetime(first["day"])
+    lookback = len(days) - joint.shape[1]
+    ahead = np.arange(lookback, len(days))
+    start = lookback - HISTORY_SHOWN
+    x_hist = np.arange(start, lookback)
+    halo = [path_effects.withStroke(linewidth=4.0, foreground=k.CARD)]
+    candidate = meta["candidates"][0]
+
+    k.setup()
+    fig = k.card(
+        f"Days that move together: the 12-day total's interval holds {k.pct(numbers['joint_total_coverage'])}, "
+        f"not {k.pct(numbers['marginal_total_coverage'])}.",
+        f"Rossmann, {meta['stores']} stores: the next 12 days of log sales from the 28 before and the known days "
+        "ahead (open, promotion, holidays). Top: 40 of 400 paths from a joint normal over the 12 days; bottom: 40 "
+        f"from the same days' forecasts, drawn independently. Store {candidate['store']} from "
+        f"{pd.Timestamp(candidate['origin']):%-d %B %Y}, by a fixed rule; the coverage is over every store and "
+        f"origin, {WORDS.get(numbers['seeds'], numbers['seeds'])} seeds.",
+        height=10.6, footer=3,
+    )
+    top = k.panel(fig, rect=(0.0, 0.60, 0.71, 1.0), head=0.45, tail=0.1, lpad=1.3, rpad=0.1, grid="y")
+    bottom = k.panel(fig, rect=(0.0, 0.215, 0.71, 0.615), head=0.45, tail=0.1, lpad=1.3, rpad=0.1, grid="y")
+    strip = k.panel(fig, rect=(0.0, 0.0, 0.71, 0.225), head=0.04, tail=0.55, lpad=1.3, rpad=0.1)
+    totals_top = k.panel(fig, rect=(0.755, 0.60, 1.0, 1.0), head=0.45, tail=0.1, lpad=0.05, rpad=0.05)
+    totals_bottom = k.panel(fig, rect=(0.755, 0.215, 1.0, 0.615), head=0.45, tail=0.1, lpad=0.05, rpad=0.05)
+
+    reach = max(np.quantile(joint[:SHOWN], 0.995), np.quantile(loose[:SHOWN], 0.995), sales[start:].max()) * 1.08
+    for ax, draws, colour, pale, title in (
+        (top, joint, k.TEAL, k.TEAL_WASH, "Joint normal: each path keeps its level"),
+        (bottom, loose, k.CLAY, k.CLAY_WASH, "Same days, drawn independently: the errors cancel"),
+    ):
+        low, high = np.quantile(draws, [0.1, 0.9], axis=0)
+        ax.fill_between(ahead, low, high, color=pale, lw=0, zorder=1)
+        segments = [np.c_[np.r_[lookback - 1, ahead], np.r_[sales[lookback - 1], path]] for path in draws[:SHOWN]]
+        ax.add_collection(LineCollection(segments, colors=colour, linewidths=0.9, alpha=0.38, zorder=2))
+        # The two shown paths with the highest and the lowest 12-day totals, drawn dark.
+        sums = draws[:SHOWN].sum(axis=1)
+        for pick in (int(np.argmax(sums)), int(np.argmin(sums))):
+            ax.plot(np.r_[lookback - 1, ahead], np.r_[sales[lookback - 1], draws[pick]], color=k.shade(colour, -0.3),
+                    lw=1.9, zorder=3.5)
+        ax.plot(x_hist, sales[start:lookback], color=k.DATA_DARK, lw=1.8, zorder=3)
+        ax.plot(np.r_[lookback - 1, ahead], np.r_[sales[lookback - 1], realized], color=k.INK, lw=2.2, zorder=4)
+        ax.axvline(lookback - 0.5, color=k.HAIR, lw=1.0, zorder=0.5)
+        ax.set_xlim(start - 0.5, len(days) - 0.5)
+        ax.set_ylim(0, reach)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value / 1000:.0f}k" if value else "0"))
+        ax.tick_params(labelbottom=False)
+        k.style(ax, frame="lb", grid="y")
+        k.panel_title(ax, title, color=k.TEAL_DARK if colour == k.TEAL else k.CLAY_DARK, raise_by=0.08)
+    k.value(top, lookback - 1.0, reach * 0.95, "the last 21 days", k.DATA_DARK, ha="right", va="top", size=12)
+    k.value(top, len(days) - 0.7, reach * 0.95, "the next 12, realized", k.INK, ha="right", va="top",
+            size=12).set_path_effects(halo)
+    k.value(bottom, start + 0.3, reach * 0.95, "dark: the paths with the highest and lowest totals of the 40", k.MUTED,
+            ha="left", va="top", size=12).set_path_effects(halo)
+
+    # Under the paths: the days the model is told about, history and ahead alike.
+    marks = (("closed", np.asarray(first["open"]) == 0), ("promotion", np.asarray(first["promo"]) == 1),
+             ("state holiday", np.asarray(first["state_holiday"]) > 0),
+             ("school holiday", np.asarray(first["school_holiday"]) > 0))
+    for row, (label, on) in enumerate(marks):
+        y = len(marks) - 1 - row
+        where = np.flatnonzero(on[start:]) + start
+        colours = [k.INK if day >= lookback else k.DATA_DARK for day in where]
+        strip.scatter(where, np.full(len(where), y), s=34, marker="s", color=colours, lw=0, zorder=2)
+        strip.text(start - 0.9, y, label, fontproperties=k.F.small, color=k.MUTED, ha="right", va="center")
+    strip.axvline(lookback - 0.5, color=k.HAIR, lw=1.0, zorder=0.5)
+    strip.set_xlim(start - 0.5, len(days) - 0.5)
+    strip.set_ylim(-0.7, len(marks) - 0.3)
+    strip.set_yticks([])
+    weeks = [day for day in range(start, len(days)) if days[day].dayofweek == 0]
+    strip.xaxis.set_major_locator(FixedLocator(weeks))
+    strip.set_xticklabels([f"{days[day]:%-d %b}" for day in weeks])
+    k.style(strip, frame="b")
+
+    # Right: the 12-day total from each set of 400 paths, against the realized total.
+    total_joint, total_loose, total = joint.sum(axis=1), loose.sum(axis=1), realized.sum()
+    lo = min(np.quantile(total_joint, 0.005), np.quantile(total_loose, 0.005), total)
+    hi = max(np.quantile(total_joint, 0.995), np.quantile(total_loose, 0.995), total)
+    bins = np.linspace(lo - 0.04 * (hi - lo), hi + 0.04 * (hi - lo), 34)
+    tallest = max(np.histogram(total_joint, bins)[0].max(), np.histogram(total_loose, bins)[0].max())
+    for ax, totals, colour, pale, head in ((totals_top, total_joint, k.TEAL, k.TEAL_PALE, "the 12-day total"),
+                                           (totals_bottom, total_loose, k.CLAY, k.CLAY_PALE, None)):
+        counts, edges = np.histogram(totals, bins)
+        a, b = np.quantile(totals, [0.1, 0.9])
+        centres = (edges[:-1] + edges[1:]) / 2
+        inside = (centres >= a) & (centres <= b)
+        ax.bar(centres, counts, width=np.diff(edges) * 0.86, color=np.where(inside, colour, pale), lw=0, zorder=2)
+        ax.plot([a, b], [-0.07 * tallest] * 2, color=colour, lw=3.0, solid_capstyle="butt", zorder=3)
+        ax.plot([total, total], [-0.04 * tallest, tallest * 1.14], color=k.INK, lw=2.0, zorder=4,
+                solid_capstyle="butt")
+        ax.set_xlim(bins[0], bins[-1])
+        ax.set_ylim(-0.3 * tallest, tallest * 1.25)
+        ax.set_yticks([])
+        ax.tick_params(labelbottom=False)
+        k.style(ax, frame="")
+        held = a <= total <= b
+        k.value(ax, (a + b) / 2, -0.12 * tallest, f"80%: {k.num(a / 1000)}k to {k.num(b / 1000)}k", colour,
+                ha="center", va="top", size=12)
+        k.value(ax, total, tallest * 1.18, "realized" + ("" if held else ", outside"), k.INK, ha="center",
+                va="bottom", size=12).set_path_effects(halo)
+        if head:
+            k.panel_title(ax, head, raise_by=0.08)
+
+    rate = numbers["peak_rate"]
+    k.rich(fig, fig.box.left / fig.box.width, (0.34 + 2 * 0.32 + 0.06) / fig.box.height, [
+        (f"{WORDS.get(numbers['seeds'], numbers['seeds']).capitalize()} seeds, {meta['stores']} stores: "
+         "the total's CRPS ", k.INK, k.F.label),
+        (k.num(numbers["joint_total_crps"]), k.TEAL, k.F.value), (" against ", k.INK, k.F.label),
+        (k.num(numbers["deepar_total_crps"]), k.CLAY, k.F.value), (" for DeepAR. Covariates cut the daily loss from ",
+                                                                 k.INK, k.F.label),
+        (k.num(numbers["lags_daily"]), k.SLATE, k.F.value), (" to ", k.INK, k.F.label),
+        (k.num(numbers["joint_daily"]), k.TEAL, k.F.value), (".", k.INK, k.F.label),
+    ], va="bottom")
+    k.footnote(fig, f"Work in progress. Chronos-2, zero-shot, is level day by day ({numbers['chronos_daily']:.1f} "
+                    f"against {numbers['joint_daily']:.1f}) and draws no paths. DeepAR calibrates the peak day best, "
+                    f"Brier {numbers['deepar_peak_brier']:.3f} against {numbers['best_peak_brier']:.3f}, and none "
+                    f"beats always saying {k.pct(rate)}, {numbers['base_rate_brier']:.3f}.", line=0)
+    k.save(fig, FIGURE)
+
+
+WORDS = {2: "two", 3: "three", 4: "four", 5: "five"}
 
 
 def main(argv):
