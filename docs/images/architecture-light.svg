@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 658" width="936" height="658" role="img" aria-label="Five courses of model choices with one path lit">
 <rect width="936" height="658" rx="10" fill="#fbfaf7"/>
-<path d="M79.8 90.0V100.0Q79.8 106.0 85.8 106.0H366.3Q372.3 106.0 372.3 112.0V142.0M372.3 176.0V186.0Q372.3 192.0 378.3 192.0H581.9Q587.9 192.0 587.9 198.0V228.0M587.9 262.0V314.0Q587.9 320.0 581.9 320.0H495.4Q489.4 320.0 489.4 326.0V356.0M489.4 390.0V400.0Q489.4 406.0 483.4 406.0H166.3Q160.3 406.0 160.3 412.0V442.0" fill="none" stroke="#d4502a" stroke-width="2" stroke-opacity="0.55"/>
+<path d="M79.8 90.0V100.0Q79.8 106.0 85.8 106.0H366.3Q372.3 106.0 372.3 112.0V142.0M372.3 176.0V186.0Q372.3 192.0 378.3 192.0H581.9Q587.9 192.0 587.9 198.0V228.0M587.9 262.0V314.0Q587.9 320.0 581.9 320.0H495.4Q489.4 320.0 489.4 326.0V356.0M489.4 390.0V400.0Q489.4 406.0 483.4 406.0H166.3Q160.3 406.0 160.3 412.0V442.0" fill="none" stroke="#147a72" stroke-width="2" stroke-opacity="0.55"/>
 <text x="34.0" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17" stroke="#fbfaf7" stroke-width="5" stroke-linejoin="round" paint-order="stroke">ENCODE</text>
 <text x="97.4" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52" stroke="#fbfaf7" stroke-width="5" stroke-linejoin="round" paint-order="stroke">num_embeddings, categorical_embeddings, cyclical</text>
-<rect x="34.0" y="56.0" width="91.7" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<rect x="34.0" y="56.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M37.0 57.0H122.7" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="79.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">piecewise</text>
 <rect x="132.7" y="56.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
@@ -35,7 +35,7 @@
 <rect x="216.8" y="142.0" width="106.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
 <path d="M219.8 143.0H320.1" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="269.9" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">transformer</text>
-<rect x="330.1" y="142.0" width="84.4" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<rect x="330.1" y="142.0" width="84.4" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M333.1 143.0H411.5" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="372.3" y="163.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">additive</text>
 <rect x="421.5" y="142.0" width="47.9" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
@@ -67,7 +67,7 @@
 <rect x="370.4" y="228.0" width="135.5" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
 <path d="M373.4 229.0H502.9" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="438.1" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">quantile_spline</text>
-<rect x="512.9" y="228.0" width="150.1" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<rect x="512.9" y="228.0" width="150.1" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M515.9 229.0H660.0" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="587.9" y="249.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">negative_binomial</text>
 <rect x="34.0" y="270.0" width="69.8" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
@@ -105,7 +105,7 @@
 <rect x="377.7" y="356.0" width="62.5" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
 <path d="M380.7 357.0H437.2" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="408.9" y="377.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#147a72">noisy</text>
-<rect x="447.2" y="356.0" width="84.4" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<rect x="447.2" y="356.0" width="84.4" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M450.2 357.0H528.6" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="489.4" y="377.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">censored</text>
 <rect x="538.6" y="356.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#147a72" stroke-width="1"/>
@@ -119,7 +119,7 @@
 <rect x="34.0" y="442.0" width="84.4" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
 <path d="M37.0 443.0H115.4" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="76.2" y="463.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">constant</text>
-<rect x="125.4" y="442.0" width="69.8" height="34.0" rx="3" fill="#d4502a" stroke="#d4502a" stroke-width="1"/>
+<rect x="125.4" y="442.0" width="69.8" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M128.4 443.0H192.2" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="160.3" y="463.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">cosine</text>
 <rect x="202.2" y="442.0" width="69.8" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
@@ -138,7 +138,7 @@
 <path d="M614.6 443.0H714.9" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="664.7" y="463.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">grid search</text>
 <path d="M34.0 494.0H901.7" stroke="#e9e4dc" stroke-width="1"/>
-<text x="34.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#d4502a">ASRRegressor</text>
+<text x="34.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">ASRRegressor</text>
 <text x="125.2" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(</text>
 <text x="34.0" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">    num_embeddings</text>
 <text x="170.8" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">=</text>

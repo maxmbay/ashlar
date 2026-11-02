@@ -402,8 +402,8 @@ def draw():
         f"{k.pct(bike['negative_binomial']['coverage80'])} against {k.pct(bike['lightgbm_poisson_nb']['coverage80'])} "
         f"for LightGBM's Poisson mean with one dispersion fitted on validation "
         f"({k.pct(bike['lightgbm_poisson']['coverage80'])} for the Poisson alone); CRPS "
-        f"{bike['negative_binomial']['crps']:.1f} against {bike['lightgbm_poisson_nb']['crps']:.1f}. Claims: NLL "
-        f"of the log cost {s['mixture']['nll']:.3f} against {s['catboost_uncertainty']['nll']:.3f} for CatBoost "
+        f"{bike['negative_binomial']['crps']:.1f} against {bike['lightgbm_poisson_nb']['crps']:.1f}. Claims: CRPS "
+        f"of the log cost {s['mixture']['crps']:.3f} against {s['catboost_uncertainty']['crps']:.3f} for CatBoost "
         f"RMSEWithUncertainty. Homes: CRPS {c['mixture']['crps']:.3f} against {c['lightgbm_normal']['crps']:.3f} "
         f"for LightGBM's mean with a constant normal, the better of the two trees here.",
     )

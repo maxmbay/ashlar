@@ -71,7 +71,7 @@ ARTIFACTS = Path(__file__).resolve().parent / "artifacts"
 
 DPI = 200
 WIDTH = 13.8  # inches; GitHub shows a full-width figure at about a third of its pixels
-THUMB_SIZE = (6.4, 4.0)
+THUMB_SIZE = (6.4, 3.4)
 MAX_BYTES = 450_000
 
 
@@ -170,8 +170,6 @@ class Fonts:
     panel: FontProperties
     mono: FontProperties
     mono_bold: FontProperties
-    thumb_label: FontProperties
-    thumb_value: FontProperties
 
 
 F: Fonts | None = None
@@ -197,8 +195,6 @@ def setup() -> Fonts:
         panel=font("SemiBold", 15),
         mono=font("Regular", 12.5, mono=True),
         mono_bold=font("SemiBold", 12.5, mono=True),
-        thumb_label=font("Bold", 30),
-        thumb_value=font("Medium", 19),
     )
     plt.rcParams.update(
         {
@@ -559,10 +555,13 @@ def stacks(mass, courses: int = 12):
 
 
 def thumb(slug: str, label: str, number: list | str, draw_fn, *, out: Path | None = None):
-    """A gallery thumbnail: the core mark only, a three-word ``label``, and one number against the baseline.
+    """A gallery thumbnail: the core mark only, on the card, with no text.
 
-    ``number`` is plain text or rich segments ``[(text, color), ...]``; ``draw_fn(ax)`` draws the mark in
-    the space left. Written to ``docs/images/readme/thumbs/<slug>.png``.
+    ``label`` (about three words) and ``number`` (the result against the baseline, plain text or rich
+    segments ``[(text, color), ...]``) record what the thumbnail stands for. They are not drawn: the
+    gallery prints its link text and caption under the image, where they stay readable on a phone,
+    so baked-in text would only repeat them at a tenth of the size. ``draw_fn(ax)`` draws the mark.
+    Written to ``docs/images/readme/thumbs/<slug>.png``.
     """
     setup()
     w, h = THUMB_SIZE
@@ -571,12 +570,8 @@ def thumb(slug: str, label: str, number: list | str, draw_fn, *, out: Path | Non
     fig.add_artist(FancyBboxPatch((0.02, 0.02), w - 0.04, h - 0.04, boxstyle="round,pad=0,rounding_size=0.14",
                                   transform=fig.dpi_scale_trans, facecolor=CARD, edgecolor=HAIR, linewidth=1.0,
                                   zorder=-100))
-    fig.text(0.34 / w, 1 - 0.3 / h, label, fontproperties=F.thumb_label, color=INK, ha="left", va="top")
-    if isinstance(number, str):
-        fig.text(0.34 / w, 0.3 / h, number, fontproperties=F.thumb_value, color=MUTED, ha="left", va="bottom")
-    else:
-        rich(fig, 0.34 / w, 0.3 / h, [(t, c, F.thumb_value) for t, c in number], va="bottom")
-    ax = fig.add_axes([0.34 / w, 0.95 / h, 1 - 0.68 / w, 1 - 1.95 / h])
+    pad = 0.36
+    ax = fig.add_axes([pad / w, pad / h, 1 - 2 * pad / w, 1 - 2 * pad / h])
     style(ax, frame="")
     ax.set_xticks([])
     ax.set_yticks([])

@@ -3,8 +3,9 @@
 A model is one set of keyword arguments, and its label says what was observed.
 The diagram lays them out as courses of stone blocks, one course per slot plus
 one for the label, and lights the path that the code under it picks. Colors
-follow the logo: clay for the lit path, teal for the heads that return a
-distribution and the labels that need one, pale stone for the rest.
+follow the README's figures, where teal is Ashlar's own and clay a baseline: the
+lit path is solid teal, the heads that return a distribution and the labels that
+need one are outlined in teal, and the rest is pale stone.
 
     python examples/architecture.py
 
@@ -27,7 +28,6 @@ INK = "#1b1a17"
 MUTED = "#5f5a52"
 FLOOR = "#e9e4dc"
 STONE = "#f3efe8"
-CLAY = "#d4502a"
 TEAL = "#147a72"
 
 CH = 7.3  # px per character of the 12px mono label
@@ -122,7 +122,7 @@ COURSES = [
 ]
 
 CODE = [
-    [("ASRRegressor", CLAY), ("(", MUTED)],
+    [("ASRRegressor", INK), ("(", MUTED)],
     [("    num_embeddings", INK), ("=", MUTED), ('"piecewise"', TEAL), (",", MUTED)],
     [("    backbone", INK), ("=", MUTED), ('"additive"', TEAL), (",", MUTED)],
     [("    task", INK), ("=", MUTED), ('"negative_binomial"', TEAL), (",", MUTED)],
@@ -148,8 +148,8 @@ def _escape(text: str) -> str:
 
 
 def _block(x: float, y: float, w: float, label: str, lit: bool, accent: bool) -> list[str]:
-    fill = CLAY if lit else STONE
-    stroke = CLAY if lit else (TEAL if accent else FLOOR)
+    fill = TEAL if lit else STONE
+    stroke = TEAL if lit else (TEAL if accent else FLOOR)
     text = "#ffffff" if lit else (TEAL if accent else MUTED)
     weight = 500 if lit else 400
     parts = [
@@ -226,7 +226,7 @@ def draw(theme: str) -> str:
             else f"M{px:.1f} {py + BH:.1f}V{cy:.1f}"
         )
     out.append(
-        f'<path d="{"".join(path)}" fill="none" stroke="{CLAY}" stroke-width="2" stroke-opacity="0.55"/>'
+        f'<path d="{"".join(path)}" fill="none" stroke="{TEAL}" stroke-width="2" stroke-opacity="0.55"/>'
     )
 
     for row in rows:
