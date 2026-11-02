@@ -31,20 +31,23 @@ same splits, samples, probes, and ladders:
   exceedance rises with its mean, so the constrained one is dominance-safe
   by construction; the question is its likelihood against the constrained
   ``negative_binomial``.
-- the log cost per claim: one LightGBM quantile model per level of
-  ``GBM_LEVELS``, with and without the same constraint, the boosted way to a
-  distribution. Each level is monotone on its own; the levels are separate
-  models, so they can cross. Reported: the mean pinball loss over the levels
-  on the test claims, against ``quantile_spline`` with and without
-  ``monotone`` (refitted here, so their quantiles can be scored), the share
-  of probe points (a policy at one level of the sweep) where some level's
-  quantile is below the level under it, and the dominance test above on the
-  CDF read from the levels, sorted where they cross and linear between them.
+- the log cost per claim: quantile regression at each level of
+  ``GBM_LEVELS``, the boosted way to a distribution. LightGBM refuses
+  ``monotone_constraints`` with its quantile objective, so it runs without
+  them, one model per level. XGBoost takes them: one multi-quantile model
+  (``objective="reg:quantileerror"``, a tree per level per round), with and
+  without the constraint. Reported: the mean pinball loss over the levels on
+  the test claims, against ``quantile_spline`` with and without ``monotone``
+  (refitted here, so their quantiles can be scored), the share of test
+  claims and of probe points (a policy at one level of the sweep) where some
+  level's quantile is below the level under it, and the dominance test above
+  on the CDF read from the levels, sorted where they cross and linear
+  between them.
 
 Each LightGBM model trains at learning rate 0.05 with up to 4,000 trees,
 early-stopped after 100 rounds on a random 20% of its training rows, and
 takes the best of a small grid of leaf counts and leaf sizes by validation
-loss.
+loss; XGBoost the same, with a grid of depths and smallest leaf weights.
 
 Run with::
 
@@ -74,6 +77,8 @@ from ashlar import ASRRegressor  # noqa: E402
 RESULTS = Path(os.environ.get("ASHLAR_BENCH", "/tmp/ashlar-bench")) / "monotone-fremtpl2.json"
 GBM_RESULTS = RESULTS.with_name("monotone-fremtpl2-gbm.json")
 GBM_LEVELS = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+# (depth, smallest leaf weight) tried for XGBoost's quantile models.
+XGB_GRID = ((2, 1000), (3, 100), (5, 20), (7, 400))
 FEATURES = ("BonusMalus", "VehPower")
 GRID = 12
 PROBE_ROWS = 2000
@@ -184,11 +189,11 @@ def run(seeds="3", rows="200000"):
                 RESULTS.write_text(json.dumps(results, indent=1))
 
 
-# ---------------------------------------------------------------- LightGBM, what a GBM user would build
+# ---------------------------------------------------------------- boosted trees, what a GBM user would build
 
 
 def _constraints(constrained: bool) -> list[int]:
-    """LightGBM's ``monotone_constraints``, one per column of ``NUMERIC + CATEGORICAL``."""
+    """``monotone_constraints`` for LightGBM or XGBoost, one per column of ``NUMERIC + CATEGORICAL``."""
     return [CONSTRAINT.get(name, 0) if constrained else 0 for name in NUMERIC + CATEGORICAL]
 
 
@@ -251,31 +256,54 @@ class _QuantileView:
 
 
 class GBMQuantiles:
-    """One LightGBM quantile model per level of ``GBM_LEVELS``, with or without the constraint."""
+    """Boosted quantile regression at each of ``levels``: LightGBM (one model per level, no constraint, which
+    LightGBM refuses for quantiles) or XGBoost (one multi-quantile model, with or without the constraint)."""
 
-    def __init__(self, frame, y, seed: int, constrained: bool, levels=GBM_LEVELS):
+    def __init__(self, frame, y, seed: int, constrained: bool, levels=GBM_LEVELS, library: str = "xgboost"):
+        if library == "lightgbm" and constrained:
+            raise ValueError("LightGBM refuses monotone_constraints with the quantile objective.")
         self.categories = {name: sorted(frame[name].unique()) for name in CATEGORICAL}
         self.levels = tuple(levels)
+        self.library = library
         x = gbm_frame(frame, self.categories)
         inner = np.random.default_rng(seed).random(len(frame)) < 0.2
-        self.models, self.choices = [], []
-        for level in self.levels:
-            best = None
-            for leaves, smallest in GBM_GRID:
-                model = _lightgbm(
-                    "quantile", (x[~inner], y[~inner]), (x[inner], y[inner]), seed, leaves, smallest, alpha=level,
-                    monotone_constraints=_constraints(constrained), monotone_constraints_method="advanced",
-                )
-                score = float(np.mean(pinball(y[inner], model.predict(x[inner]), level)))
-                if best is None or score < best[0]:
-                    best = (score, model, (leaves, smallest))
-            self.models.append(best[1])
-            self.choices.append(best[2])
+        fit, val = (x[~inner], y[~inner]), (x[inner], y[inner])
+        if library == "lightgbm":
+            self.models, self.choices = [], []
+            for level in self.levels:
+                best = None
+                for leaves, smallest in GBM_GRID:
+                    model = _lightgbm("quantile", fit, val, seed, leaves, smallest, alpha=level)
+                    score = float(np.mean(pinball(val[1], model.predict(val[0]), level)))
+                    if best is None or score < best[0]:
+                        best = (score, model, (leaves, smallest))
+                self.models.append(best[1])
+                self.choices.append(best[2])
+            return
+        import xgboost
+
+        best = None
+        for depth, weight in XGB_GRID:
+            model = xgboost.XGBRegressor(
+                objective="reg:quantileerror", quantile_alpha=np.asarray(self.levels), n_estimators=4000,
+                learning_rate=0.05, max_depth=depth, min_child_weight=weight, early_stopping_rounds=100,
+                enable_categorical=True, tree_method="hist", max_cat_to_onehot=1, random_state=seed,
+                n_jobs=int(os.environ.get("GBM_THREADS", "4")),
+                monotone_constraints=tuple(_constraints(constrained)),
+            )
+            model.fit(*fit, eval_set=[val], verbose=False)
+            q = model.predict(val[0]).T
+            score = float(np.mean([pinball(val[1], q[i], level).mean() for i, level in enumerate(self.levels)]))
+            if best is None or score < best[0]:
+                best = (score, model, (depth, weight))
+        _score, self.model, self.choices = best
 
     def quantiles(self, frame) -> np.ndarray:
         """``(levels, rows)``, as the models give them, crossings and all."""
         x = gbm_frame(frame, self.categories)
-        return np.stack([model.predict(x) for model in self.models])
+        if self.library == "lightgbm":
+            return np.stack([model.predict(x) for model in self.models])
+        return np.asarray(self.model.predict(x)).reshape(len(x), -1).T
 
     def predict_dist(self, frame):
         return _QuantileView(self.quantiles(frame), self.levels)
@@ -300,7 +328,7 @@ def crossings(quantiles_of, probe, train, feature: str = "BonusMalus") -> dict:
 
 
 def gbm(seeds="3", rows="200000"):
-    """LightGBM against the constrained heads, on ``run``'s splits; writes ``monotone-fremtpl2-gbm.json``."""
+    """The boosted baselines and ``quantile_spline``, on ``run``'s splits; writes ``monotone-fremtpl2-gbm.json``."""
     frame = policies()
     results = json.loads(GBM_RESULTS.read_text()) if GBM_RESULTS.exists() else []
     for seed in range(int(seeds)):
@@ -322,13 +350,14 @@ def gbm(seeds="3", rows="200000"):
             results.append(record)
             print(json.dumps(record), flush=True)
         log_cost = np.log(claimed_train["S"].to_numpy())
-        for constrained in (False, True):
+        for library, constrained in (("lightgbm", False), ("xgboost", False), ("xgboost", True)):
             start = time.process_time()
-            model = GBMQuantiles(claimed_train, log_cost, seed, constrained)
+            model = GBMQuantiles(claimed_train, log_cost, seed, constrained, library=library)
             seconds = time.process_time() - start
             q = model.quantiles(x_claimed)
             record = {
-                "seed": seed, "outcome": "severity", "model": "LightGBM quantiles", "monotone": constrained,
+                "seed": seed, "outcome": "severity", "model": f"{'LightGBM' if library == 'lightgbm' else 'XGBoost'} quantiles",
+                "monotone": constrained,
                 "pinball": float(np.mean([pinball(y_claimed, q[i], level).mean() for i, level in enumerate(GBM_LEVELS)])),
                 "pinball by level": [float(pinball(y_claimed, q[i], level).mean()) for i, level in enumerate(GBM_LEVELS)],
                 "test crossing": float(np.mean(np.any(np.diff(q, axis=0) < -1e-9, axis=0))),
@@ -338,6 +367,7 @@ def gbm(seeds="3", rows="200000"):
             }
             results.append(record)
             print(json.dumps(record), flush=True)
+        for constrained in (False, True):
             start = time.process_time()
             spline = ASRRegressor(task="quantile_spline", monotone=CONSTRAINT if constrained else None, random_state=seed)
             spline.fit(claimed_train[NUMERIC + CATEGORICAL].reset_index(drop=True), log_cost)

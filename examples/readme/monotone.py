@@ -7,18 +7,22 @@ Two stages, run from the repository root::
 
 ``compute`` takes split 0 of ``examples/benchmark_monotone.py`` (seed 0: the
 log cost per claim of every training policy with a claim, 2,000 test
-policies with a claim as probes) and fits, as that benchmark does:
+policies with a claim as probes) and fits, as that benchmark's ``gbm`` stage
+does:
 
 - ``quantile_spline``, without and with ``monotone={"BonusMalus": 1}``;
-- one LightGBM quantile model per level of ``GBM_LEVELS``, without and with
-  ``monotone_constraints`` rising in bonus-malus (the benchmark's ``gbm``
-  stage).
+- LightGBM quantile regression, one model per level of ``LEVELS``, without a
+  constraint (LightGBM refuses ``monotone_constraints`` with its quantile
+  objective);
+- XGBoost quantile regression, one model for every level of ``LEVELS``,
+  without and with ``monotone_constraints`` rising in bonus-malus.
 
 For the first ``POLICIES`` probe policies it sets bonus-malus to every value
 of ``BONUS_MALUS`` and writes, under ``examples/readme/artifacts/monotone/``,
 ``fans.json``: each model's quantiles of the cost per claim (in euros) along
-that sweep, and the splines' ``P(cost > t)`` for the thresholds in
-``THRESHOLDS``, with the split's scores.
+that sweep, the splines' ``P(cost > t)`` for the thresholds in
+``THRESHOLDS``, the split's scores, and the training claims' bonus-malus
+histogram.
 """
 
 from __future__ import annotations
@@ -45,8 +49,14 @@ ARTIFACTS = ROOT / "examples" / "readme" / "artifacts" / NAME
 SEED = 0
 POLICIES = 8
 BONUS_MALUS = np.arange(50.0, 200.0001, 2.0)
-LEVELS = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+LEVELS = GBM_LEVELS
+BASELINES = (  # name, library, constrained
+    ("LightGBM quantiles", "lightgbm", False),
+    ("XGBoost quantiles", "xgboost", False),
+    ("XGBoost quantiles, monotone", "xgboost", True),
+)
 THRESHOLDS = (500.0, 1000.0, 2000.0, 5000.0, 10000.0)
+HISTOGRAM_EDGES = np.arange(49.0, 231.0, 2.0)
 
 
 def _round(values, digits: int = 5):
@@ -75,27 +85,28 @@ def compute() -> None:
     print(f"{len(x_train):,} training and {len(x_test):,} test claims (split {SEED})", flush=True)
 
     models, scores = {}, {}
+
+    def quantile_scores(q) -> dict:
+        return {
+            "pinball": float(np.mean([pinball(y_test, q[i], level).mean() for i, level in enumerate(LEVELS)])),
+            "test crossing": float(np.mean(np.any(np.diff(q, axis=0) < -1e-9, axis=0))),
+        }
+
     for constrained in (False, True):
         name = f"quantile_spline{', monotone' if constrained else ''}"
         start = time.process_time()
         models[name] = ASRRegressor(
             task="quantile_spline", monotone=CONSTRAINT if constrained else None, random_state=SEED
         ).fit(x_train, y_train)
-        q = models[name].predict_quantiles(x_test, list(LEVELS)).T
-        scores[name] = {
-            "nll": float(-np.mean(models[name].log_prob(x_test, y_test))),
-            "pinball": float(np.mean([pinball(y_test, q[i], level).mean() for i, level in enumerate(LEVELS)])),
-            "cpu": time.process_time() - start,
-        }
-        name = f"LightGBM quantiles{', monotone' if constrained else ''}"
+        scores[name] = quantile_scores(models[name].predict_quantiles(x_test, list(LEVELS)).T)
+        scores[name]["nll"] = float(-np.mean(models[name].log_prob(x_test, y_test)))
+        scores[name]["cpu"] = time.process_time() - start
+    for name, library, constrained in BASELINES:
         start = time.process_time()
-        models[name] = GBMQuantiles(claimed_train, y_train, SEED, constrained, levels=LEVELS)
-        q = models[name].quantiles(x_test)
-        scores[name] = {
-            "pinball": float(np.mean([pinball(y_test, q[i], level).mean() for i, level in enumerate(LEVELS)])),
-            "test crossing": float(np.mean(np.any(np.diff(q, axis=0) < -1e-9, axis=0))),
-            "cpu": time.process_time() - start,
-        }
+        models[name] = GBMQuantiles(claimed_train, y_train, SEED, constrained, levels=LEVELS, library=library)
+        scores[name] = quantile_scores(models[name].quantiles(x_test))
+        scores[name]["cpu"] = time.process_time() - start
+        scores[name]["choices"] = models[name].choices
     for name, value in scores.items():
         print(name, json.dumps(value), flush=True)
 
@@ -109,7 +120,7 @@ def compute() -> None:
             "exceedance": {},
         }
         for name, model in models.items():
-            if name.startswith("LightGBM"):
+            if isinstance(model, GBMQuantiles):
                 q = model.quantiles(frame)
             else:
                 q = model.predict_quantiles(frame, list(LEVELS)).T
@@ -128,6 +139,10 @@ def compute() -> None:
         "training_claims": len(x_train),
         "bonus_malus_share_at_or_above": {str(int(v)): float(np.mean(claimed_train["BonusMalus"] >= v))
                                           for v in (100, 125, 150, 200)},
+        "bonus_malus_histogram": {
+            "edges": _round(HISTOGRAM_EDGES),
+            "claims": np.histogram(claimed_train["BonusMalus"], bins=HISTOGRAM_EDGES)[0].tolist(),
+        },
     }))
     print(f"{(out / 'fans.json')}: {(out / 'fans.json').stat().st_size / 1024:.0f} KB", flush=True)
 
