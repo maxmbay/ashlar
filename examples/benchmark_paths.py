@@ -31,8 +31,16 @@ Models:
   the same days with the same covariates and the store's type and
   assortment, whose autoregressive draws are paths, scored raw.
 
+Draws of ``log1p`` sales are capped at twice the largest day of sales in the
+training rows before they become sales. A normal on log sales can give a row
+unlike any it trained on a spread so wide that its upper draws are billions a
+day: store 876, which closed for refurbishment in July 2015 after its best
+weeks, got a standard deviation of 31 on log sales on its first closed days,
+and its rows alone decided the mean daily loss of the first run.
+
 Per day, in sales: the mean quantile loss over levels 0.1 to 0.9 (twice the
-pinball loss, an approximation of the CRPS) and the 80% interval's coverage.
+pinball loss, an approximation of the CRPS), the median over row-days of that
+loss, the mean without the cap, and the 80% interval's coverage.
 Per path, in sales: the 12-day total and the peak day, each with its CRPS
 (from 400 draws), its 80% interval's coverage and width, and the Brier score
 and expected calibration error (10 bins) of an exceedance,
@@ -77,8 +85,10 @@ N_DRAWS = 400
 TRAIN_END = pd.Timestamp("2015-02-16")
 CAL_START, CAL_END = pd.Timestamp("2015-02-28"), pd.Timestamp("2015-05-19")
 TEST_START = pd.Timestamp("2015-05-31")
-# Draws of log1p sales are capped here before expm1, about 485 million a day, so a rare wild draw stays finite.
-CEILING = 20.0
+# Draws of log1p sales are capped before expm1 at this many times the largest day of sales in the training rows.
+CAP_FACTOR = 2.0
+# The uncapped scores only keep draws finite: about 485 million a day.
+GUARD = 20.0
 KNOWN = ["open", "promo", "state_holiday", "school_holiday", "weekday"]
 STATIC = ["store_type", "assortment", "competition", "promo2"]
 # Numeric known covariates for Chronos-2 and DeepAR, which read the calendar themselves.
@@ -91,18 +101,22 @@ MODELS = {
 }
 
 
-def total(y):
-    """The horizon's total sales, from ``log1p`` sales."""
+def cap_of(train) -> float:
+    """The cap on draws of ``log1p`` sales: ``CAP_FACTOR`` times the largest day of sales in the training rows."""
+    return float(np.log1p(CAP_FACTOR * np.expm1(np.nanmax(train.Y))))
+
+
+def path_targets(cap: float):
+    """The path functions to calibrate, from ``log1p`` sales capped at ``cap``: the total and the peak day, in sales."""
     import jax.numpy as jnp
 
-    return jnp.sum(jnp.expm1(jnp.minimum(jnp.asarray(y), CEILING)), axis=-1)
+    def total(y):
+        return jnp.sum(jnp.expm1(jnp.minimum(jnp.asarray(y), cap)), axis=-1)
 
+    def peak_sales(y):
+        return jnp.expm1(jnp.minimum(peak(jnp.asarray(y)), cap))
 
-def peak_sales(y):
-    """The horizon's largest day of sales, from ``log1p`` sales."""
-    import jax.numpy as jnp
-
-    return jnp.expm1(jnp.minimum(peak(jnp.asarray(y)), CEILING))
+    return total, peak_sales
 
 
 def long_table(stores: int, seed: int = 0) -> pd.DataFrame:
@@ -174,27 +188,37 @@ def calibration_error(probability: np.ndarray, event: np.ndarray, bins: int = 10
 
 def daily_quantiles(quantiles: np.ndarray, truth: np.ndarray) -> dict:
     """Per-day scores in sales from quantiles ``(rows, steps, levels)`` at ``LEVELS``."""
+    error = truth[..., None] - quantiles
+    loss = np.mean(2.0 * np.maximum(LEVELS * error, (LEVELS - 1.0) * error), axis=-1)
     return {
-        "quantile_loss": quantile_loss(quantiles, truth),
+        "quantile_loss": float(loss.mean()),
+        "median_loss": float(np.median(loss)),
         "coverage": float(np.mean((quantiles[..., 0] <= truth) & (truth <= quantiles[..., -1]))),
-        "by_step": [quantile_loss(quantiles[:, step], truth[:, step]) for step in range(HORIZON)],
+        "by_step": loss.mean(axis=0).tolist(),
+        "median_by_step": np.median(loss, axis=0).tolist(),
     }
 
 
-def daily_draws(draws: np.ndarray, y_log: np.ndarray) -> dict:
-    """Per-day scores in sales from draws of ``log1p`` sales ``(n, rows, steps)``."""
-    quantiles = np.moveaxis(np.quantile(np.expm1(np.minimum(draws, CEILING)), LEVELS, axis=0), 0, -1)
-    return daily_quantiles(quantiles, np.expm1(y_log))
+def _sales_quantiles(draws: np.ndarray, cap: float) -> np.ndarray:
+    return np.moveaxis(np.quantile(np.expm1(np.minimum(draws, cap)), LEVELS, axis=0), 0, -1)
 
 
-def path_scores(draws: np.ndarray, y_log: np.ndarray, lags_log: np.ndarray, calibrated=None) -> dict:
-    """Scores of the total and the peak from draws of ``log1p`` paths ``(n, rows, steps)``.
+def daily_draws(draws: np.ndarray, y_log: np.ndarray, cap: float) -> dict:
+    """Per-day scores in sales from draws of ``log1p`` sales ``(n, rows, steps)``, capped at ``cap``."""
+    truth = np.expm1(y_log)
+    scores = daily_quantiles(_sales_quantiles(draws, cap), truth)
+    scores["uncapped_quantile_loss"] = quantile_loss(_sales_quantiles(draws, GUARD), truth)
+    return scores
+
+
+def path_scores(draws: np.ndarray, y_log: np.ndarray, lags_log: np.ndarray, cap: float, calibrated=None) -> dict:
+    """Scores of the total and the peak from draws of ``log1p`` paths ``(n, rows, steps)``, capped at ``cap``.
 
     ``calibrated`` maps ``"total"`` and ``"peak"`` to a function of the
     rows' thresholds that returns the calibrated 80% interval ``(rows, 2)``
     and exceedance probability ``(rows,)``.
     """
-    sales = np.expm1(np.minimum(draws, CEILING))
+    sales = np.expm1(np.minimum(draws, cap))
     truth = np.expm1(y_log)
     recent = np.expm1(lags_log)
     out = {}
@@ -238,6 +262,8 @@ def run_fit(stores: int, seed: int, models, epochs):
         if path.exists():
             continue
         train, calibration, test = frames(data, covariates=name != "no_covariates")
+        cap = cap_of(train)
+        total, peak_sales = path_targets(cap)
         settings = dict(MODELS[name], random_state=seed)
         if epochs is not None:
             settings["max_epochs"] = epochs
@@ -257,19 +283,20 @@ def run_fit(stores: int, seed: int, models, epochs):
 
         result = {
             "seconds": seconds,
+            "cap": cap,
             "train_rows": int(len(train.X)),
             "calibration_rows": int(len(calibration.X)),
             "test_rows": int(len(test.X)),
             "nll": float(-np.mean(np.asarray(model.log_prob(test.X, test.Y)))),
-            "daily": daily_draws(draws, test.Y),
-            "paths": path_scores(draws, test.Y, _lags(test), {"total": calibrated(total), "peak": calibrated(peak_sales)}),
+            "daily": daily_draws(draws, test.Y, cap),
+            "paths": path_scores(draws, test.Y, _lags(test), cap, {"total": calibrated(total), "peak": calibrated(peak_sales)}),
         }
         if name == "joint":
             import jax
 
             loose = Independent(model.predict_dist(test.X).marginals())
             loose = np.asarray(loose.sample(jax.random.PRNGKey(seed), (N_DRAWS,)), dtype=np.float64)
-            result["joint_marginals"] = {"daily": daily_draws(loose, test.Y), "paths": path_scores(loose, test.Y, _lags(test))}
+            result["joint_marginals"] = {"daily": daily_draws(loose, test.Y, cap), "paths": path_scores(loose, test.Y, _lags(test), cap)}
         path.write_text(json.dumps(result))
         print(name, stores, seed, json.dumps(result), flush=True)
 
@@ -293,7 +320,8 @@ def run_chronos(stores: int, seed: int):
         return
     ROOT.mkdir(parents=True, exist_ok=True)
     data = long_table(stores, seed)
-    _train, _calibration, test = frames(data, covariates=True)
+    train, _calibration, test = frames(data, covariates=True)
+    cap = cap_of(train)
     pipeline = BaseChronosPipeline.from_pretrained("amazon/chronos-2", device_map="cpu")
     table = data.assign(target=np.expm1(data["sales"]))
     table[REFERENCE_COVARIATES] = table[REFERENCE_COVARIATES].fillna(0.0)
@@ -315,7 +343,14 @@ def run_chronos(stores: int, seed: int):
         values = forecast[_quantile_columns(forecast, levels)].to_numpy(np.float64).reshape(-1, HORIZON, len(levels))
         position = {store: index for index, store in enumerate(forecast["store"].to_numpy()[::HORIZON])}
         quantiles[rows] = values[[position[name] for name in names]]
-    result = {"seconds": time.perf_counter() - started, "test_rows": int(len(test.X)), "daily": daily_quantiles(quantiles, np.expm1(test.Y))}
+    # The same cap as the draws of the other models, though Chronos-2's quantiles of sales come nowhere near it.
+    quantiles = np.minimum(quantiles, np.expm1(cap))
+    result = {
+        "seconds": time.perf_counter() - started,
+        "cap": cap,
+        "test_rows": int(len(test.X)),
+        "daily": daily_quantiles(quantiles, np.expm1(test.Y)),
+    }
     path.write_text(json.dumps(result))
     print("chronos2", stores, seed, json.dumps(result), flush=True)
 
@@ -331,7 +366,8 @@ def run_deepar(stores: int, seed: int, epochs):
         return
     ROOT.mkdir(parents=True, exist_ok=True)
     data = long_table(stores, seed)
-    _train, _calibration, test = frames(data, covariates=True)
+    train_frame, _calibration, test = frames(data, covariates=True)
+    cap = cap_of(train_frame)
     start = data["day"].min()
     kinds = {name: sorted(data[name].dropna().unique()) for name in ("store_type", "assortment")}
     series = {}
@@ -377,9 +413,10 @@ def run_deepar(stores: int, seed: int, epochs):
     draws = np.stack([forecast.samples for forecast in predictor.predict(rows, num_samples=N_DRAWS)], axis=1).astype(np.float64)
     result = {
         "seconds": seconds,
+        "cap": cap,
         "test_rows": int(len(test.X)),
-        "daily": daily_draws(draws, test.Y),
-        "paths": path_scores(draws, test.Y, _lags(test)),
+        "daily": daily_draws(draws, test.Y, cap),
+        "paths": path_scores(draws, test.Y, _lags(test), cap),
     }
     path.write_text(json.dumps(result))
     print("deepar", stores, seed, json.dumps(result), flush=True)
@@ -410,14 +447,17 @@ def report(stores: int, seeds):
         if runs:
             rows[name] = runs
     print(f"{stores} stores, seeds {', '.join(map(str, seeds))}; ± one standard error over seeds.\n")
-    print("| Model | Daily quantile loss | Daily 80% coverage | Joint NLL | Fit seconds |")
-    print("|---|---:|---:|---:|---:|")
+    print("| Model | Daily quantile loss | Median row-day | Uncapped | Daily 80% coverage | Joint NLL | Fit seconds |")
+    print("|---|---:|---:|---:|---:|---:|---:|")
     for name, runs in rows.items():
-        loss = _mean_se([run["daily"]["quantile_loss"] for run in runs])
-        coverage = np.mean([run["daily"]["coverage"] for run in runs])
+        daily = [run["daily"] for run in runs]
+        loss = _mean_se([day["quantile_loss"] for day in daily])
+        median = f"{np.mean([day['median_loss'] for day in daily]):,.1f}"
+        uncapped = _mean_se([day["uncapped_quantile_loss"] for day in daily]) if "uncapped_quantile_loss" in daily[0] else "—"
+        coverage = np.mean([day["coverage"] for day in daily])
         nll = f"{np.mean([run['nll'] for run in runs]):.3f}" if "nll" in runs[0] else "—"
         seconds = f"{np.mean([run['seconds'] for run in runs]):.0f}" if "seconds" in runs[0] else "—"
-        print(f"| {name} | {loss} | {coverage:.1%} | {nll} | {seconds} |")
+        print(f"| {name} | {loss} | {median} | {uncapped} | {coverage:.1%} | {nll} | {seconds} |")
     print()
     print("| Model | Path | CRPS | 80% coverage | Width | Brier | Calibration error | Mean P, events |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
