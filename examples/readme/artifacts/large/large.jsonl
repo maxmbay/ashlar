@@ -145,3 +145,7 @@
 {"table": "airlines", "model": "lightgbm", "variant": "", "seed": 2, "seconds": 4.2, "trees": 788, "accuracy": 0.6691602473187056, "log_loss": 0.6056208145593607, "auc": 0.7221519332004627}
 {"table": "airlines", "model": "xgboost", "variant": "", "seed": 2, "seconds": 3.0, "trees": 395, "accuracy": 0.6701150384233896, "log_loss": 0.6066133975982666, "auc": 0.7215426808655997}
 {"table": "airlines", "model": "catboost", "variant": "", "seed": 2, "seconds": 172.5, "trees": 3993, "accuracy": 0.6710976389777247, "log_loss": 0.6039977353152106, "auc": 0.724037148443236}
+{"table": "click", "model": "ashlar", "variant": "v3", "seed": 2, "seconds": 265.2, "epochs": 20, "accuracy": 0.841947822430047, "log_loss": 0.39440590143203735, "auc": 0.7375330902073481}
+{"table": "click", "model": "lightgbm", "variant": "", "seed": 2, "seconds": 33.1, "trees": 4001, "accuracy": 0.8445111419287978, "log_loss": 0.38615111055963, "auc": 0.7535839752658199}
+{"table": "click", "model": "xgboost", "variant": "", "seed": 2, "seconds": 40.6, "trees": 3525, "accuracy": 0.844150675124286, "log_loss": 0.38582533597946167, "auc": 0.7542321395652436}
+{"table": "click", "model": "catboost", "variant": "", "seed": 2, "seconds": 142.7, "trees": 4000, "accuracy": 0.8434147220650743, "log_loss": 0.38846232583226004, "auc": 0.7490621752742811}
