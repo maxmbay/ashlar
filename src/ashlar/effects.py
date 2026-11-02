@@ -336,6 +336,21 @@ class RandomEffects(Module):
             variance = variance + jnp.sum(jnp.square(row_sd * covariate), axis=1)
         return mean, variance
 
+    def column_offsets(self, category_index, numeric_z) -> list[tuple[int, jax.Array]]:
+        """``(column, mean)`` for each grouping column with offsets: its part of ``offsets``' mean, ``(batch,)``."""
+        parts = []
+        for column, means, terms in zip(self.index_columns, self.means, self.slope_columns):
+            if not terms:
+                continue
+            group = category_index[:, column]
+            row_mean = jnp.where((group > 0)[:, None], means[group], 0.0)
+            covariate = jnp.stack(
+                [jnp.ones((group.shape[0],), dtype=row_mean.dtype) if term < 0 else numeric_z[:, term] for term in terms],
+                axis=1,
+            )
+            parts.append((column, jnp.sum(row_mean * covariate, axis=1)))
+        return parts
+
     def embed(self, category_index, key):
         """The pooled embeddings, ``(batch, embedding_width)``: a posterior draw with a key, the posterior mean without.
 

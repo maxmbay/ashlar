@@ -49,6 +49,9 @@ from ashlar.errors import AshlarError
 _QUANTILE_COUNT = 1000
 _BOUNDS_THRESHOLD = 1e-7
 _ROBUST_CLIP = 3.0
+# The order of the backbone's input fields, saved with a model: numeric, one-hot, embedded, then set columns.
+# A model saved without it listed them in schema order (``FeatureEncoder.fields(..., legacy=True)``).
+FIELD_ORDER = "grouped"
 # Interquartile range of a standard normal, 2 * ppf(0.75): the quantile maps' linear tails use 1.349 / IQR.
 _NORMAL_IQR = 1.3489795003921634
 NUMERIC_SCALINGS = ("standard", "robust", "quantile", "quantile_tabr")
@@ -327,17 +330,39 @@ class FeatureEncoder:
             return 1
         return max(column.max_length for column in self.set_columns)
 
-    def feature_chunks(self, numeric_embedding_dim: int | None, categorical_embedding_dim: int) -> list[int]:
-        """Width of each field token after numeric and categorical encodings are concatenated."""
-        chunks = []
-        for column in self.columns:
+    def fields(
+        self, numeric_embedding_dim: int | None, categorical_embedding_dim: int, *, legacy: bool = False
+    ) -> list[tuple[str, int]]:
+        """``(column, width)`` of each input field, in the order the core concatenates them.
+
+        The core puts the numeric columns first, then the one-hot columns, the
+        learned embeddings, and the sets, each group in schema order.
+        ``legacy=True`` lists them in schema order instead, as models saved
+        before ``FIELD_ORDER`` were built.
+        """
+
+        def width(column) -> int:
             if column.role == "numeric":
-                chunks.append(1 if numeric_embedding_dim is None else int(numeric_embedding_dim))
-            elif column.encoding == "onehot":
-                chunks.append(1 + len(column.categories))
-            else:
-                chunks.append(int(categorical_embedding_dim))
-        return chunks
+                return 1 if numeric_embedding_dim is None else int(numeric_embedding_dim)
+            if column.encoding == "onehot":
+                return 1 + len(column.categories)
+            return int(categorical_embedding_dim)
+
+        if legacy:
+            return [(column.name, width(column)) for column in self.columns]
+        groups = (
+            [column for column in self.columns if column.role == "numeric"],
+            [column for column in self.columns if column.role == "categorical" and column.encoding == "onehot"],
+            self.embedding_columns,
+            self.set_columns,
+        )
+        return [(column.name, width(column)) for group in groups for column in group]
+
+    def feature_chunks(
+        self, numeric_embedding_dim: int | None, categorical_embedding_dim: int, *, legacy: bool = False
+    ) -> list[int]:
+        """Width of each field token after numeric and categorical encodings are concatenated."""
+        return [width for _, width in self.fields(numeric_embedding_dim, categorical_embedding_dim, legacy=legacy)]
 
     @classmethod
     def fit(
