@@ -1,0 +1,5 @@
+at d14b3d8 (dev)
+{"table": "airlines", "model": "ashlar", "variant": "v3", "seed": 1, "seconds": 190.4, "epochs": 58, "accuracy": 0.6616887751791392, "log_loss": 0.6133473515510559, "auc": 0.7120868943075563}
+{"table": "airlines", "model": "lightgbm", "variant": "", "seed": 1, "seconds": 4.2, "trees": 773, "accuracy": 0.6668984120804249, "log_loss": 0.6065309473801913, "auc": 0.7213832978390342}
+{"table": "airlines", "model": "xgboost", "variant": "", "seed": 1, "seconds": 3.1, "trees": 418, "accuracy": 0.667992250433364, "log_loss": 0.607435941696167, "auc": 0.7206424048058574}
+{"table": "airlines", "model": "catboost", "variant": "", "seed": 1, "seconds": 171.1, "trees": 4000, "accuracy": 0.668947041538048, "log_loss": 0.6051655713221091, "auc": 0.7232626180783813}
