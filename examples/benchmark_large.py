@@ -773,13 +773,18 @@ METRIC_NAMES = {
 }
 
 
-def report(out, variant_for=None, seeds=None):
-    """Markdown tables: mean ± std over the seeds that ran, per table and model; seconds from seed 0."""
+# NGBoost's seed-0 CRPS on airline delay (90.7) disagrees with its NLL (4.76): held out of the report until the
+# diagnostic runs (variants diag-lr0.05, lr0.01, leaf100) show why.
+HELD = ("ngboost",)
+
+
+def report(out, variant_for=None, seeds=None, held=HELD):
+    """Markdown tables: mean ± std over the seeds that ran, per table and model; seconds from the fastest seed."""
     variant_for = variant_for or {}
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     frame = pd.DataFrame(rows)
     frame["variant"] = frame["variant"].fillna("")
-    keep = frame.apply(lambda r: r["variant"] == variant_for.get(r["model"], ""), axis=1)
+    keep = frame.apply(lambda r: r["variant"] == variant_for.get(r["model"], "") and r["model"] not in held, axis=1)
     frame = frame[keep]
     if seeds is not None:
         frame = frame[frame["seed"].isin(seeds)]
@@ -807,9 +812,9 @@ def report(out, variant_for=None, seeds=None):
                     cells.append(f"{values.iloc[0]:.4g}")
                 else:
                     cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
-            # Seed 0 ran each tree on one thread and seeds 1 and 2 on six, so the seconds are seed 0's.
-            first = group[group["seed"] == 0]
-            seconds = (first if not first.empty else group)["seconds"].mean()
+            # Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2 and LightGBMLSS ran one
+            # job at a time, the trees on six threads, so the fastest seed is the fairest time.
+            seconds = group["seconds"].min()
             print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {seconds:.0f} |")
 
 

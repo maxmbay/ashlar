@@ -7,11 +7,13 @@ Reads the large-table benchmark's results (``examples/benchmark_large.py``, ship
   change in test error (RMSE, or 1 − accuracy for the classification tables).
 - Right: the predicted distribution against the best tree's. On the regression tables,
   ``ASRRegressor(task="mixture")``'s CRPS against the best tree distribution: LightGBM, XGBoost, and
-  CatBoost with a normal of one width, CatBoost ``RMSEWithUncertainty``, LightGBMLSS, and NGBoost.
+  CatBoost with a normal of one width, CatBoost ``RMSEWithUncertainty``, and LightGBMLSS (a Gaussian, a
+  Student-t, and a mixture of three Gaussians).
   On the classification tables, the default's log loss against the trees'.
 
-The best tree is the one with the lowest mean over the seeds; each seed's change is against it, the
-dot is the mean change and the whisker one standard deviation across seeds. A dot is teal or clay
+The best tree is the one with the lowest mean over the seeds that ours and every tree share, so a
+model with fewer seeds can still be the best; each seed the two share is a change against it, the dot is
+the mean change and the whisker one standard deviation across seeds. A dot is teal or clay
 when the whole whisker is on one side of zero, and grey when it crosses zero (or, with one split,
 when the change is under half a percent).
 
@@ -31,7 +33,7 @@ RESULTS = k.ARTIFACTS / "large" / "large.jsonl"
 VARIANT = {"ashlar": "v3", "ashlar_mixture": "v3"}  # the recorded Ashlar runs
 TREES = ("lightgbm", "xgboost", "catboost")
 TREE_DISTRIBUTIONS = TREES + ("catboost_uncertainty", "lightgbmlss_gaussian", "lightgbmlss_studentt",
-                              "lightgbmlss_mixture", "ngboost")
+                              "lightgbmlss_mixture")  # NGBoost is held, as in the benchmark's report
 NAMES = {
     "lightgbm": "LightGBM", "xgboost": "XGBoost", "catboost": "CatBoost",
     "catboost_uncertainty": "CatBoost RMSEWithUncertainty", "lightgbmlss_gaussian": "LightGBMLSS Gaussian",
@@ -68,25 +70,25 @@ def compare(rows, table, ours, theirs, metric, *, error=False) -> dict | None:
         return {s: (1.0 - v if error else v) for s, v in got.items()}
 
     mine = value(ours)
-    candidates = {m: value(m) for m in theirs}
-    candidates = {m: v for m, v in candidates.items() if v}
-    if not mine or not candidates:
+    candidates = {m: v for m, v in ((m, value(m)) for m in theirs) if set(v) & set(mine)}
+    if not candidates:
         return None
-    # Compare on the seeds every candidate and ours share; a candidate with fewer seeds is dropped
-    # rather than shrinking the comparison, unless it is the only one.
-    seeds = set(mine)
-    full = {m: v for m, v in candidates.items() if seeds <= set(v)}
-    pool = full or candidates
-    seeds = sorted(seeds.intersection(*[set(v) for v in pool.values()]))
-    if not seeds:
-        return None
-    means = {m: np.mean([v[s] for s in seeds]) for m, v in pool.items()}
-    best = min(means, key=means.get)
-    change = np.array([(mine[s] - pool[best][s]) / pool[best][s] for s in seeds]) * 100
+    # The best candidate is picked on the seeds ours and every candidate share, so that one with fewer
+    # seeds than the others can still be the best; ours is then compared with it on every seed the two share.
+    common = set(mine).intersection(*[set(v) for v in candidates.values()])
+
+    def mean_over(model):
+        seeds = common or set(mine) & set(candidates[model])
+        return np.mean([candidates[model][s] for s in seeds])
+
+    best = min(candidates, key=mean_over)
+    seeds = sorted(set(mine) & set(candidates[best]))
+    theirs_values = [candidates[best][s] for s in seeds]
+    change = np.array([(mine[s] - candidates[best][s]) / candidates[best][s] for s in seeds]) * 100
     return {"table": table, "best": best, "seeds": seeds, "change": change, "mean": float(change.mean()),
             "sd": float(change.std(ddof=0)), "ours": float(np.mean([mine[s] for s in seeds])),
-            "theirs": float(means[best]), "metric": metric,
-            "ours_sd": float(np.std([mine[s] for s in seeds])), "theirs_sd": float(np.std([pool[best][s] for s in seeds]))}
+            "theirs": float(np.mean(theirs_values)), "metric": metric,
+            "ours_sd": float(np.std([mine[s] for s in seeds])), "theirs_sd": float(np.std(theirs_values))}
 
 
 def results(rows):
@@ -174,6 +176,41 @@ def headline(error, distribution) -> str:
     return first + "."
 
 
+POSSESSIVE = {  # the best tree distribution, as the footnote names it
+    "lightgbm": "LightGBM's normal of one width", "xgboost": "XGBoost's normal of one width",
+    "catboost": "CatBoost's normal of one width", "catboost_uncertainty": "CatBoost's RMSEWithUncertainty",
+    "lightgbmlss_gaussian": "LightGBMLSS's Gaussian", "lightgbmlss_studentt": "LightGBMLSS's Student-t",
+    "lightgbmlss_mixture": "LightGBMLSS's mixture of three normals",
+}
+SHORT = {"airlines_delay": "airline delay", "year": "release years", "zurich": "Zurich transport",
+         "taxi_tip": "taxi tips"}
+
+
+def _and(items: list[str]) -> str:
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def best_distributions(distribution) -> str:
+    """One sentence naming the best tree distribution on each regression table, in the figure's order."""
+    order, by_model = [], {}
+    for table, _, _ in GROUPS[0][1]:
+        if table in distribution:
+            best = distribution[table]["best"]
+            if best not in by_model:
+                order.append(best)
+            by_model.setdefault(best, []).append(SHORT[table])
+    if not order:
+        return ""
+    parts = [f"{POSSESSIVE[model]} on {_and(by_model[model])}" for model in order]
+    if len(parts) == 2 and not any("," in part for part in parts):
+        joined = f"{parts[0]}, and {parts[1]}"
+    else:
+        joined = "; ".join(parts)
+    return f"The best tree distribution is {joined}."
+
+
 def splits_text(items) -> str:
     counts = sorted({len(item["seeds"]) for item in items})
     if counts == [1]:
@@ -236,9 +273,8 @@ def draw() -> None:
         left.text(-0.03, gy + 0.18, group.upper(), transform=left.get_yaxis_transform(), fontproperties=k.F.small,
                   color=k.MUTED, ha="right", va="center")
     k.footnote(fig, "The dot is the mean change over the splits and the whisker one standard deviation; grey where it "
-                    "crosses zero. Tips are a spike at $0 and a long tail: CatBoost's per-row normal wins their CRPS, "
-                    "Ashlar's mixture their likelihood. Ashlar trains in minutes on a laptop CPU, where LightGBM takes "
-                    "seconds to minutes. Every number is in docs/benchmarks.md, Large tables.", line=0)
+                    f"crosses zero. {best_distributions(distribution)} Ashlar trains in minutes on a laptop CPU, where "
+                    "LightGBM takes seconds to minutes. Every number is in docs/benchmarks.md, Large tables.", line=0)
     k.save(fig, "scoreboard")
     for panel, items in (("error", error), ("distribution", distribution)):
         for item in items.values():
@@ -261,6 +297,13 @@ def _entry(value: float, sd: float, seeds: int, digits: int, bold: bool, name: s
     return text + (f" ({name})" if name else "")
 
 
+def _bold(got: dict, digits: int, ours_better: bool) -> tuple[bool, bool]:
+    """Which cell to bold: the better one, or neither when the two print the same."""
+    if f"{got['ours']:.{digits}f}" == f"{got['theirs']:.{digits}f}":
+        return False, False
+    return ours_better, not ours_better
+
+
 def tables() -> None:
     """The README's two tables, as means ± sd over the splits: point accuracy, then the distributions."""
     rows = load()
@@ -275,26 +318,29 @@ def tables() -> None:
             if not regression:
                 got["ours"], got["theirs"] = 1.0 - got["ours"], 1.0 - got["theirs"]
             digits = (2 if got["ours"] > 10 else 3) if regression else 3
+            ours_bold, theirs_bold = _bold(got, digits, ours_better)
             print(f"| {name} | {ROWS[table]} | {TARGETS[table]}, {'RMSE ↓' if regression else 'accuracy ↑'} | "
-                  f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_better)} | "
-                  f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, not ours_better, NAMES[got['best']])} |")
+                  f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_bold)} | "
+                  f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, theirs_bold, NAMES[got['best']])} |")
     print()
     print("| Table | Score | Ashlar | Best tree distribution |\n|---|---|---:|---:|")
     for group, entries in GROUPS:
         for table, name, _ in entries:
             regression = group == "Regression"
-            scores = (("crps", "CRPS"), ("nll", "NLL")) if regression else (("log_loss", "Log loss"),)
+            # CRPS only: on a target with a spike (airline delay's on-time minute, taxi tips' $0) the mixture's
+            # NLL turns on how narrow it makes the spike, so it is not a comparison (docs/benchmarks.md).
+            scores = (("crps", "CRPS"),) if regression else (("log_loss", "Log loss"),)
             for n, (metric, label) in enumerate(scores):
                 got = compare(rows, table, "ashlar_mixture" if regression else "ashlar",
                               TREE_DISTRIBUTIONS if regression else TREES, metric)
                 if got is None:
                     continue
-                ours_better = got["ours"] < got["theirs"]
                 digits = 2 if regression else 3
+                ours_bold, theirs_bold = _bold(got, digits, got["ours"] < got["theirs"])
                 title = f"{name}, {TARGETS[table]}" if regression else name
                 print(f"| {title if n == 0 else ''} | {label} | "
-                      f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_better)} | "
-                      f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, not ours_better, NAMES[got['best']])} |")
+                      f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_bold)} | "
+                      f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, theirs_bold, NAMES[got['best']])} |")
 
 
 if __name__ == "__main__":

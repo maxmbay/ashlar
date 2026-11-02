@@ -14,7 +14,7 @@ loads them instead of refitting:
 
 - Ashlar, ``ASRRegressor(task="mixture")`` with no other arguments.
 - CatBoost ``RMSEWithUncertainty``, a normal with a mean and a variance per
-  flight: the best tree distribution on this table.
+  flight.
 - LightGBM, early-stopped, with one normal whose scale is its residual
   spread on the early-stopping rows.
 
@@ -39,12 +39,19 @@ It writes small artifacts under ``examples/readme/artifacts/hero-flights/``:
 - ``sweep.npz``: each card candidate's schedule with only the departure hour
   moved, 5:00 to 23:00, and both models' predictions for it.
 
+``baseline`` adds the best tree distribution on this table, LightGBMLSS's
+mixture of three normals, from the parameters the benchmark saved for the
+same scored flights (``examples/benchmark_large.py --models
+lightgbmlss_mixture``): ``lightgbmlss.json`` with its scores and
+``lightgbmlss.npz`` with its quantiles for the pool's flights.
+
 ``draw`` reads them and writes ``docs/images/readme/hero-flights.png``:
 sixteen of the pool's flights at evenly spaced ranks of P(delay > 60 min),
 each as its mixture's continuous part with the central 80% solid, and a stem
 for the component narrower than a quarter of a minute: the mass the mixture
 puts on leaving exactly on time (18% on average, where 18.5% of the pool's
-flights did). ``examples/readme/one_flight.py`` draws the card from the same
+flights did). Under each ridge is LightGBMLSS's 80% interval for the same
+flight. ``examples/readme/one_flight.py`` draws the card from the same
 artifacts.
 
     python examples/readme/hero_flights.py compute   # about 40 minutes on a laptop CPU
@@ -542,7 +549,6 @@ TICKS = (-30, -10, 0, 10, 30, 60, 120, 300)
 RIDGES = 16
 NEEDLE = 2.0  # the stem's length, in rows, per unit of probability at the point mass
 P60 = "P(delay\u00a0>\u00a01\u00a0h)"  # unbreakable
-EARLY = -15.0  # the wash at the left: departures this early, a tenth of a percent of flights
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 DAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
 
@@ -568,13 +574,6 @@ def load_baseline(folder: Path):
     with np.load(folder / "lightgbmlss.npz", allow_pickle=False) as data:
         flights = {key: data[key] for key in data.files}
     return flights, json.loads((folder / "lightgbmlss.json").read_text())
-
-
-def early_share(folder: Path, cutoff: float = EARLY) -> float:
-    """The share of the scored flights that left more than ``-cutoff`` minutes early."""
-    with np.load(folder / "hours.npz", allow_pickle=False) as data:
-        grid, counts, flights = data["grid"], data["counts"].sum(axis=0), int(data["flights"].sum())
-    return float(counts[grid < cutoff].sum() / flights)
 
 
 def clock(value, fmt) -> str:
@@ -684,12 +683,7 @@ def draw(folder: Path = ARTIFACTS) -> None:
         ua, base = float(warp(at)), bases[row]
         ax.plot([ua, ua], [base, base + mass * NEEDLE], color=k.TEAL_DARK, lw=2.6, solid_capstyle="butt", zorder=403)
         ax.scatter([ua], [base + mass * NEEDLE], s=34, color=k.TEAL_DARK, edgecolor=k.CARD, lw=0.8, zorder=404)
-    # Departures earlier than EARLY are rare: a wash, so a symmetric interval visibly spends width there.
     top = bases[-1] + height + 0.25
-    ax.axvspan(left, warp(EARLY), color=k.GRID, lw=0, zorder=0)
-    share = early_share(folder)
-    ax.text((left + warp(EARLY)) / 2, top - 0.05, f"{k.pct(share, 1)} of flights\nleft this early",
-            fontproperties=k.F.small, color=k.MUTED, ha="center", va="top", linespacing=1.3, zorder=1)
     ax.axvline(warp(0.0), color=k.HAIR, lw=1.0, zorder=0)
     ax.axvline(warp(THRESHOLD), color=k.MUTED, lw=0.9, ls=(0, (2, 3)), zorder=0)
     for row, i in enumerate(picks):
