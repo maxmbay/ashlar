@@ -780,7 +780,11 @@ def legend(fig, k, items, *, line: int):
 
 
 def p60_errors(bins, least: int = 1000) -> float:
-    """The largest gap, in points, between predicted and observed P(delay > 60) over bins of ``least`` flights."""
+    """The largest gap, in points, between predicted and observed P(delay > 60) over bins of ``least`` flights.
+
+    The README's "within 0.6 points ... against 8.3": ``p60_errors(summary["scores"]["ashlar"]["p60_bins"])``
+    and ``p60_errors(lightgbmlss["p60_bins"])``.
+    """
     return max(abs(b["predicted"] - b["observed"]) * 100 for b in bins if b["flights"] >= least)
 
 
@@ -788,11 +792,9 @@ def draw(folder: Path = ARTIFACTS) -> None:
     import style as k
 
     summary, pool, _card = load(folder)
-    other, theirs = load_baseline(folder)
+    other, _ = load_baseline(folder)
     if not np.array_equal(other["row"], pool["row"]):
         raise SystemExit("lightgbmlss.npz is not in pool.npz's order: rerun the baseline stage")
-    ours = summary["scores"]["ashlar"]
-    exact = ours["exact_quantiles"]  # the drawn 80% is predict_quantiles' 0.1 to 0.9, as LightGBMLSS's is
     picks = pick_ridges(pool)
     u = np.linspace(warp(X_LO), warp(X_HI), 1200)
     densities = np.stack([warped_density(pool, i, u) for i in picks])
@@ -801,7 +803,8 @@ def draw(folder: Path = ARTIFACTS) -> None:
 
     fig = k.card(
         "Every flight gets its own distribution.",
-        f"Airline delay: {summary['training_rows'] + summary['test_rows']:,} US flights, schedule only, no weather. "
+        f"Airline delay: {summary['training_rows'] + summary['test_rows']:,} US flights from 1987 to 2008, schedule "
+        "only, no weather. "
         "Each ridge is one held-out flight's predicted departure delay from a single ASRRegressor(task=\"mixture\") "
         "fit, its central 80% solid. Under it, the 80% interval of LightGBMLSS's mixture of three normals for the "
         "same flight, the best tree distribution on this table, and the delay that happened.",
@@ -861,15 +864,9 @@ def draw(folder: Path = ARTIFACTS) -> None:
     legend(fig, k, [("patch", solid, "Ashlar's central 80%"), ("pale", k.TEAL_PALE, "its tails"),
                     ("needle", k.TEAL_DARK, "its chance of leaving on the minute"),
                     ("bar", k.CLAY, "LightGBMLSS's 80%"), ("dot", k.INK, "what happened")], line=2)
-    minutes = {key: round((value or 0) / 60) for key, value in (("ours", summary["seconds"]["ashlar"]),
-                                                                ("theirs", theirs.get("benchmark", {}).get("seconds")))}
-    k.footnote(fig, f"On {summary['scored_rows']:,} held-out flights, CRPS {ours['crps']:.2f} against LightGBMLSS's "
-                    f"{theirs['crps']:.2f}; 80% intervals held {k.pct(exact['coverage80'], 1)} at "
-                    f"{exact['width80']:.0f} minutes wide against {k.pct(theirs['coverage80'], 1)} at "
-                    f"{theirs['width80']:.0f}; {P60} within {p60_errors(ours['p60_bins']):.1f} points of the observed "
-                    f"rate in every bin of 1,000 flights or more, against {p60_errors(theirs['p60_bins']):.1f}. "
-                    f"One fit took {minutes['ours']} minutes on a laptop CPU, LightGBMLSS's {minutes['theirs']}.",
-               line=0)
+    # The README's caption carries the scores; the footer says only where they come from.
+    k.footnote(fig, f"One split, seed 0: both models fitted on {summary['training_rows']:,} flights and scored on "
+                    f"{summary['scored_rows']:,} held-out ones. Every number is in docs/benchmarks.md.", line=0)
     k.save(fig, NAME)
 
 

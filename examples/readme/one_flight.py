@@ -8,7 +8,7 @@ largest actual delay that its calibrated 80% interval still holds.
 
 The top panel is that flight's predictive density on the hero's delay axis, with
 the calibrated 80% interval solid, the point mass at zero (leaving on the minute) as a
-stem, the 80% interval of LightGBMLSS's mixture of three normals (the best tree
+stem, the raw (uncalibrated) 80% interval of LightGBMLSS's mixture of three normals (the best tree
 distribution on this table) as a clay bar, and the delay that happened. Under it, each call of the quick start on that one row, in order, with
 its answer placed on the same axis; LightGBM's point sits beside ``predict``.
 
@@ -114,7 +114,7 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
         k.value(ax, ux, label_y, label, k.TEAL_DARK, ha="center", va="bottom", size=12.5)
     y_bar = -0.42
     ax.plot([h.warp(lss_lo), h.warp(lss_hi)], [y_bar, y_bar], color=k.CLAY, lw=3.0, solid_capstyle="butt", zorder=5)
-    ax.text(h.warp(lss_lo), y_bar - 0.2, f"LightGBMLSS's 80% interval, {out(lss_lo, 0)} to "
+    ax.text(h.warp(lss_lo), y_bar - 0.2, f"LightGBMLSS's raw 80%, {out(lss_lo, 0)} to "
             f"{out(lss_hi, 0)} minutes".replace("-", "−"), fontproperties=k.F.small, color=k.CLAY, ha="left", va="top")
     ax.scatter([h.warp(actual)], [0], s=64, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=10, clip_on=False)
     note_y = max(height_at(x) for x in np.linspace(actual, X_HI, 50)) + 0.55
@@ -219,14 +219,15 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
             f"{MONTHS[int(x_of('month')) - 1]}\n{int(x_of('distance')):,} miles", transform=ident,
             fontproperties=k.F.label, color=k.MUTED, ha="left", va="top", linespacing=1.5)
 
-    h.legend(fig, k, [("patch", solid, "calibrated 80% interval"), ("pale", k.TEAL_PALE, "tails"),
+    h.legend(fig, k, [("patch", solid, "calibrated 80%"), ("pale", k.TEAL_PALE, "tails"),
                       ("needle", k.TEAL_DARK, "the chance of leaving on the minute"),
-                      ("bar", k.CLAY, "LightGBMLSS's 80%"), ("dot", k.INK, "what happened")], line=2)
+                      ("bar", k.CLAY, "LightGBMLSS's raw 80%"), ("dot", k.INK, "what happened")], line=2)
     names = explained["feature_names"]
     dep = summary["columns"]["departure"]
     base = explained["numeric_baseline"].get(dep)
     carrier_value = values[names.index(summary["columns"]["carrier"])]
-    k.footnote(fig, f"explain splits the 0.9 quantile, {out(q90)} minutes, among the columns: the {departure} departure "
+    # Not "splits": numeric columns' attributions sum to the prediction minus the baseline, a carrier's (occlusion) does not.
+    k.footnote(fig, f"explain scores each column's part in the 0.9 quantile, {out(q90)} minutes: the {departure} departure "
                     f"adds {values[names.index(dep)]:.1f} minutes against the median departure, "
                     f"{h.clock(base, fmt)}, and {x_of('carrier')} takes {abs(carrier_value):.1f} off against the "
                     "average carrier.", line=0)
