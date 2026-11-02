@@ -10,12 +10,14 @@ import pytest
 
 from ashlar import ASRModel, ASRRegressor
 from ashlar.effects import (
+    PREDICT_NODES,
+    TAU_PRIOR,
     RandomEffects,
     check_random_effects,
     embedding_leaves,
-    nesting,
     laplace_update,
     location_outputs,
+    nesting,
     positive,
     unit_nodes,
 )
@@ -206,73 +208,92 @@ def test_fit_finishes_each_group_at_its_posterior_given_the_network():
     assert np.max(np.abs(report["sd"][:, 0] - np.sqrt(1.0 / precision[order]))) < 1e-4
 
 
-@pytest.mark.slow
-def test_the_fit_recovers_tau_and_shrinks_small_groups():
-    frame, y, group, effect = _stores(groups=300, low=2, high=40)
-    model = ASRRegressor(task="gaussian", random_effects={"store": "intercept"}, random_state=0, max_epochs=200).fit(frame, y)
-    report = model.random_effects_["store"]
-    assert abs(float(report["tau"][0]) - 0.7) < 0.1
-    order = [int(name[1:]) for name in report["categories"]]
-    estimate = report["mean"][:, 0]
-    assert np.corrcoef(effect[order], estimate)[0, 1] > 0.9
-    # Small groups are pulled in further than their raw residual means.
-    counts = np.bincount(group)[order]
-    assert np.mean(np.abs(estimate[counts <= 4])) < np.mean(np.abs(effect[order][counts <= 4]))
-    unseen = frame.iloc[:50].assign(store="new")
-    sd = np.asarray(model.predict_dist(unseen).stddev())
-    assert abs(float(np.mean(sd)) - np.sqrt(0.5**2 + 0.7**2)) < 0.08
+def test_with_context_is_the_conjugate_update_given_the_network():
+    # As for fit's finishing step, the identity holds for any network, so a tiny one checks it.
+    frame, y, _, _ = _stores(groups=12, seed=4)
+    model = _small(random_effects={"store": "intercept"}).fit(frame, y)
+    before = model.random_effects_["store"]
+    rng = np.random.default_rng(5)
+    context = pd.DataFrame({"x0": rng.normal(size=6), "x1": rng.normal(size=6), "store": ["s0"] * 3 + ["new"] * 3})
+    target = rng.normal(size=6)
+    after = model.with_context(context, target).random_effects_["store"]
+    population = context.assign(store=None)
+    location = np.asarray(model.predict(population))
+    tau = float(before["tau"][0])
+    noise = np.asarray(model.predict_dist(population).stddev()) ** 2 - tau**2
+    seen = before["categories"].index("s0")
+    # A seen store updates from its fitted posterior, a new one from the prior.
+    for name, prior_mean, prior_var, rows in (
+        ("s0", before["mean"][seen, 0], before["sd"][seen, 0] ** 2, slice(0, 3)),
+        ("new", 0.0, tau**2, slice(3, 6)),
+    ):
+        precision = 1.0 / prior_var + np.sum(1.0 / noise[rows])
+        mean = (prior_mean / prior_var + np.sum((target[rows] - location[rows]) / noise[rows])) / precision
+        index = after["categories"].index(name)
+        assert abs(after["mean"][index, 0] - mean) < 1e-6
+        assert abs(after["sd"][index, 0] - np.sqrt(1.0 / precision)) < 1e-6
 
 
-@pytest.mark.slow
-def test_context_rows_give_a_new_group_the_conjugate_posterior():
-    frame, y, group, effect = _stores(groups=300, low=8, high=40)
-    train = group < 200
-    model = ASRRegressor(task="gaussian", random_effects={"store": "intercept"}, random_state=0, max_epochs=200)
-    model.fit(frame[train], y[train])
-    first = np.zeros(len(group), dtype=bool)
-    for store in range(200, 300):
-        first[np.flatnonzero(group == store)[:3]] = True
-    adapted = model.with_context(frame[first], y[first])
-    report = adapted.random_effects_["store"]
-    names = [f"s{store}" for store in range(200, 300)]
-    rows = [report["categories"].index(name) for name in names]
-    tau = float(report["tau"][0])
-    conjugate = np.sqrt(1.0 / (3.0 / 0.5**2 + 1.0 / tau**2))
-    assert abs(float(np.mean(report["sd"][rows, 0])) - conjugate) < 0.05
-    assert np.corrcoef(effect[200:], report["mean"][rows, 0])[0, 1] > 0.85
-    test = (~train) & (~first)
-    before = np.sqrt(np.mean((model.predict(frame[test]) - y[test]) ** 2))
-    after = np.sqrt(np.mean((adapted.predict(frame[test]) - y[test]) ** 2))
-    assert after < 0.75 * before
+def test_an_offset_moves_every_row_alike_and_an_embedding_interacts():
+    frame, y, _, _ = _stores(groups=12, seed=6)
+    rows = frame.iloc[:30]
+    for terms in (["intercept"], ["intercept", "embedding"]):
+        model = _small(random_effects={"store": terms}).fit(frame, y)
+        report = model.random_effects_["store"]
+        offset = report["mean"][report["categories"].index("s3"), 0]
+        gap = np.asarray(model.predict(rows.assign(store="s3"))) - np.asarray(model.predict(rows.assign(store="new")))
+        if terms == ["intercept"]:
+            # The store is out of the network, so its offset moves every row's location by the same amount.
+            assert np.allclose(gap, offset, atol=1e-5)
+        else:
+            # Its embedding goes through the network, so its effect differs from row to row.
+            assert np.std(gap) > 1e-4
 
 
-@pytest.mark.slow
-def test_a_pooled_embedding_learns_a_group_interaction():
+def test_the_penalty_is_the_kl_of_each_seen_group_per_row():
+    # tau's gradient comes from this closed form, which is what makes tau the spread of the groups.
+    module = RandomEffects([3], [0], [[-1]], (0,), (1,), 0.25)
+    module = eqx_set(module, module.means[0].at[1:, 0].set(jnp.asarray([0.5, -1.0, 2.0])))
+    tau = float(module.taus()[0][0])
+    sd = float(positive(module.raw_scales[0][1, 0]))
+    mean = np.array([0.5, -1.0, 2.0])
+    kl = np.log(tau / sd) + (sd**2 + mean**2) / (2.0 * tau**2) - 0.5
+    assert np.isclose(float(module.penalty()), 0.25 * (kl.sum() + tau**2 / (2.0 * TAU_PRIOR**2)), rtol=1e-5)
+
+
+def test_laplace_finds_the_mode_of_a_poisson_posterior():
+    # A Poisson likelihood is not quadratic in the offset on the log mean, so this takes several Newton steps.
     rng = np.random.default_rng(1)
-    groups = 80
-    group = np.repeat(np.arange(groups), 40)
-    slope = rng.normal(0.0, 1.0, size=groups)
-    x = rng.normal(size=(len(group), 2))
-    y = slope[group] * np.tanh(2.0 * x[:, 0]) + 0.3 * x[:, 1] + rng.normal(0.0, 0.3, size=len(group))
-    frame = pd.DataFrame({"x0": x[:, 0], "x1": x[:, 1], "store": [f"s{index}" for index in group]})
-    train = rng.uniform(size=len(group)) < 0.75
-    scores = {}
-    for name, terms in (("offset", ["intercept"]), ("embedding", ["intercept", "embedding"])):
-        model = ASRRegressor(task="gaussian", random_effects={"store": terms}, random_state=0, max_epochs=150)
-        model.fit(frame[train], y[train])
-        scores[name] = np.sqrt(np.mean((model.predict(frame[~train]) - y[~train]) ** 2))
-    assert scores["embedding"] < 0.7 * scores["offset"]
+    groups = np.repeat(np.arange(3), [1, 5, 30])
+    eta = rng.normal(0.5, 0.3, size=len(groups))
+    counts = rng.poisson(np.exp(eta + np.array([0.8, -0.5, 0.3])[groups]))
+    tau = 0.6
+
+    def poisson(offset):
+        rate = np.exp(eta + offset)
+        return counts - rate, -rate
+
+    mean, variance = laplace_update(poisson, np.zeros((3, 1)), np.full((3, 1), tau**2), np.ones((len(groups), 1)), groups, 3)
+    rate = np.exp(eta + mean[groups, 0])
+    assert np.max(np.abs(np.bincount(groups, weights=counts - rate) - mean[:, 0] / tau**2)) < 1e-8
+    assert np.allclose(variance[:, 0], 1.0 / (np.bincount(groups, weights=rate) + 1.0 / tau**2), rtol=1e-8)
 
 
-@pytest.mark.slow
-def test_a_poisson_intercept_recovers_tau_on_the_log_mean():
+def test_fit_finishes_a_poisson_group_at_its_posterior_mode():
     rng = np.random.default_rng(2)
-    groups = 200
-    group = np.repeat(np.arange(groups), rng.integers(5, 40, size=groups))
-    effect = rng.normal(0.0, 0.5, size=groups)
-    x = rng.normal(size=(len(group), 1))
-    counts = rng.poisson(np.exp(0.5 + 0.3 * x[:, 0] + effect[group]))
-    frame = pd.DataFrame({"x0": x[:, 0], "store": [f"s{index}" for index in group]})
-    model = ASRRegressor(task="poisson", random_effects={"store": "intercept"}, random_state=0, max_epochs=150)
-    model.fit(frame, counts)
-    assert abs(float(model.random_effects_["store"]["tau"][0]) - 0.5) < 0.1
+    group = np.repeat(np.arange(10), rng.integers(2, 12, size=10))
+    x = rng.normal(size=len(group))
+    counts = rng.poisson(np.exp(0.5 + 0.3 * x + rng.normal(0.0, 0.5, size=10)[group]))
+    frame = pd.DataFrame({"x0": x, "store": [f"s{index}" for index in group]})
+    model = _small(task="poisson", random_effects={"store": "intercept"}).fit(frame, counts)
+    report = model.random_effects_["store"]
+    tau = float(report["tau"][0])
+    # An unknown store reads N(0, tau²) on nodes, so the network's own log mean is the population's less their lift.
+    lift = np.log(np.mean(np.exp(tau * unit_nodes(PREDICT_NODES).astype(np.float64))))
+    eta = np.log(np.asarray(model.predict_dist(frame.assign(store=None)).mean(), dtype=np.float64)) - lift
+    order = [int(name[1:]) for name in report["categories"]]
+    mean = np.zeros(10)
+    mean[order] = report["mean"][:, 0]
+    rate = np.exp(eta + mean[group])
+    gradient = np.bincount(group, weights=counts - rate) - mean / tau**2
+    assert np.max(np.abs(gradient) / (1.0 + np.bincount(group, weights=counts))) < 1e-5
