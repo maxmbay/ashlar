@@ -98,13 +98,18 @@ def _learning_rate_arg(learning_rate, schedule, n_rows, batch_size, max_epochs):
     raise AshlarError("learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'.")
 
 
+# Leaves with a prior of their own in the loss, which weight decay would pull a second time.
+UNDECAYED_FIELDS = frozenset({"random_effects"})
+
+
 def decay_mask(params):
-    """``True`` for every leaf AdamW may decay. Frozen fitted leaves, such as bin edges, are ``False``."""
+    """``True`` for every leaf AdamW may decay. Frozen fitted leaves, such as bin edges, are ``False``, and so are
+    leaves with a prior of their own, such as random effects."""
     from ashlar.layers import FROZEN_FIELDS
 
     def keep(path, leaf):
         del leaf
-        return not any(getattr(entry, "name", None) in FROZEN_FIELDS for entry in path)
+        return not any(getattr(entry, "name", None) in FROZEN_FIELDS | UNDECAYED_FIELDS for entry in path)
 
     return jax.tree_util.tree_map_with_path(keep, params)
 
@@ -157,12 +162,18 @@ def _loss(objective, raw, y, sample_weight, key=None):
     return objective(raw, y, sample_weight, key=key)
 
 
+def _penalty(model):
+    """The model's own term beside the objective (``PredictiveCore.penalty``, such as random effects), else 0."""
+    penalty = getattr(model, "penalty", None)
+    return 0.0 if penalty is None else penalty()
+
+
 def _adamw_step(optimizer, objective):
     @filter_jit
     def step(model, state, z_batch, cat_batch, index_batch, token_batch, mask_batch, y_batch, w_batch, step_key):
         def loss_fn(candidate):
             raw = candidate(z_batch, cat_batch, index_batch, token_batch, mask_batch, key=step_key)
-            return _loss(objective, raw, y_batch, w_batch, step_key)
+            return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
 
         loss, grads = filter_value_and_grad(loss_fn)(model)
         arrays = eqx_filter(model, is_array)
@@ -257,7 +268,7 @@ def fit_loop(
 
         def loss_fn(candidate):
             raw = candidate(z_batch, cat_batch, index_batch, token_batch, mask_batch, key=None)
-            return _loss(objective, raw, y_batch, w_batch)
+            return _loss(objective, raw, y_batch, w_batch) + _penalty(candidate)
 
         grad_fn = filter_grad(loss_fn)
         grads = grad_fn(model)
@@ -553,7 +564,7 @@ def _fit_scanned(
             def loss_fn(candidate_params):
                 candidate = eqx_combine(candidate_params, static)
                 raw = candidate(*features, key=step_key)
-                return _loss(objective, raw, y_batch, w_batch, step_key)
+                return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
 
             has_mass = jnp.sum(w_batch) > 0
 
