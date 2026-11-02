@@ -274,8 +274,8 @@ def _shelf(ax, k, days: dict) -> None:
     ax.bar(day, days["sales"], width=BAR, color=k.DATA, lw=0, zorder=2)
     ax.fill_between(x, teal[0], teal[-1], color=k.TEAL, alpha=0.17, lw=0, zorder=3)  # a veil: the bars show through
     for level in (0, -1):
-        ax.plot(x, teal[level], color=k.TEAL, lw=1.4, zorder=3.5)
-        ax.plot(x, clay[level], color=k.CLAY, lw=2.0, zorder=4)
+        ax.plot(x, teal[level], color=k.TEAL, lw=1.8, zorder=3.5)
+        ax.plot(x, clay[level], color=k.CLAY, lw=1.8, zorder=4)
     ax.plot(x, slate[-1], color=k.SLATE, lw=1.8, linestyle=(0, (4, 2.5)), zorder=4.2)
     ax.hlines(days["stock"][sold], day[sold] - BAR / 2, day[sold] + BAR / 2, color=k.INK, lw=3.2, zorder=5)
     hid = sold & (days["demand"] > days["stock"])
