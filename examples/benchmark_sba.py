@@ -267,6 +267,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default="finished,running_as_paid,hazard,aft,ashlar,ashlar_pooled")
     parser.add_argument("--out", type=Path, default=Path("sba-pilot.json"))
+    parser.add_argument("--preds", type=Path, default=None, help="also write per-loan test predictions to this CSV")
     args = parser.parse_args()
     wanted = set(args.models.split(","))
     global SNAPSHOT
@@ -305,8 +306,21 @@ def main():
     print(json.dumps(summary, indent=1))
     plain = [c for c in X_train.columns if c not in ("lender", "naics")]
 
+    # Per-loan test predictions, for calibration checks by vintage, lender or industry.
+    preds = None
+    if args.preds:
+        preds = X_test[["approval_fy", "sector", "naics", "lender"]].copy()
+        preds["snapshot_months"] = t0
+        for h in HORIZONS:
+            preds[f"default_{h}y"] = true[h]["default"]
+        preds["loss_5y"] = actual_loss
+
     def record(name, pred, seconds, extra=None):
         results["models"][name] = {"seconds": seconds, "scores": scores(pred, true), **(extra or {})}
+        if preds is not None:
+            for h in HORIZONS:
+                preds[f"{name}_default_{h}y"] = pred[h]["default"]
+            preds.to_csv(args.preds, index=False)
         print(name, json.dumps(results["models"][name]["scores"].get("default_5y")), f"{seconds:.0f}s", flush=True)
         args.out.write_text(json.dumps(results, indent=1))
 
