@@ -58,7 +58,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Changed
 
-- **A new README.** It opens on one airline-delay fit, a distribution per flight against CatBoost's, then the quick start, a scoreboard on eight large tables, and a gallery of nine capabilities. Each capability is a figure against the tool you would otherwise use: a gradient-boosted tree, a mixed model, R's `gamlss`, survival AFT, or DeepAR. It also says where the trees win. `examples/readme/` redraws every figure from results committed under `examples/readme/artifacts/`. The README's links are relative, and `examples/readme/absolute_urls.py` checks them in CI and points them at the released commit for PyPI. The old forecasting and outcome-tree sections moved to [docs/forecast.md](docs/forecast.md#one-series-as-a-table-of-lags) and [docs/tabular.md](docs/tabular.md#tasks).
+- **A new README.** It opens on one airline-delay fit, a distribution per flight against LightGBMLSS's, then the quick start, a scoreboard on eight large tables against LightGBM, XGBoost, CatBoost, and LightGBMLSS, and a gallery of nine capabilities. Each capability is a figure against the tool you would otherwise use: a gradient-boosted tree, a mixed model, R's `gamlss`, survival AFT, or DeepAR. It also says where the trees win. `examples/readme/` redraws every figure from results committed under `examples/readme/artifacts/`. The README's links are relative, and `examples/readme/absolute_urls.py` checks them in CI and points them at the released commit for PyPI. The old forecasting and outcome-tree sections moved to [docs/forecast.md](docs/forecast.md#one-series-as-a-table-of-lags) and [docs/tabular.md](docs/tabular.md#tasks).
 
 ### Fixed
 
