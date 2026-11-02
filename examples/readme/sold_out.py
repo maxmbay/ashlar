@@ -10,11 +10,11 @@ AFT model on the censored sales, chosen as the benchmark chooses it. It writes t
 
 - ``series.json``: candidate series chosen by a fixed rule (``candidates``), each with every one of its days (the
   split, sales, stock, whether it sold out, and the true demand) and each fit's quantiles of demand that day;
-- ``densities.json``: for the first three candidates, each fit's density of demand on a grid, on every test day;
 - ``check.json``: this seed's test scores of each fit, beside the benchmark's own scores for the same seed;
 - ``stockouts.json``: a copy of the benchmark's results over its seeds, which the order-cost bars read.
 
-``draw`` runs in the cloud container, which has the fonts, and writes ``docs/images/readme/sold-out.png``.
+``draw`` runs in the cloud container, which has the fonts, and writes ``docs/images/readme/sold-out.png`` and the
+gallery thumbnail ``thumbs/observed.png``.
 
     JAX_PLATFORMS=cpu python examples/readme/sold_out.py compute
     python examples/readme/sold_out.py draw
@@ -40,8 +40,7 @@ ARTIFACTS = HERE / "artifacts" / "sold-out"
 SEED = 0
 LEVELS = (0.1, 0.25, 0.5, 0.75, 0.9)
 CANDIDATES = 8
-DENSITY_CANDIDATES = 3
-GRID_POINTS = 81
+TYPICAL_SOLD = (4, 8)  # sold-out test days of 20 around the benchmark's 31%
 FITS = ("censored", "sales", "oracle", "lightgbm", "xgboost aft")
 
 
@@ -63,12 +62,13 @@ def _write(name: str, payload) -> None:
 
 
 def candidates(series, day, demand, sold_out, test_from: int) -> list[str]:
-    """Series that read well in one panel, by a rule that looks at the data and not at any fit.
+    """Series typical of the benchmark that read well in one panel, by a rule that looks at the data and not at any fit.
 
-    A candidate has at least 2 sold-out test days and a mean demand in the upper half of the sampled series, so its
-    bars are not a few small values. Candidates are ordered by their test days recorded, most first, then by their
-    sold-out test days, then by their days recorded of the 90, then by the series key. If fewer than eight series
-    qualify, the level is dropped, then the sold-out days.
+    A candidate recorded its demand on every test day, sold out on 4 to 8 of them, about the benchmark's 31%, and
+    has a mean demand in the upper half of the sampled series, so its bars are not a few small values. Candidates
+    are ordered by how far their sold-out test days are from 6, then by mean demand, most first, then by the
+    series key. If fewer than eight qualify, the range of sold-out days widens by one day each side at a time, and
+    then a test day may go unrecorded, then two, and so on.
     """
     keys, index = np.unique(series, return_inverse=True)
     recorded = np.bincount(index, minlength=len(keys))
@@ -76,17 +76,21 @@ def candidates(series, day, demand, sold_out, test_from: int) -> list[str]:
     test_days = np.bincount(index, weights=test, minlength=len(keys))
     sold_test = np.bincount(index, weights=test & sold_out, minlength=len(keys))
     level = np.bincount(index, weights=demand, minlength=len(keys)) / recorded
-    keep = (sold_test >= 2) & (level >= np.median(level))
-    if keep.sum() < CANDIDATES:
-        keep = sold_test >= 1
-    if keep.sum() < CANDIDATES:
-        keep = np.ones(len(keys), bool)
-    order = np.lexsort((keys, -recorded, -sold_test, -test_days))
+    full = day.max() - test_from + 1
+    for missing in range(full):
+        readable = (test_days >= full - missing) & (level >= np.median(level))
+        low, high = TYPICAL_SOLD
+        keep = readable & (sold_test >= low) & (sold_test <= high)
+        while keep.sum() < CANDIDATES and (low > 1 or high < full):
+            low, high = max(low - 1, 1), high + 1
+            keep = readable & (sold_test >= low) & (sold_test <= high)
+        if keep.sum() >= CANDIDATES:
+            break
+    order = np.lexsort((keys, -level, np.abs(sold_test - sum(TYPICAL_SOLD) / 2)))
     return [str(keys[position]) for position in order if keep[position]][:CANDIDATES]
 
 
 def compute() -> None:
-    import jax.numpy as jnp
     import lightgbm
     import pandas as pd
 
@@ -115,13 +119,7 @@ def compute() -> None:
         raise SystemExit("no series meets the candidate rule")
     rows = {key: np.flatnonzero(series == key) for key in chosen}
     rows = {key: index[np.argsort(day[index])] for key, index in rows.items()}
-    density_rows = {key: index[day[index] >= test_from] for key, index in list(rows.items())[:DENSITY_CANDIDATES]}
     quantiles: dict[str, dict[str, np.ndarray]] = {fit: {} for fit in FITS}
-    densities: dict[str, dict[str, np.ndarray]] = {fit: {} for fit in FITS if fit != "lightgbm"}
-    grids = {
-        key: np.linspace(0.0, 1.35 * float(max(demand[series == key].max(), stock[series == key].max())), GRID_POINTS)
-        for key in density_rows
-    }
     scores = {}
     seconds = {}
 
@@ -135,12 +133,6 @@ def compute() -> None:
         seconds[fit] = {"cpu": clock.cpu, "wall": clock.wall}
         for key, index in rows.items():
             quantiles[fit][key] = model.predict_quantiles(features.iloc[index], list(LEVELS))
-        for key, index in density_rows.items():
-            dist = model.predict_dist(features.iloc[index])
-            densities[fit][key] = np.stack(
-                [np.exp(np.asarray(dist.log_prob(jnp.full((len(index),), value, jnp.float32)), np.float64)) for value in grids[key]],
-                axis=1,
-            )
         q90, q75 = model.predict_quantiles(x_test, [0.9, real.RATIO]).T
         half_bin = 0.005 * demand.mean()
         scores[fit] = {
@@ -167,15 +159,9 @@ def compute() -> None:
 
     fitted = real.stockouts_aft(features, sales, sold_out, train, calibration, SEED)
     seconds["xgboost aft"] = {"cpu": fitted["cpu"], "wall": fitted["wall"]}
-    error = real.AFT_FAMILIES[fitted["family"]]
     for key, index in rows.items():
         loc = real.stockouts_aft_predict(fitted, features.iloc[index])
         quantiles["xgboost aft"][key] = real.stockouts_aft_quantiles(fitted, loc, LEVELS)
-    for key, index in density_rows.items():
-        loc = real.stockouts_aft_predict(fitted, features.iloc[index])
-        shifted = grids[key][None, :] + fitted["shift"]
-        z = (np.log(shifted) - loc[:, None]) / fitted["scale"]
-        densities["xgboost aft"][key] = error.pdf(z) / (fitted["scale"] * shifted)
     record = real._stockouts_aft_record(fitted, x_test, y_test, 0.005 * demand.mean(), scores["oracle"]["cost_value"], SEED)
     scores["xgboost aft"] = {name: record[name] for name in ("nll", "q90", "cost_value", "chosen", "validation_nll")}
     print(f"  xgboost aft, censored: {scores['xgboost aft']}", flush=True)
@@ -232,17 +218,6 @@ def compute() -> None:
             }
         )
     _write("series.json", payload)
-    _write(
-        "densities.json",
-        {
-            key: {
-                "grid": _numbers(grids[key]),
-                "day": [int(value) for value in day[index]],
-                "density": {fit: [_numbers(row) for row in densities[fit][key]] for fit in densities},
-            }
-            for key, index in density_rows.items()
-        },
-    )
     results = Path(str(real.RESULTS).format(stage="stockouts"))
     if results.exists():
         shutil.copy(results, ARTIFACTS / "stockouts.json")
@@ -251,8 +226,143 @@ def compute() -> None:
         print(f"{results} is missing; run benchmark_observed_real.py stockouts for the order-cost bars", flush=True)
 
 
+SERIES = 0  # the candidate the figure draws, in the order of ``candidates``
+BAR = 0.56  # a day's bar width, in days
+COSTS = (  # the order-cost bars: the benchmark's key, the label, the bar's colour, the value's colour
+    ("mixture/censored", "Ashlar, censored sales", "TEAL", "TEAL"),
+    ("xgboost aft/censored", "XGBoost AFT, censored sales", "SLATE", "SLATE"),
+    ("lightgbm quantile/sales as demand", "LightGBM quantile, sales", "CLAY", "CLAY"),
+    ("mixture/sales as demand", "Ashlar, sales as demand", "TEAL_PALE", "MUTED"),
+    ("mixture/days not sold out", "Ashlar, sold-out days dropped", "TEAL_PALE", "MUTED"),
+)
+
+
+def _steps(day, values):
+    """Hold each day's value from half a day before it to half a day after: x of shape (2 days,), values (..., 2 days)."""
+    day = np.asarray(day, float)
+    return np.column_stack([day - 0.5, day + 0.5]).ravel(), np.repeat(np.asarray(values, float), 2, axis=-1)
+
+
+def _test_days(data: dict, item: dict) -> dict:
+    """The series' test days: day, sales, stock, sold out, demand, and each fit's quantiles as (levels, days)."""
+    day = np.asarray(item["day"])
+    keep = day >= data["train_days"] + data["calibration_days"]
+    out = {name: np.asarray(item[name], float)[keep] for name in ("sales", "stock", "demand")}
+    out["day"] = day[keep]
+    out["sold_out"] = np.asarray(item["sold_out"], bool)[keep]
+    out["quantiles"] = {fit: np.asarray(item["quantiles"][fit], float)[keep].T for fit in item["quantiles"]}
+    return out
+
+
+def _order_costs(bench: dict, k) -> tuple[list[int], list]:
+    """Each fit's order cost above the oracle's on every seed, in percent."""
+    seeds = sorted({int(key.split("/")[0]) for key in bench})
+    rows = []
+    for name, label, bar, text in COSTS:
+        values = np.asarray([bench[f"{seed}/{name}"]["cost"] for seed in seeds if f"{seed}/{name}" in bench], float)
+        rows.append((label, getattr(k, bar), getattr(k, text), values))
+    return seeds, rows
+
+
+def _shelf(ax, k, days: dict, *, lid: float = 3.2, dot: float = 46, lines: bool = True) -> float:
+    """Sales bars, a lid where the shelf ran out, the demand it hid, Ashlar's band, and LightGBM's quantiles."""
+    day, sold = days["day"], days["sold_out"]
+    x, teal = _steps(day, days["quantiles"]["censored"])
+    ax.bar(day, days["sales"], width=BAR, color=k.DATA, lw=0, zorder=2)
+    ax.fill_between(x, teal[0], teal[-1], color=k.TEAL, alpha=0.17, lw=0, zorder=3)  # a veil: the bars show through
+    if lines:
+        for level in (0, -1):
+            ax.plot(x, teal[level], color=k.TEAL, lw=1.3, zorder=3.5)
+        _, clay = _steps(day, days["quantiles"]["lightgbm"])
+        for level in (0, -1):
+            ax.plot(x, clay[level], color=k.CLAY, lw=2.0, zorder=4)
+    ax.hlines(days["stock"][sold], day[sold] - BAR / 2, day[sold] + BAR / 2, color=k.INK, lw=lid, zorder=5)
+    hid = sold & (days["demand"] > days["stock"])
+    ax.vlines(day[hid], days["stock"][hid], days["demand"][hid], color=k.INK, lw=1.3, linestyles=(0, (1.2, 1.8)),
+              zorder=5)
+    ax.scatter(day[sold], days["demand"][sold], s=dot, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=6)
+    top = max(days["demand"].max(), teal.max(), days["quantiles"]["lightgbm"].max())
+    ax.set_xlim(day.min() - 0.7, day.max() + 0.7)
+    ax.set_ylim(0.0, 1.08 * top)
+    return top
+
+
 def draw() -> None:
-    raise SystemExit("draw is written once the style kit, examples/readme/style.py, is on dev")
+    from datetime import date, timedelta
+
+    import style as k
+
+    data = json.loads((ARTIFACTS / "series.json").read_text())
+    bench = json.loads((ARTIFACTS / "stockouts.json").read_text())
+    days = _test_days(data, data["series"][SERIES])
+    seeds, costs = _order_costs(bench, k)
+    start = date.fromisoformat(data["start_date"])
+
+    def when(day: int) -> str:
+        moment = start + timedelta(days=int(day))
+        return f"{moment:%b} {moment.day}"
+
+    sold = int(days["sold_out"].sum())
+    fig = k.card(
+        "The shelf ran out. The model didn't.",
+        f"FreshRetailNet-50K: one store's fresh product over its {len(days['day'])} test days, {when(days['day'][0])} to "
+        f"{when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the demand a sold-out "
+        "day hid is known. Bands run from 10% to 90% of demand: Ashlar's mixture head fitted to the censored sales in "
+        "teal, LightGBM's quantile regression on sales in clay.",
+        height=8.9,
+        footer=3,
+    )
+    left, right = k.panels(fig, 1, 2, widths=[2.15, 1.0], wspace=0.55, head=0.75, tail=0.62, rpad=0.25)[0]
+
+    _shelf(left, k, days)
+    weekly = np.arange(days["day"][0], days["day"][-1] + 1, 7)
+    left.set_xticks(weekly, [when(day) for day in weekly])
+    k.style(left, frame="lb", grid="y")
+    k.axis_names(left, y="sales and demand, a day")
+    k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days. The bars stop at the stock; the demand did not.")
+
+    n = len(costs)
+    widest = max(float(values.max()) for _, _, _, values in costs)
+    for row, (label, bar, text, values) in enumerate(costs):
+        y = n - 1 - row
+        mean = float(values.mean())
+        right.barh(y, mean, height=0.36, color=bar, lw=0, zorder=3)
+        right.scatter(values, np.full(len(values), y), s=16, color=k.INK, edgecolor=k.CARD, lw=0.8, zorder=4)
+        right.text(0.0, y + 0.26, label, fontproperties=k.F.small, color=k.INK, ha="left", va="bottom")
+        k.value(right, max(mean, float(values.max())) + 0.03 * widest, y, f"{mean:.1f}%", color=text)
+    right.set_ylim(-0.5, n - 0.2)
+    right.set_xlim(0.0, 1.25 * widest)
+    ticks = np.arange(0, 1.25 * widest, 5.0 if widest < 25 else 10.0)
+    right.set_xticks(ticks, [f"{tick:.0f}%" for tick in ticks])
+    right.set_yticks([])
+    k.style(right, frame="b", grid="x")
+    k.axis_names(right, y=f"mean of {len(seeds)} seeds; a dot is one seed")
+    k.panel_title(right, "Order cost above the oracle's")
+
+    k.legend_row(
+        fig,
+        [("bar", k.DATA, "sales"), ("line", k.INK, "sold out at the stock"), ("dot", k.INK, "the demand that day"),
+         ("pale", k.TEAL_PALE, "Ashlar, censored sales"), ("line", k.CLAY, "LightGBM quantile, sales")],
+        line=2,
+    )
+    k.footnote(fig, "Order cost: stock each test day's 75% quantile of demand when a lost sale costs three times a "
+                    "leftover unit, in percent above the same head fitted to the true demand (the mixture's, for the "
+                    "trees). Each seed is 2,000 series with its own stock; 31% of their days sell out.")
+    k.save(fig, "sold-out")
+    _thumb(k, days, costs)
+
+
+def _thumb(k, days: dict, costs: list) -> None:
+    ours = next(values for label, _, _, values in costs if label.startswith("Ashlar, censored"))
+    trees = next(values for label, _, _, values in costs if label.startswith("LightGBM"))
+
+    def mark(ax):
+        _shelf(ax, k, days, lid=3.6, dot=60, lines=False)
+        ax.plot(ax.get_xlim(), [0.0, 0.0], color=k.INK, lw=1.2, solid_capstyle="butt", zorder=7)
+
+    k.thumb("observed", "Censored sales",
+            [(f"{ours.mean():.0f}%", k.TEAL), (" over the oracle's order cost, against ", k.MUTED),
+             (f"{trees.mean():.0f}%", k.CLAY)], mark)
 
 
 STAGES = {"compute": compute, "draw": draw}
