@@ -6,6 +6,15 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Added
 
+- **Forecast paths with covariates, as a table.**
+  - New module `ashlar.horizon`. `horizon_frame(data, target=..., lookback=..., horizon=..., series=..., time=...)` turns a long table of many series into one row per series and forecast origin. Its features are the target's last `lookback` values, the same lags of each `past` column, each `known` column at every step ahead, and the series' `static` columns. Its outcome is the next `horizon` values.
+  - Any `ASRRegressor` fits it. A joint head (`multivariate_gaussian`, `multivariate_mixture`, `multivariate_flow`) forecasts the whole path in one pass, with an exact log density and draws whose days move together.
+  - `peak` and `stockout(stock)` are path functions for `calibrate(..., target=[...])`, `predict_interval`, and `predict_exceedance`. `scale="mean"` puts series of different sizes on one scale and `frame.unscale` puts draws back; `stride`, `start`, `end`, and `complete=False` choose the origins.
+  - On Rossmann's daily sales 12 days ahead, the covariates cut the daily error by 64%. The joint normal's 80% interval for the 12-day total holds 76% of totals, where the same model with independent days holds 51%, and its CRPS for the total is 5.7% lower. It does little for the peak day, where `multivariate_flow` does best.
+  - Chronos-2, zero-shot, matches the joint normal day by day, 467.6 against 477.6, but gives no paths. DeepAR, trained to convergence, scores 625 a day, and its total's CRPS is 3,881 against 2,623, though its peak day is the best calibrated of any model.
+  - Calibrating on spring origins brought the total's 80% interval to 80% to 85% in summer, but left the peak's at 69% to 73%: split conformal needs calibration origins like the ones forecast.
+  - `examples/benchmark_paths.py` runs it. [docs/forecast.md](docs/forecast.md#many-series-covariates-and-paths) is the guide, and [docs/benchmarks.md](docs/benchmarks.md#forecast-paths-with-covariates) has the tables.
+  - The issue proposed replacing `ASRForecaster` and `ASRHistoryForecaster`. They stay as they are, and the table is the route for covariates, many series, and paths. ([#43](https://github.com/maxmbay/ashlar/issues/43))
 - **Additive models of the whole distribution, a neural GAMLSS.**
   - `backbone="additive"` gives each column of `X` a small network of its own, and each pair named in `backbone_kwargs={"pairs": [...]}` one more. The networks meet only in the head, which is linear in them, so each of the head's outputs (a location, a raw scale, a log mean, a logit) is an intercept plus one shape per term.
   - Works on every built-in head but `multivariate_flow` and `chain`, so an additive model also gets the count and hurdle heads, mixtures and flows, observed labels, monotone constraints, entity effects, and `calibrate`.
@@ -50,6 +59,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 ### Fixed
 
 - The transformer and set backbones could read the wrong slice of their input when a table mixed numeric, one-hot, embedded, and set columns out of schema order. The core concatenates its fields grouped by kind, but `feature_chunks` listed them in schema order. Fields now follow the core's order, saved with the model as `field_order`, and a model saved without it loads with the old order. ([#42](https://github.com/maxmbay/ashlar/issues/42))
+- The log density of `multivariate_gaussian`, and of each component of `multivariate_mixture`, lost its precision in float32 when a column's variance sat at its floor next to a covariance factor of ordinary size, as on a day the features make certain, such as a store known to be closed. The capacitance `I + WᵀD⁻¹W` could no longer hold its identity, so the density came out wrong or `NaN`, and a joint normal fitted on Rossmann's lags alone stopped on a loss that was not finite. The density now takes the QR of `[D^(-1/2) W; I]`, which never forms that matrix: on draws with variances at 1e-8, the old form was `NaN` for 22 of 300 and off by up to 1,300 times, and the new one is within 2% of float64 for all. It costs about 40% more to evaluate, a small part of a training step. ([#43](https://github.com/maxmbay/ashlar/issues/43))
 
 ## 0.0.4 — 2026-10-31
 

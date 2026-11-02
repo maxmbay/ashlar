@@ -910,9 +910,10 @@ class LowRankMultivariateNormal(Distribution):
     """Joint normal over ``d`` coordinates with covariance ``W Wᵀ + diag(D)``.
 
     ``loc`` is ``(..., d)``, ``cov_factor`` (``W``) is ``(..., d, rank)``, and
-    ``cov_diag`` (``D``, variances) is ``(..., d)``. The density uses the
-    Woodbury identity and the matrix determinant lemma, so it costs ``O(d r²)``
-    per row instead of ``O(d³)``. A rank of 0 is independent coordinates.
+    ``cov_diag`` (``D``, variances) is ``(..., d)``. The density whitens by
+    ``D`` and takes the QR of ``[D^(-1/2) W; I]``, so it costs ``O(d r²)`` per
+    row instead of ``O(d³)`` and stays accurate in float32 when a variance in
+    ``D`` is tiny next to ``W``. A rank of 0 is independent coordinates.
     """
 
     loc: jax.Array

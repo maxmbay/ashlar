@@ -29,7 +29,8 @@ Models:
   paths, so it is scored per day only.
 - ``deepar`` (stage ``deepar``, optional): DeepAR from GluonTS, trained on
   the same days with the same covariates and the store's type and
-  assortment, whose autoregressive draws are paths, scored raw.
+  assortment for 500 epochs of 50 batches, whose autoregressive draws are
+  paths, scored raw.
 
 Draws of ``log1p`` sales are capped at twice the largest day of sales in the
 training rows before they become sales. A normal on log sales can give a row
@@ -91,6 +92,8 @@ CAP_FACTOR = 2.0
 GUARD = 20.0
 KNOWN = ["open", "promo", "state_holiday", "school_holiday", "weekday"]
 STATIC = ["store_type", "assortment", "competition", "promo2"]
+# DeepAR's training loss moved by under 1% over its last 20 epochs at 500, on every seed; at 50 it was still falling fast.
+DEEPAR_EPOCHS = 500
 # Numeric known covariates for Chronos-2 and DeepAR, which read the calendar themselves.
 REFERENCE_COVARIATES = ["open", "promo", "school_holiday", "holiday"]
 MODELS = {
@@ -400,7 +403,7 @@ def run_deepar(stores: int, seed: int, epochs):
         freq="D", prediction_length=HORIZON, context_length=LOOKBACK,
         num_feat_dynamic_real=len(REFERENCE_COVARIATES), num_feat_static_cat=len(kinds), num_feat_static_real=2,
         cardinality=[len(values) for values in kinds.values()],
-        trainer_kwargs={"max_epochs": epochs or 50, "accelerator": "cpu", "enable_progress_bar": False, "enable_model_summary": False},
+        trainer_kwargs={"max_epochs": epochs or DEEPAR_EPOCHS, "accelerator": "cpu", "enable_progress_bar": False, "enable_model_summary": False},
     )
     torch.manual_seed(seed)
     np.random.seed(seed)
