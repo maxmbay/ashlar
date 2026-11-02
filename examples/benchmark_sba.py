@@ -260,6 +260,8 @@ def main():
     parser.add_argument("--first-fy", type=int, default=2010)
     parser.add_argument("--last-fy", type=int, default=2015)
     parser.add_argument("--test-first-fy", type=int, default=2010)
+    parser.add_argument("--folds", type=int, default=0, help="split the running loans into this many test folds (overrides --test)")
+    parser.add_argument("--fold", type=int, default=0, help="which fold is the test set; --seed fixes the split")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default="finished,running_as_paid,hazard,aft,ashlar,ashlar_pooled")
@@ -273,7 +275,11 @@ def main():
     # so the test set stays the same as the training years widen. Training takes
     # every other loan (or --rows of them when --rows > 0).
     pool = np.flatnonzero(~frame["ended_by_snapshot"].to_numpy() & (frame["ApprovalFY"].to_numpy() >= args.test_first_fy))
-    test_index = rng.permutation(pool)[: args.test]
+    if args.folds > 0:
+        # K-fold over the running loans: fold --fold is the test set, every other loan trains.
+        test_index = np.sort(np.array_split(rng.permutation(pool), args.folds)[args.fold])
+    else:
+        test_index = rng.permutation(pool)[: args.test]
     rest = np.setdiff1d(np.arange(len(frame)), test_index)
     rest = rng.permutation(rest)
     if args.rows > 0:
@@ -288,7 +294,7 @@ def main():
     ended = train["ended_by_snapshot"].to_numpy()
     summary = {
         "train_loans": len(train), "train_ended": int(ended.sum()), "train_defaults": int((ended & (train["final_cause"] == 1)).sum()),
-        "test_running_loans": len(test), "observed": {f"{h}y": {k: float(v.mean()) for k, v in true[h].items()} for h in HORIZONS},
+        "test_running_loans": len(test), "fold": args.fold if args.folds > 0 else None, "folds": args.folds, "observed": {f"{h}y": {k: float(v.mean()) for k, v in true[h].items()} for h in HORIZONS},
     }
     results = {"summary": summary, "models": {}}
     print(json.dumps(summary, indent=1))
