@@ -205,6 +205,35 @@ def hazard_cif(model, X, t0):
     return cumulative
 
 
+def ashlar_loss(model, X, t0, draws: int = 400, chunk: int = 2000, seed: int = 0):
+    """Expected loss share within the last horizon, given the loan was running at t0, from joint draws."""
+    out = []
+    horizon = 12 * max(HORIZONS)
+    for start in range(0, len(t0), chunk):
+        rows = slice(start, start + chunk)
+        sample = np.asarray(model.sample(X.iloc[rows], n=draws, seed=seed))  # (draws, rows, 3)
+        months = np.exp(sample[..., 1]) - 1.0
+        alive = months > t0[rows][None, :]
+        within = alive & (sample[..., 0] == 1) & (months <= t0[rows][None, :] + horizon)
+        loss = np.where(within, np.clip(sample[..., 2], 0.0, 1.5), 0.0).sum(axis=0)
+        out.append(loss / np.maximum(alive.sum(axis=0), 1))
+    return np.concatenate(out)
+
+
+def loss_scores(pred, actual):
+    order = np.argsort(pred)
+    bins = np.array_split(order, 10)
+    gap = sum(len(b) * abs(pred[b].mean() - actual[b].mean()) for b in bins) / len(pred)
+    return {
+        "mse": float(np.mean((pred - actual) ** 2)),
+        "mean_pred": float(pred.mean()),
+        "observed": float(actual.mean()),
+        "decile_gap": float(gap),
+        "top_decile_pred": float(pred[bins[-1]].mean()),
+        "top_decile_observed": float(actual[bins[-1]].mean()),
+    }
+
+
 def scores(pred, true):
     from sklearn.metrics import roc_auc_score
 
@@ -230,7 +259,7 @@ def main():
     parser.add_argument("--test", type=int, default=50_000)
     parser.add_argument("--first-fy", type=int, default=2010)
     parser.add_argument("--last-fy", type=int, default=2015)
-    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default="finished,running_as_paid,hazard,aft,ashlar,ashlar_pooled")
     parser.add_argument("--out", type=Path, default=Path("sba-pilot.json"))
@@ -246,6 +275,8 @@ def main():
     X_train, X_test = features(train), features(test)
     t0 = test["snapshot_months"].to_numpy()
     true = truth(test)
+    last = max(HORIZONS)
+    actual_loss = np.where(true[last]["default"] == 1, test["loss_share"].to_numpy(), 0.0)
     ended = train["ended_by_snapshot"].to_numpy()
     summary = {
         "train_loans": len(train), "train_ended": int(ended.sum()), "train_defaults": int((ended & (train["final_cause"] == 1)).sum()),
@@ -295,7 +326,13 @@ def main():
         model = lgb.LGBMClassifier(objective="multiclass", **gbm).fit(
             rows[~valid], event[~valid], eval_set=[(rows[valid], event[valid])], callbacks=[lgb.early_stopping(100, verbose=False)]
         )
-        record("hazard", hazard_cif(model, tree_test, t0), time.time() - start, {"quarter_rows": len(rows)})
+        cif = hazard_cif(model, tree_test, t0)
+        # Expected loss the usual way: probability of default times a LightGBM loss share fitted on defaults.
+        defaults = np.flatnonzero(ended & (train["final_cause"].to_numpy() == 1))
+        severity = lgb.LGBMRegressor(n_estimators=300, learning_rate=0.05, num_leaves=15, min_child_samples=20, verbose=-1)
+        severity.fit(tree_train.iloc[defaults], train["loss_share"].to_numpy()[defaults])
+        expected = cif[last]["default"] * np.clip(severity.predict(tree_test), 0.0, 1.5)
+        record("hazard", cif, time.time() - start, {"quarter_rows": len(rows), "loss_5y": loss_scores(expected, actual_loss)})
 
     if "aft" in wanted:
         import xgboost as xgb
@@ -331,7 +368,11 @@ def main():
         cats = [c for c in CATEGORICAL] + ["lender", "naics"]
         model = ASRRegressor(task="chain", head_kwargs={"columns": columns}, categorical=cats, random_effects=effects,
                              max_epochs=args.epochs, random_state=args.seed).fit(X_train, label)
-        record(name, ashlar_cif(model, X_test, t0), time.time() - start, {"epochs": int(getattr(model, "n_epochs_", 0) or 0)})
+        history = getattr(model, "history_", {}) or {}
+        epochs = max([len(v) for v in history.values() if isinstance(v, list)] or [0])
+        cif = ashlar_cif(model, X_test, t0)
+        loss = loss_scores(ashlar_loss(model, X_test, t0, seed=args.seed), actual_loss)
+        record(name, cif, time.time() - start, {"epochs": epochs, "loss_5y": loss})
 
 
 if __name__ == "__main__":
