@@ -77,6 +77,21 @@ model = ASRForecaster.load("models/demand")
 
 Both forecasters save their settings as JSON and their weights with Equinox, never with pickle. Load with the class that saved: `ASRHistoryForecaster.load` for the full-history model.
 
+## A series as a table of lags
+
+A series that is already a table of lags and calendar columns needs no forecaster: every tabular head applies to it. `cyclical=` turns a calendar column into a sine and a cosine, so hour 23 sits beside hour 0 and days near each other in the year share what the model learns about them:
+
+```python
+from ashlar import tabm_piecewise
+
+model = tabm_piecewise(task="mixture", cyclical={"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25})
+model.fit(lags, pickups)
+```
+
+![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](images/forecast-fan.png)
+
+Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours.
+
 ## Many series, covariates, and paths
 
 The two forecasters read one series and nothing else. For many series, covariates, and the whole path ahead, make each forecast origin a row of a table and fit an ordinary `ASRRegressor` with a joint head. `ashlar.horizon.horizon_frame` builds the table from a long one, one row per series and step:
