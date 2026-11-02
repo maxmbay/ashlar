@@ -1611,10 +1611,14 @@ class QuantileSpline(Distribution):
         up = jnp.clip((value - above) / self.upper, 0.0, widths)
         down = jnp.clip((below - value) / self.lower, 0.0, widths)
         z = jnp.sum(up, axis=-1) - jnp.sum(down, axis=-1)
-        # Exactly one piece holds the value; its slope is the derivative of Q there.
-        inside_up = (value >= above) & (value < above + self.upper * widths)
-        inside_down = (value < below) & (value >= below - self.lower * widths)
-        slope = jnp.sum(jnp.where(inside_up, self.upper, 0.0), axis=-1) + jnp.sum(jnp.where(inside_down, self.lower, 0.0), axis=-1)
+        # The piece the score falls in gives the slope: read from z, not from the knots, so rounding at a
+        # knot cannot leave a value in no piece (and a zero slope).
+        breaks, _widths = _spline_widths(self.median.dtype)
+        piece = jnp.sum(jnp.abs(z)[..., None] >= breaks, axis=-1) - 1
+        shape = z.shape + self.upper.shape[-1:]
+        upper = jnp.take_along_axis(jnp.broadcast_to(self.upper, shape), piece[..., None], axis=-1)[..., 0]
+        lower = jnp.take_along_axis(jnp.broadcast_to(self.lower, shape), piece[..., None], axis=-1)[..., 0]
+        slope = jnp.where(z >= 0, upper, lower)
         return z, slope
 
     def quantile_of_score(self, z):
