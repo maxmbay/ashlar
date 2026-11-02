@@ -346,8 +346,15 @@ def _python_check(name: str, model: str, rows: pd.DataFrame) -> float:
     mu = rows["mu"].to_numpy(np.float64)[:, None]
     sigma = rows["sigma"].to_numpy(np.float64)[:, None]
     if model.startswith("gamlss_nbi"):
-        # NBI: variance mu + sigma mu^2, so SciPy's n = 1 / sigma and p = 1 / (1 + sigma mu).
-        cdf = stats.nbinom.cdf(grid[None, :], 1.0 / sigma, 1.0 / (1.0 + sigma * mu))
+        # NBI: variance mu + sigma mu^2, so SciPy's n = 1 / sigma and p = 1 / (1 + sigma mu). Like R's pNBI, a
+        # sigma below 1e-4 is read as a Poisson: at n = 1 / sigma that large, SciPy's nbinom loses its precision.
+        poisson = sigma < 1e-4
+        safe = np.where(poisson, 1.0, sigma)
+        cdf = np.where(
+            poisson,
+            stats.poisson.cdf(grid[None, :], mu),
+            stats.nbinom.cdf(grid[None, :], 1.0 / safe, 1.0 / (1.0 + safe * mu)),
+        )
     elif model == "gamlss_no":
         cdf = stats.norm.cdf(grid[None, :], mu, sigma)
     else:
