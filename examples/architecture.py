@@ -1,9 +1,10 @@
-"""Draw the README architecture diagram: four courses of choices, one lit path.
+"""Draw the README architecture diagram: five courses of choices, one lit path.
 
-A model is one set of keyword arguments. The diagram lays the arguments out as
-four courses of stone blocks, one course per slot, and lights the path that the
-code beside it picks. Colors follow the logo: clay for the lit path, teal for
-the heads that return a distribution, pale stone for the rest.
+A model is one set of keyword arguments, and its label says what was observed.
+The diagram lays them out as courses of stone blocks, one course per slot plus
+one for the label, and lights the path that the code under it picks. Colors
+follow the logo: clay for the lit path, teal for the heads that return a
+distribution and the labels that need one, pale stone for the rest.
 
     python examples/architecture.py
 
@@ -36,7 +37,9 @@ GAP = 7.0  # px between blocks
 VGAP = 52.0  # px between courses, enough for the slot label and the path's lane
 LEFT = 34.0
 TOP = 30.0
-PANEL = 348.0  # width of the code panel on the right
+PANEL = 348.0  # width of the code under the courses, before the caption
+# Slot labels knock out the lit path where it runs under them.
+HALO = 'stroke="#fbfaf7" stroke-width="5" stroke-linejoin="round" paint-order="stroke"'
 
 # (slot, argument, [(label, lit, accent)])
 COURSES = [
@@ -55,37 +58,56 @@ COURSES = [
     ),
     (
         "backbone",
-        "backbone, backbone_kwargs",
+        "backbone, monotone, random_effects",
         [
-            ("residual_mlp", True, False),
+            ("residual_mlp", False, False),
             ("tabm", False, False),
             ("transformer", False, False),
+            ("additive", True, False),
             ("set", False, False),
+            ("monotone", False, False),
+            ("random effects", False, False),
             ("your Equinox module", False, False),
         ],
     ),
     (
         "head",
-        "task, head",
+        "task, head_kwargs",
         [
             ("point", False, False),
-            ("classes", False, False),
-            ("ordinal", False, False),
-            ("outcome tree", False, False),
             ("gaussian", False, True),
-            ("mixture", True, True),
+            ("mixture", False, True),
             ("flow", False, True),
             ("histogram", False, True),
-            ("quantile", False, True),
+            ("quantile_spline", False, True),
+            ("negative_binomial", True, True),
+            ("hurdle", False, True),
+            ("chain", False, True),
+            ("multivariate_*", False, True),
+            ("classes", False, False),
             ("your head", False, False),
+        ],
+    ),
+    (
+        "label",
+        "fit(X, y), y from ashlar.observed",
+        [
+            ("exact", False, False),
+            ("interval", False, True),
+            ("rounded", False, True),
+            ("truncated", False, True),
+            ("noisy", False, True),
+            ("censored", True, True),
+            ("survival", False, True),
+            ("total", False, True),
         ],
     ),
     (
         "train",
         "learning_rate_schedule, batch_size, patience, search",
         [
-            ("cosine", True, False),
             ("constant", False, False),
+            ("cosine", True, False),
             ("linear", False, False),
             ("auto batch", False, False),
             ("patience", False, False),
@@ -98,16 +120,18 @@ COURSES = [
 CODE = [
     [("ASRRegressor", CLAY), ("(", MUTED)],
     [("    num_embeddings", INK), ("=", MUTED), ('"piecewise"', TEAL), (",", MUTED)],
-    [("    backbone", INK), ("=", MUTED), ('"residual_mlp"', TEAL), (",", MUTED)],
-    [("    task", INK), ("=", MUTED), ('"mixture"', TEAL), (",", MUTED)],
-    [(")", MUTED), (".fit", INK), ("(X, y)", MUTED)],
+    [("    backbone", INK), ("=", MUTED), ('"additive"', TEAL), (",", MUTED)],
+    [("    task", INK), ("=", MUTED), ('"negative_binomial"', TEAL), (",", MUTED)],
+    [(")", MUTED), (".fit", INK), ("(X, ", MUTED), ("observed.censored", INK), ("(sales, sold_out))", MUTED)],
 ]
 
 CAPTION = [
-    "Every slot is a keyword argument.",
-    "Change one and the rest stays put:",
-    "task=\"flow\" for a skewed target,",
-    "backbone=\"tabm\" for the ensemble.",
+    "Every slot is a keyword argument, and the label says",
+    "what was observed. Change one and the rest stays put:",
+    'task="mixture" for a free shape, backbone="tabm" for',
+    "an ensemble, a plain y for an exact label. Teal marks",
+    "the heads that return a distribution and the labels",
+    "that need one.",
 ]
 
 
@@ -159,13 +183,14 @@ def draw(theme: str) -> str:
         rows.append(row)
         y += BH + VGAP
 
-    total_w = width + 36.0 + PANEL
-    total_h = y - VGAP + 34.0
+    code_h = len(CODE) * 22.0
+    total_w = width + 2 * LEFT - 0.0
+    total_h = y - VGAP + 34.0 + 28.0 + max(code_h, len(CAPTION) * 17.0) + 10.0
     out = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total_w:.0f} {total_h:.0f}" '
             f'width="{total_w:.0f}" height="{total_h:.0f}" role="img" '
-            f'aria-label="Four courses of model choices with one path lit">'
+            f'aria-label="Five courses of model choices with one path lit">'
         ),
         f'<rect width="{total_w:.0f}" height="{total_h:.0f}" rx="10" fill="{colors["card"]}"/>',
     ]
@@ -197,40 +222,39 @@ def draw(theme: str) -> str:
         out.append(
             f'<text x="{LEFT:.1f}" y="{row["y"] - 11:.1f}" '
             f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" '
-            f'letter-spacing="1.3" fill="{INK}">{_escape(row["slot"].upper())}</text>'
+            f'letter-spacing="1.3" fill="{INK}" {HALO}>{_escape(row["slot"].upper())}</text>'
         )
         out.append(
             f'<text x="{LEFT + len(row["slot"]) * 7.9 + 16:.1f}" y="{row["y"] - 11:.1f}" '
             f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" '
-            f'fill="{MUTED}">{_escape(row["argument"])}</text>'
+            f'fill="{MUTED}" {HALO}>{_escape(row["argument"])}</text>'
         )
         for x, w, label, lit, accent in row["blocks"]:
             out.extend(_block(x, row["y"], w, label, lit, accent))
 
-    # The code panel: the arguments that light the path above.
-    px = width + 36.0
-    py = TOP + 26.0
-    out.append(
-        f'<path d="M{px - 18:.1f} {py:.1f}V{rows[-1]["y"] + BH:.1f}" stroke="{FLOOR}" stroke-width="1"/>'
-    )
+    # The code under the courses: the arguments that light the path above, the caption beside it.
+    py = rows[-1]["y"] + BH + 30.0
+    out.append(f'<path d="M{LEFT:.1f} {py - 12:.1f}H{width + LEFT:.1f}" stroke="{FLOOR}" stroke-width="1"/>')
+    top = py + 8.0
     for line in CODE:
-        tx = px
+        tx = LEFT
         for piece, color in line:
             out.append(
-                f'<text x="{tx:.1f}" y="{py + 12:.1f}" xml:space="preserve" '
+                f'<text x="{tx:.1f}" y="{top + 12:.1f}" xml:space="preserve" '
                 f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" '
                 f'fill="{color}">{_escape(piece)}</text>'
             )
             tx += len(piece) * 7.6
-        py += 22.0
-    py += 14.0
+        top += 22.0
+    cx = LEFT + PANEL + 120.0
+    top = py + 8.0
     for line in CAPTION:
         out.append(
-            f'<text x="{px:.1f}" y="{py + 12:.1f}" '
+            f'<text x="{cx:.1f}" y="{top + 12:.1f}" '
             f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" '
             f'fill="{MUTED}">{_escape(line)}</text>'
         )
-        py += 17.0
+        top += 17.0
 
     out.append("</svg>")
     return "\n".join(out)
