@@ -231,13 +231,13 @@ def draw() -> None:
     days = np.asarray(figure["days"], float)
     patients = figure["patients"]
     fig = k.card(
-        f"Each patient gets a curve of its own shape, calibrated on {mixture['passing']} of {mixture['splits']} splits.",
+        "Each patient gets a curve of its own shape, not a shifted copy.",
         f"SUPPORT: {k.num(data['patients'])} seriously ill patients, {data['features']} features, "
         f"{k.pct(data['died'])} died during follow-up. Five test patients of one 80/20 split, A to E by the "
         "mixture's chance of living a year: × is a death, ○ a patient alive when last seen. The mixture head "
         "fitted to censored log times, against XGBoost's AFT model tuned on a 42-fit grid.",
-        height=8.9,
-        footer=2,
+        height=8.58,
+        footer=1,
     )
     axes = k.panels(fig, 1, 3, widths=[1.1, 1.1, 0.9], wspace=0.5, head=0.75, tail=1.1, rpad=0.42)
     _curves(axes[0, 0], days, patients, "mixture", _ramp(k.TEAL, len(patients)), k.TEAL, "Ashlar, mixture head")
@@ -264,21 +264,7 @@ def draw() -> None:
     ax.plot([0.02, 0.085], [0.79, 0.79], transform=ax.transAxes, color=k.INK, lw=1.3, linestyle=(0, (4, 3)))
     ax.text(0.105, 0.79, "10%, if calibrated", transform=ax.transAxes, fontproperties=k.F.small, color=k.INK,
             ha="left", va="center")
-    box = fig.box
-    k.rich(fig, box.left / box.width, (0.34 + 0.32 + 0.1) / box.height,
-           [("Five splits: ", k.INK, k.F.label),
-            (f"{mixture['passing']} of {mixture['splits']}", k.TEAL, k.F.value),
-            (" pass D-calibration, against ", k.MUTED, k.F.label),
-            (f"{aft['passing']} of {aft['splits']}", k.CLAY, k.F.value),
-            ("; NLL of the log time ", k.MUTED, k.F.label),
-            (f"{mixture['nll_mean']:.3f}", k.TEAL, k.F.value),
-            (" against ", k.MUTED, k.F.label),
-            (f"{aft['nll_mean']:.3f}", k.CLAY, k.F.value),
-            ("; concordance a tie, ", k.MUTED, k.F.label),
-            (f"{mixture['c_index_mean']:.3f}", k.TEAL, k.F.value),
-            (" and ", k.MUTED, k.F.label),
-            (f"{aft['c_index_mean']:.3f}", k.CLAY, k.F.value),
-            (".", k.MUTED, k.F.label)], va="bottom")
+    # The five splits' scores are the README's prose, quoted once there from docs/benchmarks.md.
     k.footnote(fig, f"Ashlar's curves cross for {k.pct(figure['crossing']['mixture'])} of pairs of "
                     f"{figure['crossing']['rows']} test patients. AFT's never cross: every patient gets one error "
                     "family with one spread, shifted along log time.")

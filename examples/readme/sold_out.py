@@ -340,8 +340,8 @@ def draw() -> None:
         f"to {when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the demand a "
         "sold-out day hid is known. Bands run from 10% to 90% of demand, fitted to the censored sales: Ashlar's "
         "mixture head in teal, XGBoost's AFT model in clay. LightGBM's 90% quantile, fitted to sales, in slate.",
-        height=9.5,
-        footer=4,
+        height=9.18,
+        footer=3,
     )
     left, right = k.panels(fig, 1, 2, widths=[2.1, 1.0], wspace=0.55, head=0.75, tail=0.62, rpad=0.25)[0]
 
@@ -353,18 +353,7 @@ def draw() -> None:
     k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days: the bars stop at the stock, the demand does not")
     _costs(right, k, costs, seeds)
 
-    by = {label + (" censored" if row < 2 else ""): values.mean() for row, (label, *_, values) in enumerate(costs)}
-    demand_read = [values.mean() for row, (*_, values) in enumerate(costs) if row >= 2]
-    box = fig.box
-    k.rich(fig, box.left / box.width, (0.34 + 3 * 0.32 + 0.1) / box.height,
-           [(f"{len(seeds)} seeds of 2,000 series: ", k.INK, k.F.label),
-            ("read as demand, orders cost ", k.MUTED, k.F.label),
-            (f"{min(demand_read):.0f}% to {max(demand_read):.0f}%", k.SLATE, k.F.value),
-            (" more than the oracle's; read as censored, Ashlar's ", k.MUTED, k.F.label),
-            (f"{by['Ashlar, mixture head censored']:.1f}%", k.TEAL, k.F.value),
-            (" more, AFT's ", k.MUTED, k.F.label),
-            (f"{abs(by['XGBoost AFT censored']):.1f}%", k.CLAY, k.F.value),
-            (" less." if by["XGBoost AFT censored"] < 0 else " more.", k.MUTED, k.F.label)], va="bottom")
+    # The three seeds' costs are printed on the inset's bars and quoted once in the README's prose.
     k.legend_row(
         fig,
         [("bar", k.DATA, "sales"), ("line", k.INK, "sold out"), ("dot", k.INK, "demand"),
@@ -372,8 +361,9 @@ def draw() -> None:
          ("dashed", k.SLATE, "LightGBM, sales")],
         line=2,
     )
-    k.footnote(fig, "The oracle is the mixture head fitted to the true demand. An order stocks the day's 75% quantile, "
-                    "for a lost sale that costs three times a leftover unit. 31% of the days sell out.")
+    k.footnote(fig, "Order costs are over 2,000 series. The oracle is the mixture head fitted to the true demand. An "
+                    "order stocks the day's 75% quantile, for a lost sale that costs three times a leftover unit. "
+                    "31% of the days sell out.")
     k.save(fig, "sold-out")
 
 
