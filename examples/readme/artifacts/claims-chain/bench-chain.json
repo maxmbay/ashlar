@@ -1,0 +1,143 @@
+{
+ "0": {
+  "chain": {
+   "nll": 0.46350137279024717,
+   "nll_count": 0.15425660781805595,
+   "nll_cost": 0.3092447649721913,
+   "claim_predicted": 0.0326774,
+   "claim_observed": 0.0366,
+   "mean_ratio": 0.9633148284540067,
+   "crps": 61.735867650492565,
+   "pit_distance": 0.5771441912908404,
+   "above_1000_predicted": 0.0158239,
+   "above_1000_observed": 0.0253,
+   "above_5000_predicted": 0.0024444,
+   "above_5000_observed": 0.00154,
+   "cpu": 915.71554
+  },
+  "independent heads": {
+   "nll": 0.6102842453837096,
+   "nll_count": 0.15416937049464052,
+   "nll_cost": 0.4561148748890691,
+   "claim_predicted": 0.0021321,
+   "claim_observed": 0.0366,
+   "mean_ratio": 0.06156744024746981,
+   "crps": 63.22529498356655,
+   "pit_distance": 3.2911096421653574,
+   "above_1000_predicted": 0.0011274,
+   "above_1000_observed": 0.0253,
+   "above_5000_predicted": 0.0001344,
+   "above_5000_observed": 0.00154,
+   "cpu": 1703.467658
+  },
+  "frequency and severity": {
+   "nll": 0.4637668365560505,
+   "nll_count": 0.15416937049464052,
+   "nll_cost": 0.30959746606141,
+   "claim_predicted": 0.0337022,
+   "claim_observed": 0.0366,
+   "mean_ratio": 0.9788777306262406,
+   "crps": 61.81726801030964,
+   "pit_distance": 0.5439776027538201,
+   "above_1000_predicted": 0.0164851,
+   "above_1000_observed": 0.0253,
+   "above_5000_predicted": 0.0024251,
+   "above_5000_observed": 0.00154,
+   "cpu": 934.6141189999998
+  }
+ },
+ "1": {
+  "chain": {
+   "nll": 0.4714256999665856,
+   "nll_count": 0.15655960572486843,
+   "nll_cost": 0.31486609424171713,
+   "claim_predicted": 0.0374813,
+   "claim_observed": 0.03704,
+   "mean_ratio": 0.6212858016723903,
+   "crps": 104.3049127315158,
+   "pit_distance": 0.39599999999999635,
+   "above_1000_predicted": 0.0180006,
+   "above_1000_observed": 0.02638,
+   "above_5000_predicted": 0.0024521,
+   "above_5000_observed": 0.002,
+   "cpu": 795.5080710000002
+  },
+  "independent heads": {
+   "nll": 0.6191400342288501,
+   "nll_count": 0.1562953623994053,
+   "nll_cost": 0.46284467182944483,
+   "claim_predicted": 0.0026493,
+   "claim_observed": 0.03704,
+   "mean_ratio": 0.044583345298176,
+   "crps": 105.6705190610589,
+   "pit_distance": 3.215688524670446,
+   "above_1000_predicted": 0.0013189,
+   "above_1000_observed": 0.02638,
+   "above_5000_predicted": 0.000169,
+   "above_5000_observed": 0.002,
+   "cpu": 1632.2960669999993
+  },
+  "frequency and severity": {
+   "nll": 0.47111451806550875,
+   "nll_count": 0.1562953623994053,
+   "nll_cost": 0.31481915566610347,
+   "claim_predicted": 0.0359521,
+   "claim_observed": 0.03704,
+   "mean_ratio": 0.598397559426341,
+   "crps": 104.24801106812193,
+   "pit_distance": 0.45399999999999885,
+   "above_1000_predicted": 0.0173276,
+   "above_1000_observed": 0.02638,
+   "above_5000_predicted": 0.0023335,
+   "above_5000_observed": 0.002,
+   "cpu": 845.737478
+  }
+ },
+ "2": {
+  "chain": {
+   "nll": 0.46670314264984547,
+   "nll_count": 0.15494813776396676,
+   "nll_cost": 0.3117550048858787,
+   "claim_predicted": 0.0355254,
+   "claim_observed": 0.03646,
+   "mean_ratio": 0.602330865543533,
+   "crps": 111.58108319577225,
+   "pit_distance": 0.45199999999999685,
+   "above_1000_predicted": 0.0178621,
+   "above_1000_observed": 0.02592,
+   "above_5000_predicted": 0.0026769,
+   "above_5000_observed": 0.00182,
+   "cpu": 1109.626577
+  },
+  "independent heads": {
+   "nll": 0.613931774364837,
+   "nll_count": 0.15489555875188438,
+   "nll_cost": 0.45903621561295266,
+   "claim_predicted": 0.0025066,
+   "claim_observed": 0.03646,
+   "mean_ratio": 0.04397941164367861,
+   "crps": 112.87821456254788,
+   "pit_distance": 3.396516514280701,
+   "above_1000_predicted": 0.0013406,
+   "above_1000_observed": 0.02592,
+   "above_5000_predicted": 0.0001932,
+   "above_5000_observed": 0.00182,
+   "cpu": 1813.3994949999988
+  },
+  "frequency and severity": {
+   "nll": 0.46694613089699605,
+   "nll_count": 0.15489555875188438,
+   "nll_cost": 0.3120505721451118,
+   "claim_predicted": 0.0359674,
+   "claim_observed": 0.03646,
+   "mean_ratio": 0.6228650430839742,
+   "crps": 111.61932441764034,
+   "pit_distance": 0.40400000000000436,
+   "above_1000_predicted": 0.0180791,
+   "above_1000_observed": 0.02592,
+   "above_5000_predicted": 0.0028097,
+   "above_5000_observed": 0.00182,
+   "cpu": 900.5118640000001
+  }
+ }
+}

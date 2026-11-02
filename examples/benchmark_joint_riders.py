@@ -44,7 +44,7 @@ coverage and mean width of its central 80% interval and its CRPS, read from
 
 Run with::
 
-    JAX_PLATFORMS=cpu python examples/benchmark_joint_riders.py run       # about ten minutes on four cores
+    JAX_PLATFORMS=cpu python examples/benchmark_joint_riders.py run       # about 30 minutes on four cores
     python examples/benchmark_joint_riders.py report
 """
 

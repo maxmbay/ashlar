@@ -44,6 +44,13 @@ same splits, samples, probes, and ladders:
   on the CDF read from the levels, sorted where they cross and linear
   between them.
 
+The ``calibrated`` stage fits ``quantile_spline`` on 80% of the training
+claims and calibrates it on the other 20% (``calibrate``), with and without
+``monotone``, and scores it the same way. Calibration maps every row's CDF
+through the same increasing function, so it keeps dominance. Beside it, two
+references: one quantile per level for every claim (the training claims'
+quantiles), and the ``mixture`` head, which cannot be constrained.
+
 Each LightGBM model trains at learning rate 0.05 with up to 4,000 trees,
 early-stopped after 100 rounds on a random 20% of its training rows, and
 takes the best of a small grid of leaf counts and leaf sizes by validation
@@ -52,8 +59,10 @@ loss; XGBoost the same, with a grid of depths and smallest leaf weights.
 Run with::
 
     JAX_PLATFORMS=cpu python examples/benchmark_monotone.py run seeds=3
-    JAX_PLATFORMS=cpu python examples/benchmark_monotone.py gbm seeds=3
-    JAX_PLATFORMS=cpu python examples/benchmark_monotone.py report
+    JAX_PLATFORMS=cpu python examples/benchmark_monotone.py gbm seeds=3          # about 25 minutes on four cores
+    JAX_PLATFORMS=cpu python examples/benchmark_monotone.py calibrated seeds=3   # about 20 minutes
+    python examples/benchmark_monotone.py report
+    python examples/benchmark_monotone.py gbm_report
 """
 
 from __future__ import annotations
@@ -392,6 +401,92 @@ def gbm(seeds="3", rows="200000"):
         GBM_RESULTS.write_text(json.dumps(results, indent=1))
 
 
+class _Calibrated:
+    """A calibrated model seen through ``predict_dist``: its CDF is ``1 - predict_exceedance``, as calibration reads it."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def predict_dist(self, frame):
+        model = self.model
+
+        class View:
+            def cdf(self, thresholds):
+                values = np.asarray(thresholds, dtype=float).reshape(-1)
+                return np.stack([1.0 - np.asarray(model.predict_exceedance(frame, float(v))) for v in values])
+
+            def mean(self):
+                return np.asarray(model.predict_dist(frame).mean())
+
+        return View()
+
+
+def calibrated(seeds="3", rows="200000"):
+    """``quantile_spline`` fitted on 80% of the training claims and calibrated on the other 20%
+    (``calibrate``, a split-conformal map of every row's PIT), with and without ``monotone``; added to
+    ``monotone-fremtpl2-gbm.json``. One map for every row keeps dominance: it moves every row's CDF the same way."""
+    frame = policies()
+    name = "quantile_spline, calibrated"
+    added = (name, "mixture", "training quantiles")
+    results = json.loads(GBM_RESULTS.read_text()) if GBM_RESULTS.exists() else []
+    results = [r for r in results if r["model"] not in added]
+    for seed in range(int(seeds)):
+        parts = splits(frame, seed, int(rows))
+        claimed_train, claimed_test = parts["claimed_train"], parts["claimed_test"]
+        x = claimed_train[NUMERIC + CATEGORICAL].reset_index(drop=True)
+        y = np.log(claimed_train["S"].to_numpy())
+        x_claimed = claimed_test[NUMERIC + CATEGORICAL].reset_index(drop=True)
+        y_claimed = np.log(claimed_test["S"].to_numpy())
+        hold = np.random.default_rng(seed).random(len(x)) < 0.2
+
+        def scored(model_name, q, **extra):
+            return {
+                "seed": seed, "outcome": "severity", "model": model_name, "monotone": False,
+                "pinball": float(np.mean([pinball(y_claimed, q[i], level).mean() for i, level in enumerate(GBM_LEVELS)])),
+                "pinball by level": [float(pinball(y_claimed, q[i], level).mean()) for i, level in enumerate(GBM_LEVELS)],
+                "share below": [float(np.mean(y_claimed <= q[i])) for i in range(len(GBM_LEVELS))],
+                **extra,
+            }
+
+        # Two references: one quantile per level for every claim, and the mixture head, which cannot be constrained.
+        constant = np.quantile(y, GBM_LEVELS)[:, None] * np.ones((1, len(y_claimed)))
+        results.append(scored("training quantiles", constant, cpu=0.0))
+        start = time.process_time()
+        mixture = ASRRegressor(task="mixture", random_state=seed).fit(x, y)
+        results.append(scored("mixture", mixture.predict_quantiles(x_claimed, list(GBM_LEVELS)).T,
+                              nll=float(-np.mean(mixture.log_prob(x_claimed, y_claimed))), cpu=time.process_time() - start))
+        print(json.dumps(results[-2]), json.dumps(results[-1]), flush=True)
+        for constrained in (False, True):
+            start = time.process_time()
+            spline = ASRRegressor(task="quantile_spline", monotone=CONSTRAINT if constrained else None, random_state=seed)
+            spline.fit(x[~hold].reset_index(drop=True), y[~hold])
+            spline.calibrate(x[hold].reset_index(drop=True), y[hold])
+            seconds = time.process_time() - start
+            q = spline.predict_quantiles(x_claimed, list(GBM_LEVELS)).T
+
+            def spline_quantiles(frame, spline=spline):
+                return spline.predict_quantiles(frame, list(GBM_LEVELS)).T
+
+            raw = spline.predict_quantiles(x_claimed, list(GBM_LEVELS), calibrated=False).T
+            record = {
+                "seed": seed, "outcome": "severity", "model": name, "monotone": constrained,
+                "pinball": float(np.mean([pinball(y_claimed, q[i], level).mean() for i, level in enumerate(GBM_LEVELS)])),
+                "pinball by level": [float(pinball(y_claimed, q[i], level).mean()) for i, level in enumerate(GBM_LEVELS)],
+                "share below": [float(np.mean(y_claimed <= q[i])) for i in range(len(GBM_LEVELS))],
+                "pinball before calibration": float(np.mean([pinball(y_claimed, raw[i], level).mean()
+                                                             for i, level in enumerate(GBM_LEVELS)])),
+                "share below before calibration": [float(np.mean(y_claimed <= raw[i])) for i in range(len(GBM_LEVELS))],
+                "test crossing": float(np.mean(np.any(np.diff(q, axis=0) < -1e-9, axis=0))),
+                "cpu": seconds,
+                "crossings": crossings(spline_quantiles, parts["probe_claimed"], claimed_train),
+                "violations": violations(_Calibrated(spline), parts["probe_claimed"], claimed_train, parts["cost_ladder"]),
+            }
+            results.append(record)
+            print(json.dumps(record), flush=True)
+        GBM_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        GBM_RESULTS.write_text(json.dumps(results, indent=1))
+
+
 def gbm_report():
     results = json.loads(GBM_RESULTS.read_text())
     keys = dict.fromkeys((r["outcome"], r["model"], r["monotone"]) for r in results)
@@ -441,4 +536,4 @@ def report():
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
-    {"run": run, "gbm": gbm, "report": report, "gbm_report": gbm_report}[command](**_arguments())
+    {"run": run, "gbm": gbm, "calibrated": calibrated, "report": report, "gbm_report": gbm_report}[command](**_arguments())

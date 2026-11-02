@@ -306,8 +306,167 @@ def compute() -> None:
         print(f"{path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}: {path.stat().st_size / 1024:.0f} KB", flush=True)
 
 
+POLICY_RANK = 0.999  # the policy drawn on the left: the one nearest this rank of the chain's P(N >= 1)
+ROW_NAMES = ("no claim", "1 claim", "2 claims", "3 claims", "4 claims")
+# Each curve on the right: (key in curves.json, legend label, colour, line style, width), drawn in this order.
+CURVES = (
+    ("independent heads", "two heads fitted apart", "SLATE", (0, (5, 3)), 2.0),
+    ("frequency and severity", "frequency × severity by hand", "SLATE", (0, (1, 2.2)), 2.2),
+    ("LightGBM Poisson × gamma", "LightGBM Poisson × gamma", "CLAY", "-", 2.2),
+    ("chain", 'task="chain"', "TEAL", "-", 3.0),
+)
+
+
+def _euros(value: float) -> str:
+    if value >= 1e6:
+        return f"€{value / 1e6:g}M"
+    if value >= 1e3:
+        return f"€{value / 1e3:g}k"
+    return f"€{value:g}"
+
+
 def draw() -> None:
-    raise SystemExit("the draw stage needs the style kit, examples/readme/style.py, which is not on this branch yet")
+    import style as k
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FixedLocator, NullLocator
+    from matplotlib.transforms import blended_transform_factory
+
+    arguments = _arguments()
+    folder = Path(arguments.get("artifacts", ARTIFACTS))
+    curves = json.loads((folder / "curves.json").read_text())
+    views = json.loads((folder / "policies.json").read_text())
+    ranks = np.array([view["claim_probability_rank"] for view in views["policies"]])
+    view = views["policies"][int(arguments.get("policy", np.argmin(np.abs(ranks - POLICY_RANK))))]
+    scores = curves["scores"]
+    colour = {"TEAL": k.TEAL, "CLAY": k.CLAY, "SLATE": k.SLATE}
+
+    fig = k.card(
+        "The cost reads the count, and the total ties LightGBM's.",
+        f"freMTPL2, {curves['test_policies']:,} held-out French motor policies, split 0. One chained model: a negative "
+        "binomial claim count, then a hurdle cost per claim that reads the count. Right: the share of policies whose "
+        "total for the year, T = count × cost per claim, is above t.",
+        height=8.4,
+        footer=2,
+    )
+    box = fig.box
+    left, bottom, width, height = box.cell()
+    head, tail = 1.0, 0.78
+    y0, h = (bottom + tail) / box.height, (height - head - tail) / box.height
+
+    def axes(x, w, **kwargs):
+        return fig.add_axes([(left + x) / box.width, y0, w / box.width, h], **kwargs)
+
+    # ---- left: one policy, a count and then a cost given the count
+    rows = len(ROW_NAMES)
+    mass = np.asarray(view["chain"]["count_mass"])
+    density = np.asarray(view["chain"]["cost_density_given_count"])  # (counts, grid), per log10 euro
+    grid = np.log10(np.asarray(views["cost_grid"]))
+    bars = axes(1.0, 1.2)
+    costs = axes(2.85, 2.35, sharey=bars)
+    k.style(bars, frame="")
+    k.style(costs, frame="b")
+    y = rows - 1 - np.arange(rows)  # no claim at the top
+    bars.barh(y, mass, height=0.5, color=k.TEAL, lw=0)
+    for row in range(rows):
+        share = mass[row]
+        text = k.pct(share, 1) if share >= 0.001 else f"{100 * share:.1g}%"
+        k.value(bars, max(share, 0.0) + 0.05, y[row], text, k.TEAL, size=12.5)
+        bars.text(-0.08, y[row], ROW_NAMES[row], transform=bars.get_yaxis_transform(), fontproperties=k.F.label,
+                  color=k.INK, ha="right", va="center")
+    bars.set_xlim(0, 1.0)
+    bars.set_xticks([])
+    bars.set_yticks([])
+    bars.set_ylim(-0.55, rows - 0.35)
+
+    # The cost per claim given each count, and its mean in a column of its own beside the ridges.
+    peak = density.max()
+    column_x = left + 5.95  # inches from the card's left edge
+    column = blended_transform_factory(fig.dpi_scale_trans, costs.transData)
+    fig.text(column_x, y[1] + 0.42, "mean", fontproperties=k.F.small, color=k.MUTED, ha="right", va="bottom",
+             transform=column)
+    for count in range(1, rows):
+        base = y[count] - 0.32
+        curve = density[count - 1] / peak * 0.8
+        costs.fill_between(grid, base, base + curve, color=k.TEAL_PALE, lw=0, zorder=2)
+        costs.plot(grid, base + curve, color=k.TEAL_DARK, lw=1.5, zorder=3)
+        mean = view["chain"]["cost_mean_given_count"][count - 1]
+        top = np.interp(np.log10(mean), grid, curve)
+        costs.plot([np.log10(mean)] * 2, [base, base + top], color=k.TEAL_DARK, lw=1.2, zorder=4)
+        fig.text(column_x, y[count], f"€{k.num(mean)}", fontproperties=k.font("SemiBold", 12.5), color=k.TEAL_DARK,
+                 ha="right", va="center", transform=column)
+    costs.axhline(y[0] - 0.32, color=k.HAIR, lw=0.8, zorder=1)
+    k.value(costs, 1.05, y[0], "€0, for certain", k.TEAL, size=12.5)
+    costs.set_xlim(1.0, 5.0)
+    costs.xaxis.set_major_locator(FixedLocator([1, 2, 3, 4, 5]))
+    costs.set_xticklabels([_euros(10.0 ** e) for e in range(1, 6)], fontproperties=k.F.tick)
+    costs.yaxis.set_major_locator(NullLocator())
+    costs.set_xlabel("cost per claim, given the count", fontproperties=k.F.axis, color=k.INK, labelpad=10)
+    k.rich(bars, 0.0, 1.0, [("One policy, as ", k.INK, k.F.panel), ('task="chain"', k.TEAL, k.F.mono_bold),
+                            (" draws it", k.INK, k.F.panel)],
+           transform=k._above(bars, 0.5), va="bottom")
+    features = view["features"]
+    age = int(features["VehAge"])
+    car = "a new car" if age == 0 else f"a car {age} year{'s' if age != 1 else ''} old"
+    bars.text(-0.75, 1.0, f"Bonus-malus {features['BonusMalus']:g}, driver aged {features['DrivAge']:g}, {car}: "
+              f"chance of a claim {k.pct(view['claim_probability'], 0)}",
+              transform=k._above(bars, 0.12), fontproperties=k.F.small, color=k.MUTED, ha="left", va="bottom")
+
+    # ---- right: the portfolio's exceedance curve
+    ax = axes(7.0, width - 7.0 - 0.1)
+    k.style(ax, frame="lb", grid="y")
+    t = np.asarray(curves["thresholds"])
+    observed = np.asarray(curves["exceedance"]["observed"])
+    keep = observed > 0
+    ax.plot(t[keep], observed[keep], color=k.INK, lw=1.7, zorder=6, drawstyle="steps-post")
+    for key, _label, name, dash, lw in CURVES:
+        p = np.asarray(curves["exceedance"][key])
+        ax.plot(t[p > 0], p[p > 0], color=colour[name], lw=lw, linestyle=dash, zorder=5 if key == "chain" else 4)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(1, 1e6)
+    ax.set_ylim(1e-5, 0.12)
+    ax.xaxis.set_major_locator(FixedLocator([1, 10, 100, 1e3, 1e4, 1e5, 1e6]))
+    ax.set_xticklabels([_euros(v) for v in (1, 10, 100, 1e3, 1e4, 1e5, 1e6)])
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.yaxis.set_major_locator(FixedLocator([1e-5, 1e-4, 1e-3, 1e-2, 1e-1]))
+    ax.set_yticklabels(["0.001%", "0.01%", "0.1%", "1%", "10%"])
+    ax.yaxis.set_minor_locator(NullLocator())
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontproperties(k.F.tick)
+    ax.set_xlabel("t, a policy's total cost for the year", fontproperties=k.F.axis, color=k.INK, labelpad=10)
+    k.panel_title(ax, "Every held-out policy: the share with T above t", raise_by=0.5)
+
+    def at(key, where):
+        return float(np.interp(np.log10(where), np.log10(t), np.asarray(curves["exceedance"][key])))
+
+    k.value(ax, 1.5, at("observed", 1.5) * 1.3, f"what happened: {k.pct(observed[0], 2)} above €1",
+            k.INK, va="bottom", size=12.5)
+    apart = curves["exceedance"]["independent heads"][0]
+    k.value(ax, 1.5, at("independent heads", 1.5) * 0.7, f"two heads fitted apart: {k.pct(apart, 2)}", k.SLATE,
+            va="top", size=12.5)
+    handles = [Line2D([], [], color=k.INK, lw=1.7, label="what happened")]
+    handles += [Line2D([], [], color=colour[name], lw=lw, linestyle=dash, label=label)
+                for _key, label, name, dash, lw in reversed(CURVES)]
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.015, 0.015), frameon=False, prop=k.F.label,
+              handlelength=2.2, handletextpad=0.6, labelspacing=0.45, labelcolor=k.INK, borderaxespad=0)
+
+    # ---- the numbers, split 0
+    k.rich(fig, box.left / box.width, (0.34 + 0.32 + 0.1) / box.height, [
+        ("Joint NLL per policy ", k.MUTED, k.F.label),
+        (f"{scores['chain']['nll']:.4f}", k.TEAL, k.F.value),
+        (" for the chain, ", k.MUTED, k.F.label),
+        (f"{scores['LightGBM Poisson × gamma']['nll']:.4f}", k.CLAY, k.F.value),
+        (" for LightGBM Poisson × gamma, ", k.MUTED, k.F.label),
+        (f"{scores['independent heads']['nll']:.4f}", k.SLATE, k.F.value),
+        (" fitted apart.  CRPS of T: ", k.MUTED, k.F.label),
+        (f"{scores['chain']['crps']:.1f}", k.TEAL, k.F.value),
+        (" against ", k.MUTED, k.F.label),
+        (f"{scores['LightGBM Poisson × gamma']['crps']:.1f}", k.CLAY, k.F.value),
+        (", a tie.", k.MUTED, k.F.label),
+    ], va="bottom")
+    k.footnote(fig, "Curves are exact, not drawn: the mean over policies of Σ P(N = n) P(S > t / n | N = n). "
+                    "Frequency × severity by hand (dotted) lies under the chain.")
+    k.save(fig, NAME, folder=Path(arguments["images"]) if "images" in arguments else None)
 
 
 STAGES = {"compute": compute, "draw": draw}
