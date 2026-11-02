@@ -34,6 +34,14 @@ Stages, each skipping what is already saved:
     python examples/benchmark_additive.py rescore     # scores the saved gamlss fits again, without refitting
     python examples/benchmark_additive.py report
     JAX_PLATFORMS=cpu python examples/benchmark_additive.py figure
+    JAX_PLATFORMS=cpu python examples/benchmark_additive.py terms   # needs R with gamlss; the README figure's terms
+
+``terms`` refits Ashlar's additive negative binomial and gamlss's ``NBI``,
+without and with the pair, on one bike split (by default the one whose saved
+gamlss pair fit was fastest, which favours gamlss), and writes every term of
+the log mean and the dispersion on a grid of its columns, centred on the
+training rows, with the saved scores of every split, to
+``examples/readme/artifacts/additive-gamlss/terms.json``.
 
 ``gamlss`` runs ``Rscript`` with the user library first on its path. Results
 go to ``$ASHLAR_BENCH/additive`` (default ``/tmp/ashlar-bench/additive``).
@@ -254,6 +262,40 @@ for (model in models) {
 }
 """
 
+# The README figure's fits: each NBI fit's terms of log mu and log sigma on its own training rows.
+R_TERMS = r"""
+train_path <- args[2]; out_prefix <- args[3]
+models <- strsplit(args[4], ",")[[1]]
+factors <- strsplit(args[5], ",")[[1]]
+train <- read.csv(train_path, stringsAsFactors = FALSE)
+for (f in factors) {
+  train[[f]] <- factor(as.character(train[[f]]), levels = sort(unique(as.character(train[[f]]))))
+}
+main <- "season + yr + mnth + hr + holiday + weekday + weathersit + pb(temp) + pb(atemp) + pb(hum) + pb(windspeed)"
+for (model in models) {
+  terms <- if (model == "gamlss_nbi_pair") paste(main, "+ hr:workingday") else main
+  started <- Sys.time()
+  fit <- tryCatch(
+    gamlss(as.formula(paste("cnt ~", terms)), sigma.formula = as.formula(paste("~", terms)), nu.formula = ~1,
+           family = NBI(), data = train, control = gamlss.control(n.cyc = 200, trace = FALSE)),
+    error = function(e) { message(model, " failed: ", conditionMessage(e)); NULL })
+  if (is.null(fit)) next
+  seconds <- as.numeric(difftime(Sys.time(), started, units = "secs"))
+  for (what in c("mu", "sigma")) {
+    # Without newdata, predict(type = "terms") is lpred's: each term's part of the linear predictor on the
+    # training rows, the design centred on its column means, plus the term's smoother.
+    values <- predict(fit, what = what, type = "terms")
+    out <- data.frame(values, check.names = FALSE)
+    out[[".constant"]] <- attr(values, "constant")
+    out[[".lp"]] <- fit[[paste0(what, ".lp")]]
+    write.csv(out, paste0(out_prefix, "-", model, "-", what, "-terms.csv"), row.names = FALSE)
+  }
+  writeLines(c(as.character(seconds), as.character(isTRUE(fit$converged)), as.character(fit$iter),
+               as.character(deviance(fit))), paste0(out_prefix, "-", model, "-fit.txt"))
+  cat(model, "seconds", seconds, "converged", isTRUE(fit$converged), "cycles", fit$iter, "\n")
+}
+"""
+
 R_RESCORE = r"""
 rows_path <- args[2]; model <- args[3]
 rows <- read.csv(rows_path)
@@ -360,6 +402,200 @@ def _python_check(name: str, model: str, rows: pd.DataFrame) -> float:
     else:
         return float("nan")
     return float(np.max(np.abs(crps_from_cdf(cdf, y, grid, step) - rows["crps"].to_numpy())))
+
+
+# ---------------------------------------------------------------- terms, for the README figure
+
+BIKE_MODELS = ("ashlar_additive", "gamlss_nbi", "ashlar_additive_pair", "gamlss_nbi_pair", "ashlar_blackbox")
+
+
+def _saved_runs(name: str, models) -> dict:
+    """Every saved split's summary of each model: the benchmark's numbers, read and not refitted."""
+    out = {}
+    for model in models:
+        for seed in SEEDS:
+            path = _path(name, seed, model)
+            if path.exists():
+                out.setdefault(model, {})[str(seed)] = json.loads(path.read_text())
+    return out
+
+
+def _terms_seed(saved: dict) -> tuple[int, str]:
+    """The split whose saved gamlss pair fit was fastest: gamlss's best-behaved split, so the choice favours it."""
+    pair = saved.get("gamlss_nbi_pair", {})
+    if not pair:
+        return 0, "seed 0: no saved gamlss pair fit to choose by"
+    seed = min(pair, key=lambda key: pair[key]["seconds"])
+    return int(seed), f"the split whose saved gamlss pair fit was fastest ({pair[seed]['seconds']:.0f} s)"
+
+
+def _term_grid(values: np.ndarray, frame: pd.DataFrame, columns) -> dict:
+    """One term's value at each distinct value of its columns, and the rows there."""
+    columns = list(columns)
+    table = frame[columns].copy()
+    for column in columns:
+        if not pd.api.types.is_numeric_dtype(table[column]):
+            table[column] = table[column].astype(str)
+    table["value"] = np.asarray(values, dtype=np.float64)
+    grouped = table.groupby(columns, sort=True)["value"]
+    keys = list(grouped.groups)
+    to_python = (lambda key: [_plain(part) for part in key]) if len(columns) > 1 else _plain
+    spread = grouped.std(ddof=0).fillna(0.0)
+    return {
+        "columns": columns,
+        "x": [to_python(key) for key in keys],
+        "y": [round(float(value), 6) for value in grouped.mean().to_numpy()],
+        "rows": [int(value) for value in grouped.size().to_numpy()],
+        "spread": float(spread.max()),
+    }
+
+
+def _plain(value):
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    return str(value)
+
+
+def _gamlss_columns(label: str) -> tuple[str, ...]:
+    """The columns of X behind a gamlss term label: ``pb(temp)`` is ``temp``, ``hr:workingday`` two columns."""
+    if label.startswith("pb(") and label.endswith(")"):
+        return (label[3:-1],)
+    return tuple(label.split(":"))
+
+
+# Terms read together, as one shape against the first column: the temperature and the felt temperature move together,
+# so each model splits their effect between them in its own way.
+COMBINED = {"temp+atemp": ("temp", "atemp")}
+
+
+def _term_tables(values: dict, columns: dict, outputs, frame: pd.DataFrame) -> tuple[dict, dict]:
+    """Each term's grid on every output, the combined terms, and each term's importance (mean |value| over rows).
+
+    ``values[name]`` is ``(rows, outputs)``, centred on the rows; ``columns[name]`` its columns of ``frame``.
+    """
+    terms, importance = {}, {}
+    pieces = dict(values)
+    for combined, parts in COMBINED.items():
+        if all(part in values for part in parts):
+            pieces[combined] = sum(values[part] for part in parts)
+            columns = {**columns, combined: (parts[0],)}
+    for name, value in pieces.items():
+        entry = None
+        for position, output_name in enumerate(outputs):
+            cell = _term_grid(value[:, position], frame, columns[name])
+            if entry is None:
+                entry = {key: cell[key] for key in ("columns", "x", "rows")}
+                entry["spread"] = 0.0
+            entry[output_name] = cell["y"]
+            if name not in COMBINED:
+                entry["spread"] = max(entry["spread"], cell["spread"])
+        terms[name] = entry
+        if name not in COMBINED:
+            importance[name] = [round(float(np.mean(np.abs(value[:, position]))), 6) for position in range(len(outputs))]
+    return terms, importance
+
+
+def run_terms(seed: int | None, output: Path):
+    """Ashlar's additive negative binomial and gamlss's NBI on one bike split, each term on a grid of its columns.
+
+    Both are fitted as the benchmark fits them, without and with the hour ×
+    working day pair: Ashlar's terms come from ``shape_functions`` on the
+    training rows, gamlss's from ``predict(..., what=, type="terms")`` on the
+    same rows. Every term is centred on the training rows, so the curves
+    compare directly. Ashlar's dispersion terms are on its raw scale, before
+    the softplus that makes the dispersion; gamlss's on log sigma (NBI's
+    sigma is Ashlar's dispersion, the variance being mean + dispersion ×
+    mean²). The benchmark's saved scores and seconds for every split go in too.
+    """
+    import shutil
+
+    ROOT.mkdir(parents=True, exist_ok=True)
+    rscript = os.environ.get("RSCRIPT") or shutil.which("Rscript")
+    if rscript is None:
+        raise SystemExit("Rscript is not on PATH; set RSCRIPT to its path")
+    saved = _saved_runs("bike", BIKE_MODELS)
+    if seed is None:
+        seed, rule = _terms_seed(saved)
+    else:
+        rule = f"seed {seed}, as asked"
+    print(f"terms on bike split {seed}: {rule}", flush=True)
+    X_train, y_train, X_test, y_test = split("bike", seed)
+    grid, step = _grid("bike")
+    out = {"seed": seed, "seed_rule": rule, "train_rows": len(y_train), "ashlar": {}, "gamlss": {}, "benchmark": saved}
+
+    for model_name, pairs in (("ashlar_additive", None), ("ashlar_additive_pair", PAIRS["bike"])):
+        started = time.perf_counter()
+        model = _model("negative_binomial", "additive", pairs, seed).fit(X_train, y_train)
+        seconds = time.perf_counter() - started
+        shapes = model.shape_functions(X_train)
+        crps = float(np.mean(crps_from_cdf(_cdf_on_grid(model.predict_dist(X_test), grid), y_test, grid, step)))
+        values = {name: shapes.values[:, index, :] for index, name in enumerate(shapes.names)}
+        terms, importance = _term_tables(values, dict(zip(shapes.names, shapes.columns)), shapes.outputs, X_train)
+        saved_crps = saved.get(model_name, {}).get(str(seed), {}).get("crps")
+        out["ashlar"][model_name] = {
+            "seconds": round(seconds, 2),
+            "outputs": list(shapes.outputs),
+            "intercept": [round(float(value), 6) for value in shapes.intercept],
+            "terms": terms,
+            "importance": importance,
+            "test_crps": round(crps, 4),
+            "saved_test_crps": saved_crps,
+        }
+        print(model_name, f"{seconds:.1f} s, test CRPS {crps:.3f} (saved {saved_crps})", flush=True)
+
+    script = ROOT / "terms_gamlss.R"
+    script.write_text(R_SCORING + R_TERMS)
+    train, _test = _gamlss_frame("bike", X_train, y_train, X_test, y_test)
+    prefix = ROOT / f"terms-bike-{seed}"
+    train.to_csv(f"{prefix}-train.csv", index=False)
+    models = ["gamlss_nbi", "gamlss_nbi_pair"]
+    for model_name in models:
+        for stale in ROOT.glob(f"{prefix.name}-{model_name}-*"):
+            stale.unlink()
+    command = [rscript, str(script), "bike", f"{prefix}-train.csv", str(prefix), ",".join(models), ",".join(FACTORS["bike"])]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr[-4000:])
+    outputs = ("log_mean", "log_dispersion")
+    for model_name in models:
+        fit_path = Path(f"{prefix}-{model_name}-fit.txt")
+        if not fit_path.exists():
+            print(model_name, "no fit", flush=True)
+            continue
+        seconds, converged, cycles, deviance = fit_path.read_text().split()
+        tables = [pd.read_csv(f"{prefix}-{model_name}-{what}-terms.csv") for what in ("mu", "sigma")]
+        labels = [label for label in tables[0].columns if not label.startswith(".")]
+        if [label for label in tables[1].columns if not label.startswith(".")] != labels:
+            raise SystemExit(f"{model_name}: the mu and sigma formulas gave different terms")
+        raw = np.stack([table[labels].to_numpy(np.float64) for table in tables], axis=-1)  # (rows, terms, outputs)
+        means = raw.mean(axis=0)
+        gaps = [float(np.abs(table[".constant"].to_numpy() + raw[:, :, k].sum(axis=1) - table[".lp"].to_numpy()).max())
+                for k, table in enumerate(tables)]
+        names = [":".join(_gamlss_columns(label)) for label in labels]
+        values = {name: raw[:, index, :] - means[index] for index, name in enumerate(names)}
+        columns = {name: _gamlss_columns(label) for name, label in zip(names, labels)}
+        terms, importance = _term_tables(values, columns, outputs, X_train)
+        out["gamlss"][model_name] = {
+            "seconds": round(float(seconds), 1),
+            "converged": converged == "TRUE",
+            "cycles": int(cycles),
+            "deviance": float(deviance),
+            "outputs": list(outputs),
+            "labels": dict(zip(names, labels)),
+            "intercept": [round(float(table[".constant"].iloc[0] + means[:, k].sum()), 6) for k, table in enumerate(tables)],
+            "lp_check": gaps,
+            "terms": terms,
+            "importance": importance,
+        }
+        print(model_name, f"{float(seconds):.0f} s, converged {converged}, {cycles} cycles, lp check {max(gaps):.1e}",
+              flush=True)
+
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / "terms.json"
+    path.write_text(json.dumps(out, indent=None, separators=(",", ":")))
+    print("wrote", path, f"({path.stat().st_size / 1024:.0f} KB)", flush=True)
 
 
 # ---------------------------------------------------------------- report
@@ -489,6 +725,9 @@ def main(argv):
             report()
         elif stage == "figure":
             figure(Path(options.get("output", "docs/images/additive-bike.png")))
+        elif stage == "terms":
+            seed = int(options["seed"]) if "seed" in options else None
+            run_terms(seed, Path(options.get("output", "examples/readme/artifacts/additive-gamlss")))
         else:
             raise SystemExit(f"unknown stage {stage!r}")
 
