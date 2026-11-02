@@ -1,5 +1,0 @@
-at 9bc6b8f (dev)
-{"table": "taxi_tip", "model": "ashlar", "variant": "v3", "seed": 1, "seconds": 129.4, "epochs": 35, "rmse": 2.0370925721139304, "mae": 0.8982355118055393}
-{"table": "taxi_tip", "model": "ashlar_mixture", "variant": "v3", "seed": 1, "seconds": 209.8, "epochs": 54, "rmse": 2.0330722318571706, "mae": 0.6627099313808982, "crps": 0.4619240860609061, "nll": -1.632610304208994, "pinball": 0.2091356709452828, "coverage80": 0.83012, "width80": 2.0839060986802576}
-{"table": "taxi_tip", "model": "catboost", "variant": "", "seed": 1, "seconds": 201.1, "trees": 3133, "rmse": 1.7950865758931245, "mae": 0.6454365346290141, "crps": 0.6590938316651237, "nll": 1.9780474815195084, "pinball": 0.2975669904774527, "coverage80": 0.94951, "width80": 4.4919659609194005}
-{"table": "taxi_tip", "model": "catboost_uncertainty", "variant": "", "seed": 1, "seconds": 378.7, "trees": 4000, "rmse": 1.7984222740827303, "mae": 0.638259142521916, "crps": 0.45716621760540466, "nll": 0.7077197825799558, "pinball": 0.2047049244560669, "coverage80": 0.83059, "width80": 1.9314688577325279}

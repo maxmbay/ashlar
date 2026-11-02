@@ -1,5 +1,0 @@
-at d14b3d8 (dev)
-{"table": "click", "model": "ashlar", "variant": "v3", "seed": 1, "seconds": 263.9, "epochs": 20, "accuracy": 0.841832673311939, "log_loss": 0.39489439129829407, "auc": 0.7369649201750743}
-{"table": "click", "model": "lightgbm", "variant": "", "seed": 1, "seconds": 33.0, "trees": 3999, "accuracy": 0.843910363921278, "log_loss": 0.3863995679837396, "auc": 0.7533090372209132}
-{"table": "click", "model": "xgboost", "variant": "", "seed": 1, "seconds": 38.3, "trees": 3548, "accuracy": 0.8439554222718421, "log_loss": 0.3861885964870453, "auc": 0.7537422394590174}
-{"table": "click", "model": "catboost", "variant": "", "seed": 1, "seconds": 139.1, "trees": 3999, "accuracy": 0.8434297415152623, "log_loss": 0.38838653863134537, "auc": 0.7495136742739444}
