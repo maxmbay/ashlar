@@ -854,7 +854,7 @@ Two columns whose correlation is +0.9 in one regime and -0.9 in the other, the r
 
 From [`examples/benchmark_observed_real.py`](../examples/benchmark_observed_real.py): the questions of [the section above](#labels-that-say-what-was-observed), asked of real tables. The clinical tables and the drives carry their own censoring. For the sold-out shelves and the meter readings, the censoring or the grouping is applied to values that were recorded exactly, so every fit can still be scored against them. Each stage ran alone on the M3 Pro laptop of [How it was run](#how-it-was-run), beside a macOS background process that used up to one core, because two jobs at once make XGBoost's threads spin and multiply its CPU seconds. CPU seconds count every thread of the process. XGBoost 3.4.1, LightGBM 4.7.0, scikit-survival 0.28.0, pycox 0.3.0 on torch 2.15.0, and JAX 0.12. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments but a seed, and for the meter readings the weekday and the day of the year marked as cyclical.
 
-In short: censored sales and irregular meter readings teach the model nearly what the true values would have, as in the simulations, while weekly totals cannot place the load within the week. On survival, the `mixture` head, untuned, has a better likelihood than tuned XGBoost AFT on two clinical tables of three and ties on the third, but on drive failures with delayed entry the usual workaround of fitting the days watched, with the age as a feature, beats Ashlar's truncated likelihood.
+In short: censored sales and irregular meter readings teach the model nearly what the true values would have, as in the simulations, while weekly totals cannot place the load within the week. On the sold-out shelves, though, XGBoost's AFT model fitted to the same censored sales is ahead of every Ashlar fit, its orders costing 4.7% less than those of Ashlar's fit to the true demand. On survival, the `mixture` head, untuned, has a better likelihood than tuned XGBoost AFT on two clinical tables of three and ties on the third, but on drive failures with delayed entry the usual workaround of fitting the days watched, with the age as a feature, beats Ashlar's truncated likelihood.
 
 ### Survival on three clinical tables
 
@@ -893,6 +893,12 @@ XGBoost's CPU seconds are for its grid of 42 fits. One fit at the setting the gr
 - **A single log-normal does not fit SUPPORT.** The `gaussian` head passes D-calibration on no split there, and neither does AFT, whose one error family with one spread for every row is less flexible still. The mixture passes on 4 of 5. On METABRIC and GBSG every uncalibrated model passes on at least 4 splits of 5. Cox and Kaplan-Meier, whose baseline curves assume no shape, pass everywhere.
 - **Calibrating on 15% of the training rows helps D-calibration only where the head was wrong.** On SUPPORT it brings the `gaussian` from a D-calibration χ² of 65.9 to 13.9; on METABRIC and GBSG, with 230 to 270 calibration rows, it fails more splits than the uncalibrated head (2 and 3 passing of 5, against 5 and 4).
 - **Ashlar's one fit costs less than tuning AFT, and more than AFT once tuned.** Its 5 to 14 CPU seconds per fit are a quarter to a half of AFT's grid, and 10 to 25 times one AFT fit at the chosen setting. Without its grid AFT has no setting: its likelihood depends on the error family and the spread, which it does not learn.
+
+#### The README's survival figure
+
+[`examples/readme/survival.py`](../examples/readme/survival.py) reruns the five SUPPORT splits for the README's figure on the current code, in a cloud container with 4 CPUs: the `mixture` head and XGBoost AFT on its 42-fit grid, split and scored as above. The results match the table. The mixture's NLL of the log time is 1.733 ± 0.018 against AFT's 1.874 ± 0.010, its concordance 0.623 ± 0.009 against 0.623 ± 0.010, and its integrated Brier score 0.1998 ± 0.0033 against 0.2049 ± 0.0033. It passes D-calibration on 4 of 5 splits, with a χ² of 12.8 ± 5.1, against 0 of 5 and 46.9 ± 12.0 for AFT.
+
+On the first split the script also reads every test patient's survival curve over five years. The mixture's curves cross, each lying at least 0.02 above the other somewhere, for 38% of the pairs among 400 test patients. AFT's never cross: each patient's curve is the same error family with the same spread, shifted along log time, so one patient's risk is above another's at every time or at none.
 
 ### Drive failures with delayed entry
 
@@ -934,6 +940,20 @@ The `mixture` and `hurdle` heads are each fitted four ways, as in the simulation
 - **Fitting sales learns demand that is too low**, as in the simulation: the 90% quantile of a fit to sales is above the true demand on 68% to 72% of days, and LightGBM's on 67%.
 - **Every fit holds less of the last 20 days than it promises, the oracle included.** The oracle's 90% quantile holds 82% to 85% of the test days, and its 80% interval, calibrated on days 60 to 69, holds 73%, so the last 20 days differ from the 70 before them. The censored fits track the oracle there (81% to 88%, and 71% to 76% after calibration); the other fits stay 13 to 15 points below it after calibration, since they are calibrated on capped sales.
 - **Censoring costs about what the oracle's fit costs**: 111 to 119 CPU seconds against 109 to 113.
+
+#### XGBoost AFT on the censored sales
+
+XGBoost's accelerated failure time model reads a censored label as a lower and an upper bound per row, so it can fit the sold-out days as censored too: `[sales + shift, sales + shift]` on a day that kept stock, `[sales + shift, inf)` on one that sold out. AFT models the log of its label and demand can be zero, hence the shift: 1, which makes the label the log of one plus the demand, or a tenth of the mean training sales. A shift leaves the label's density unchanged, so the likelihoods of the two are comparable. Its grid is the two shifts, the three error families, depths 3 and 6, and eleven spreads from 0.1 to 3: 132 fits, each early stopped on the censored sales of days 60 to 69, which also choose the fit with the best likelihood. It is scored as above, on the same three seeds, and its order cost is above the cost of the `mixture` fitted to the true demand.
+
+| Model | Trained on | NLL ↓ | CRPS ↓ | Below the 90% quantile | Order cost above the oracle's ↓ | CPU seconds |
+|---|---|---:|---:|---:|---:|---:|
+| XGBoost AFT | censored | 5.285 ± 0.028 | 0.273 ± 0.007 | 87.8% ± 0.7% | −4.7% ± 1.4% | 565 |
+
+The grid chose a shift of 1, normal errors, and a spread of 0.2 on every seed, with depth 3 on two seeds and 6 on the third. One fit at its choice took 4.5 CPU seconds of the grid's 565.
+
+- **The one tree that reads censoring is ahead on this table.** Its orders cost 4.7% less than the mixture oracle's, less on every seed (3.6% to 6.3%), against 4.0% more for the censored `mixture` and 5.2% more for the censored `hurdle` on the same yardstick. Its CRPS is 7% below the censored mixture's, and its 90% quantile is above the true demand on 87.8% of days against 81.3%. Its NLL, 5.285, is level with the censored `hurdle`'s 5.280 and 0.09 nats ahead of the censored mixture's.
+- **The gap is not the censoring.** XGBoost's censored fit also beats Ashlar's fits to the true demand, whose CRPS is 0.283 to 0.284, so on these features its trees predict demand better than Ashlar's default network does, censored or not. Reading the sold-out days as censored is what both need: every fit that reads them as demand, or drops them, orders at a cost 12% to 19% above its oracle's.
+- **Its grid costs about five Ashlar fits, and one tuned fit costs a twenty-fifth of one**: 565 CPU seconds for 132 fits, against 111 to 119 for each censored Ashlar fit, and 4.5 for one fit at the setting the grid chose.
 
 ### Daily loads from meter readings
 
