@@ -359,12 +359,11 @@ def draw():
 
     k.setup()
     fig = k.card(
-        f"Small stores borrow from the rest: CRPS {ours['1-5']['crps']:.3f} against GPBoost's "
-        f"{gpb['1-5']['crps']:.3f}.",
+        "Random store effects on Rossmann sales",
         f"Rossmann, {buckets.get('stores', 1115):,} stores: log daily sales given the store's type and assortment, "
-        "the date, promotions, holidays and competition, with a store effect pooled towards the average store. "
+        "the date, promotions, holidays and competition, with a random effect for each store. "
         "Each seen store trains on a random 1 to 300 of its days (log-uniform), and a fifth of the stores are "
-        f"held out whole. Left: one split. Right: mean of {splits_text} splits.",
+        f"held out entirely. Left: one split. Right: mean of {splits_text} splits.",
         height=9.4, footer=3.35,
     )
     left = k.panel(fig, rect=(0.0, 0.0, 0.575, 1.0), head=0.95, tail=0.8, lpad=0.72, rpad=0.12, grid="y")
@@ -422,7 +421,7 @@ def draw():
     left.minorticks_off()
     k.style(left, frame="lb", grid="y")
     k.axis_names(left, x="training days of the store", y="the store's effect on log sales")
-    k.panel_title(left, "The fewer its days, the further a store is pulled to the average", raise_by=0.42)
+    k.panel_title(left, "Stores with fewer days are pulled further towards the average", raise_by=0.42)
 
     # Right: CRPS by training days per store, a dot per method, seen stores above, new stores below.
     ys = np.r_[np.arange(4), np.arange(4, 6) + 0.55]

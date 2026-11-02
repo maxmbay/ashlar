@@ -257,8 +257,7 @@ def draw():
 
     k.setup()
     fig = k.card(
-        f"Days that move together: the 12-day total's interval holds {k.pct(numbers['joint_total_coverage'])}, "
-        f"not {k.pct(numbers['marginal_total_coverage'])}.",
+        "Sampled 12-day sales paths for one Rossmann store",
         f"Rossmann, {meta['stores']} stores: the next 12 days of log sales from the 28 before and the known days "
         "ahead (open, promotion, holidays). Top: 40 of 400 paths from a joint normal over the 12 days; bottom: 40 "
         f"from the same days' forecasts, drawn independently. Store {candidate['store']} from "
@@ -274,8 +273,8 @@ def draw():
 
     reach = max(np.quantile(joint[:SHOWN], 0.995), np.quantile(loose[:SHOWN], 0.995), sales[start:].max()) * 1.08
     for ax, draws, colour, pale, title in (
-        (top, joint, k.TEAL, k.TEAL_WASH, "Joint normal: each path keeps its level"),
-        (bottom, loose, k.CLAY, k.CLAY_WASH, "Same days, drawn independently: the errors cancel"),
+        (top, joint, k.TEAL, k.TEAL_WASH, "Joint normal over the 12 days"),
+        (bottom, loose, k.CLAY, k.CLAY_WASH, "The same daily forecasts, drawn independently"),
     ):
         low, high = np.quantile(draws, [0.1, 0.9], axis=0)
         ax.fill_between(ahead, low, high, color=pale, lw=0, zorder=1)
@@ -364,9 +363,10 @@ def draw():
     # calibrate, and none beats a constant at the base rate. The section's prose gives the Brier scores.
     assert numbers["best_any_peak"][0] == "deepar", numbers["best_any_peak"]
     assert numbers["base_rate_brier"] < numbers["best_any_peak_brier"], numbers
-    k.footnote(fig, f"Chronos-2, zero-shot, is level day by day ({numbers['chronos_daily']:.1f} against "
-                    f"{numbers['joint_daily']:.1f}) and draws no paths. For the chance that one of the 12 days beats "
-                    f"the best of the 28 before, DeepAR's probability scores best, and none beats always saying "
+    than = "better" if numbers["chronos_daily"] < numbers["joint_daily"] else "worse"
+    k.footnote(fig, f"Chronos-2, zero-shot, is slightly {than} day by day ({numbers['chronos_daily']:.1f} against "
+                    f"{numbers['joint_daily']:.1f}) but gives no sample paths. For the probability that one of the 12 "
+                    f"days beats the best of the 28 before, DeepAR scores best, and no model beats always predicting "
                     f"{k.pct(rate)}.", line=0)
     k.save(fig, FIGURE)
 

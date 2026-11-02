@@ -171,7 +171,7 @@ def _sweep_panel(ax, data):
     ax.spines["bottom"].set_bounds(left, x[-1] + 0.12)
     k.axis_names(ax, x="cost of a unit short to a unit over, and the critical ratio",
                  y="LightGBM's cost above Ashlar's, refitted at each ratio")
-    k.panel_title(ax, "The further into the tail, the more a refit costs")
+    k.panel_title(ax, "LightGBM's extra cost grows with the cost ratio")
 
 
 def _matrix_panel(ax, data):
@@ -217,10 +217,9 @@ def _matrix_panel(ax, data):
 def draw():
     sweep = k.load_json(FIGURE, "sweep")
     attributions = k.load_json(FIGURE, "attributions")
-    best = _best(sweep)
     riser, mean_share, width_share = _riser(attributions)
     fig = k.card(
-        f"One fit, every cost ratio: LightGBM refitted per ratio costs up to {best.max():.0f}% more.",
+        "Orders and explanations from the predicted distribution",
         f"Hourly bike rentals, {sweep['splits']} splits. Left: the newsvendor cost of each order on held-out hours. "
         f"Right: mean absolute attribution on {k.num(attributions['rows'])} held-out hours, circle area the share "
         "of each column; Ashlar's explain beside SHAP of LightGBM's mean, of its 0.9 minus 0.1 quantile models, "
@@ -235,7 +234,7 @@ def draw():
     crossed = attributions["crossed"]["mean"]
     k.footnote(fig, "LightGBM needs a model per question: two quantile models for the width (the 0.9 model fell "
                     f"below the 0.1 model on {100 * crossed:.2f}% of hours) and a classifier for each threshold. "
-                    "Decision-aware training was tried and did not pay (issue #32).", line=0)
+                    "Decision-aware training was tried and did not help (issue #32).", line=0)
     k.save(fig, "act")
     _thumb(sweep)
 

@@ -265,11 +265,10 @@ def draw_missing():
     missing = k.load_json(FIGURE, "missing")
     row = k.load_json(FIGURE, "one_row")
     cal, bike = missing["california"], missing["bike"]
-    draws30 = cal["draws"]["0.3"]["coverage"]["mean"]
     fig = k.card(
-        f"With 30% of the cells blank, the 80% interval still holds {k.pct(draws30)}.",
+        "Coverage of 80% intervals when inputs are missing at test time",
         "California housing and hourly bike rentals, mean of three splits. Fitted and calibrated on complete rows; "
-        "at test time numeric cells are blanked at random. LightGBM: quantile models with CQR on the same rows.",
+        "at test time, numeric values are removed at random. LightGBM: quantile models with CQR on the same rows.",
         height=8.4, footer=3,
     )
     common = {"lpad": 0.72, "rpad": 0.62, "head": 0.62}
@@ -356,12 +355,10 @@ def _widths_panel(ax, data):
 def draw_hours():
     data = k.load_json(FIGURE, "by_hour")
     widths = k.load_json(FIGURE, "widths")
-    m = data["methods"]
     narrower = sum(widths[t]["width_ratio"]["mean"] < 1.0 for t, _ in WIDTH_TABLES if t in widths)
     compared = sum(t in widths for t, _ in WIDTH_TABLES)
     fig = k.card(
-        f"One calibration leaves {m['pooled']['outside']} of 24 hours outside 75% to 85%; CQR leaves "
-        f"{m['cqr_pooled']['outside']}.",
+        "Coverage of 80% intervals by hour of day",
         f"Left: hourly bike rentals, coverage of the 80% interval within each hour of the day (about "
         f"{int(np.mean(data['test_rows'])):d} held-out rows an hour), mean of {data['splits']} splits, whiskers "
         "their range; \"off\" counts the hours outside 75% to 85%, widths in rentals. Right: the width after "

@@ -78,20 +78,20 @@ For labels rather than numbers, `ASRClassifier` fits a softmax, `ASROrdinalClass
 
 ## Large tables
 
-CRPS scores the whole predictive distribution in the target's units, lower is better. The trees give a distribution three ways here: the early-stopped mean with a normal whose width is the validation residual; CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance per row; and LightGBMLSS, which grows a LightGBM tree per parameter of a mixture of three normals. One split each (seed 0); [docs/benchmarks.md](benchmarks.md#large-tables) has more splits, every model, and the NLL.
+CRPS scores the whole predictive distribution in the target's units, lower is better. The trees give a distribution three ways here: the early-stopped mean with a normal whose width is the validation residual; CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance per row; and LightGBMLSS, which grows a LightGBM tree per parameter of a mixture of three normals. Each cell is the mean over three random splits; [docs/benchmarks.md](benchmarks.md#large-tables) has the spread across them, every model, and the NLL.
 
 | Table | Score | Ashlar `mixture` | LightGBMLSS mixture | CatBoost mean + variance | Best tree mean + normal |
 |---|---|---:|---:|---:|---:|
-| Airline delay, minutes | CRPS | 9.17 | **9.14** | 11.46 | 12.17 |
+| Airline delay, minutes | CRPS | 9.24 | **9.22** | 11.53 | 12.20 |
 | | 80% coverage | 80% | 79% | 94% | 94% |
-| Year | CRPS | **4.05** | 4.19 | 4.41 | 4.61 |
-| | 80% coverage | 77% | 76% | 83% | 85% |
-| Zurich transport | CRPS | **1.62** | 1.65 | 1.74 | 1.75 |
+| Year | CRPS | **4.03** | 4.17 | 4.40 | 4.60 |
+| | 80% coverage | 78% | 76% | 83% | 85% |
+| Zurich transport | CRPS | **1.62** | 1.65 | 1.74 | 1.74 |
 | | 80% coverage | 79% | 75% | 80% | 79% |
-| NYC green taxi tips, $ | CRPS | 0.59 | **0.44** | 0.46 | 0.66 |
+| NYC green taxi tips, $ | CRPS | 0.55 | **0.44** | 0.46 | 0.67 |
 | | 80% coverage | 82% | 75% | 83% | 95% |
 
-Against a normal of one width or CatBoost's per-row normal, the mixture has the lower CRPS on three of the four tables. LightGBMLSS's mixture is the strongest baseline: it ties Ashlar on airline delay, trails it by 3% on release years and 2% on Zurich, and wins on taxi tips, a spike at $0 and a long tail, where the trees' mean is much closer (RMSE 1.75 against 1.98) and Ashlar's CRPS is 36% higher. The trees' normal holds 94% of airline delays in its 80% interval because one width has to serve every flight; Ashlar's mixture holds 80% and LightGBMLSS's 79%. NLL is left out here: on airline delay's on-time minute and taxi tips' $0 it turns on how narrow a model makes the spike.
+Against a normal of one width or CatBoost's per-row normal, the mixture has the lower CRPS on three of the four tables. LightGBMLSS's mixture is the strongest baseline. It is 0.2% ahead of Ashlar on airline delay, ahead on each split; it trails Ashlar by 3.5% on release years and 1.7% on Zurich; and it wins on taxi tips, a spike at $0 and a long tail, where the trees' mean is much closer (RMSE 1.77 against the mixture's 2.04) and Ashlar's CRPS is 27% higher on average and 6% to 41% higher from split to split: Ashlar's mixture scores 0.46 to 0.61 there, where LightGBMLSS's stays between 0.43 and 0.44. The trees' normal holds 94% of airline delays in its 80% interval because one width has to serve every flight; Ashlar's mixture holds 80% and LightGBMLSS's 79%. NLL is left out here: on airline delay's on-time minute and taxi tips' $0 it turns on how narrow a model makes the spike.
 
 ## Conditional predictive distributions
 

@@ -385,10 +385,10 @@ ORDER = (("count", draw_count), ("spike", draw_spike), ("ceiling", draw_ceiling)
 def draw():
     n = k.load_json(FIGURE, "numbers")
     fig = k.card(
-        "Each target gets the shape it has.",
-        "Held-out data in grey, Ashlar's head in teal, and the best tree distribution on each table in dashed clay. "
-        "Each line is the share of the slice a model expects in each bin, from split 0; the numbers above each "
-        "tile are means over three splits.",
+        "Heads for a count, for point masses, and for a capped target",
+        "Held-out data in grey, Ashlar's head in teal, and the best tree-based distribution on each table in dashed "
+        "clay. Each line is the share of the data shown that a model expects in each bin, from split 0; the numbers "
+        "above each panel are means over three splits.",
         height=8.0,
         footer=3,
     )

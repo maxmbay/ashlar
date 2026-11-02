@@ -222,9 +222,9 @@ ROW_H = 2.36  # inches per row: the glyph, then the call and its likelihood unde
 
 def draw() -> None:
     fig = k.card(
-        "A label says what was recorded. The head scores exactly that.",
-        "The builders of ashlar.observed on one predictive density: what each label says of y in ink, the "
-        "likelihood the head trains on in teal, and in warm grey the values a table never shows.",
+        "Label types in ashlar.observed",
+        "Each label type drawn on one predicted density: what the label says about y in ink, the part of the "
+        "distribution its likelihood uses in teal, and in warm grey the values the data does not show.",
         height=1.85 + 2 * ROW_H - 0.22,
     )
     box = fig.box
