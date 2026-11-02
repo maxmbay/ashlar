@@ -14,10 +14,13 @@ and writes ``examples/readme/artifacts/joint-blocks/blocks.json``: each
 hour's predicted probability in every cell of one 16 × 16 grid of log riders
 (from 400,000 joint draws), its predicted correlation, what happened that
 hour, and the riders benchmark's numbers from
-``/tmp/ashlar-bench/joint-riders.json``, which ``benchmark_joint_riders.py
-run`` writes.
+``/tmp/ashlar-bench/joint-riders.json`` and
+``/tmp/ashlar-bench/joint-riders-calibrated.json``, which
+``benchmark_joint_riders.py run`` and ``calibrated`` write.
 
-``draw`` stacks each hour's mass in the logo's isometric blocks on one floor.
+``draw`` stacks each hour's mass in the logo's isometric blocks on one floor,
+beside the width of each model's 80% interval for the hour's total once every
+model is calibrated to hold 80%.
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ def compute() -> None:
     from sklearn.model_selection import train_test_split
 
     from ashlar import ASRRegressor
-    from benchmark_joint_riders import RESULTS, riders
+    from benchmark_joint_riders import CALIBRATED, RESULTS, riders
 
     x, counts = riders()
     y = np.log1p(counts)
@@ -99,19 +102,24 @@ def compute() -> None:
         "total_hours": int(len(x)),
         "test_hours": int(len(test)),
         "riders": json.loads(RESULTS.read_text()) if RESULTS.exists() else None,
+        "calibrated": json.loads(CALIBRATED.read_text()) if CALIBRATED.exists() else None,
     })
 
 
 COURSES = 12  # blocks at the tallest cell, as in the logo
+# Both hours are Ashlar's own predictions, so both are teal: the commute dark, the weekend afternoon light.
+COMMUTE = k.shade(k.TEAL, -0.14)
+LEISURE = k.mix(k.TEAL, k.CARD, 0.5)
 THUMB_COURSES = 7
 TICKS = ((10, 30, 100, 300), (150, 300, 600))  # casual, registered
-# The evidence: (benchmark model, label), the first being the model drawn.
+# The evidence, at equal coverage: (row of the riders benchmark's calibrated stage, label, colour of its numbers),
+# the first being the model drawn and the fourth the strongest baseline.
 EVIDENCE = (
-    ("joint", "this model, one fit"),
-    ("independent + static correlation", "fitted apart + one correlation"),
-    ("independent heads", "two heads fitted apart"),
-    ("LightGBM quantiles of the total", "LightGBM quantiles of the total"),
-    ("LightGBM quantiles per group, summed", "LightGBM per group, summed"),
+    ("joint, calibrate", "this model, one fit", k.TEAL_DARK),
+    ("independent heads, calibrate", "two heads fitted apart", k.MUTED),
+    ("independent + static correlation, CQR", "fitted apart + one correlation", k.MUTED),
+    ("LightGBM quantiles of the total, CQR", "LightGBM quantiles of the total", k.CLAY),
+    ("LightGBM quantiles per group, summed, CQR", "LightGBM per group, summed", k.MUTED),
 )
 
 
@@ -121,13 +129,13 @@ def _cell(value: float, edges) -> float:
 
 
 def _floor(mass):
-    """The two hours' mass summed, and each cell's colour: as in the logo, the hour that claims its mass."""
+    """The two hours' mass summed, and each cell's colour: as in the logo, that of the hour that claims its mass."""
     total = mass["commute"] + mass["leisure"]
     share = np.divide(mass["commute"], total, out=np.zeros_like(total), where=total > 0)
     colors = np.empty(total.shape, dtype=object)
     for i in range(total.shape[0]):
         for j in range(total.shape[1]):
-            colors[i, j] = k.mix(k.TEAL, k.CLAY, float(np.clip((share[i, j] - 0.25) / 0.5, 0.0, 1.0)))
+            colors[i, j] = k.mix(LEISURE, COMMUTE, float(np.clip((share[i, j] - 0.25) / 0.5, 0.0, 1.0)))
     return total, colors
 
 
@@ -173,7 +181,7 @@ def draw() -> None:
 
     # Each hour: a label on a leader line from its tallest stack, and what happened as an ink dot.
     places = {"commute": (-1.0, 4.4, 1.3), "leisure": (1.0, 5.4, 0.4)}
-    for name, color in (("commute", k.CLAY), ("leisure", k.TEAL)):
+    for name, color in (("commute", k.TEAL_DARK), ("leisure", k.TEAL)):
         hour = hours[name]
         i, j = np.unravel_index(np.argmax(mass[name]), mass[name].shape)
         top = k.iso(i + 0.5, j + 0.5, heights[i, j])
@@ -185,54 +193,58 @@ def draw() -> None:
         ax.text(anchor[0] + side * 0.25, anchor[1] + 0.05, when, fontproperties=k.F.label, color=color, ha=ha,
                 va="bottom", zorder=50)
         casual, registered = hour["observed"]
-        ax.text(anchor[0] + side * 0.25, anchor[1] - 0.1, f"what happened: {casual:,} casual, {registered:,} registered",
-                fontproperties=k.F.small, color=k.MUTED, ha=ha, va="top", zorder=50)
+        ax.text(anchor[0] + side * 0.25, anchor[1] - 0.1,
+                f"what happened: {casual:,} casual, {registered:,} registered\n"
+                f"predicted correlation {hour['correlation']:.2f}",
+                fontproperties=k.F.small, color=k.MUTED, ha=ha, va="top", zorder=50, linespacing=1.5)
         oi = int(np.clip(np.floor(_cell(casual, edges[0])), 0, CELLS - 1))
         oj = int(np.clip(CELLS - 1 - np.floor(_cell(registered, edges[1])), 0, CELLS - 1))
         dot = k.iso(oi + 0.5, oj + 0.5, heights[oi, oj])
         ax.scatter([dot[0]], [dot[1]], s=46, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=60)
 
-    # The evidence, in the right-hand column: the total's 80% interval over the benchmark's splits.
-    splits = [data["riders"][str(seed)] for seed in range(3) if str(seed) in data["riders"]]
+    # The evidence, in the right-hand column: the total's 80% interval once every model is calibrated to hold 80%,
+    # over the benchmark's splits.
+    splits = [data["calibrated"][str(seed)] for seed in range(3) if str(seed) in data["calibrated"]]
 
     def mean(model, key):
-        return float(np.mean([split[model][key] for split in splits]))
+        return float(np.mean([split[model]["after"][key] for split in splits]))
 
     inch = fig.dpi_scale_trans
-    labels = [label for _model, label in EVIDENCE]
+    labels = [label for _model, label, _color in EVIDENCE]
     label_width = max(k.text_width(label, k.F.label) for label in labels) + 0.3
     value_width = k.text_width("100%", k.F.value) + 0.35
-    x0 = box.width - box.right - label_width - 2 * value_width
+    table_width = label_width + 2 * value_width
+    x0 = box.width - box.right - table_width
     top = box.height - box.top - 0.3
     fig.text(x0, top, "Bikes out in the hour, casual plus registered", fontproperties=k.F.panel, color=k.INK,
              ha="left", va="top", transform=inch)
-    fig.text(x0, top - 0.38, f"80% interval on {splits[0]['test hours']:,} held-out hours, mean of {len(splits)} splits",
-             fontproperties=k.F.small, color=k.MUTED, ha="left", va="top", transform=inch)
+    protocol = f"Calibrated 80% interval, {splits[0]['test hours']:,} held-out hours, {len(splits)} splits"
+    fig.text(x0, top - 0.38, protocol, fontproperties=k.F.small, color=k.MUTED, ha="left", va="top", transform=inch)
     y = top - 0.98
-    for x, text in ((x0 + label_width + value_width, "holds"), (x0 + label_width + 2 * value_width, "width")):
+    for x, text in ((x0 + label_width + value_width, "holds"), (x0 + table_width, "width")):
         fig.text(x, y, text, fontproperties=k.F.small, color=k.MUTED, ha="right", va="center", transform=inch)
-    for r, (model, label) in enumerate(EVIDENCE):
+    for r, (model, label, color) in enumerate(EVIDENCE):
         y = top - 1.4 - 0.4 * r
-        color = k.TEAL_DARK if r == 0 else k.MUTED
         fig.text(x0, y, label, fontproperties=k.F.label, color=k.INK if r == 0 else k.MUTED, ha="left", va="center",
                  transform=inch)
         fig.text(x0 + label_width + value_width, y, k.pct(mean(model, "total_coverage_80"), 0),
                  fontproperties=k.F.value, color=color, ha="right", va="center", transform=inch)
-        fig.text(x0 + label_width + 2 * value_width, y, k.num(mean(model, "total_width_80")), fontproperties=k.F.value,
-                 color=color, ha="right", va="center", transform=inch)
-    note = ("One correlation fitted after the fact holds as often: the gain is from modelling the dependence at all. "
-            "LightGBM's quantiles of the total hold too few hours.")
-    fig.text(x0, box.bottom + 0.55, k.wrap(note, k.F.small, label_width + 2 * value_width),
+        fig.text(x0 + table_width, y, k.num(mean(model, "total_width_80")), fontproperties=k.F.value, color=color,
+                 ha="right", va="center", transform=inch)
+    note = (f"Calibrated on {splits[0]['calibration hours']:,} hours set aside from training: the first two rows "
+            "with calibrate(target=total), the rest by conformalized quantile regression. Uncalibrated, two heads "
+            "fitted apart and LightGBM's quantiles of the total hold too few hours.")
+    fig.text(x0, box.bottom + 0.55, k.wrap(note, k.F.small, table_width),
              fontproperties=k.F.small, color=k.MUTED, ha="left", va="bottom", transform=inch, linespacing=1.5)
     k.save(fig, NAME)
 
-    # The gallery's thumbnail: the same floor at half the resolution, and the first row of the evidence.
+    # The gallery's thumbnail: the same floor at half the resolution, and the first and fourth rows' widths.
     coarse = {name: m.reshape(CELLS // 2, 2, CELLS // 2, 2).sum(axis=(1, 3)) for name, m in mass.items()}
     small, small_colors = _floor(coarse)
     k.thumb("outcomes", "Joint outcomes", [
-        (k.pct(mean("joint", "total_coverage_80"), 0), k.TEAL),
-        (" inside an 80% band, against ", k.MUTED),
-        (k.pct(mean("LightGBM quantiles of the total", "total_coverage_80"), 0), k.CLAY),
+        (k.num(mean("joint, calibrate", "total_width_80")), k.TEAL),
+        (" riders wide at 80%, against ", k.MUTED),
+        (k.num(mean("LightGBM quantiles of the total, CQR", "total_width_80")), k.CLAY),
     ], lambda ax: _thumb_mark(ax, k.stacks(small, THUMB_COURSES), small_colors))
 
 
