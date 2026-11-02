@@ -660,6 +660,21 @@ Bold is the best in its column per target; NLL ties within 0.01.
 - **On abalone the count heads lose.** Rings vary less than their mean once the shell measurements are known, and neither a Poisson nor a negative binomial can be narrower than a Poisson. Their 80% intervals hold 96% of rings and are 70% wider than the mixture's. Use `gaussian` or `mixture` for an underdispersed count.
 - **Zero inflation helps only where there are zeros.** It ties the plain negative binomial on log mass everywhere and helps CRPS only on the casual counts.
 
+### Against a negative binomial around LightGBM's mean
+
+The fix a LightGBM user would reach for when the Poisson is too narrow: keep the Poisson objective's mean and put a negative binomial around it, with one dispersion `d` (variance = mean + d × mean²) fitted by maximum likelihood on the early-stopping slice. It comes out at 0.042 on bike rentals and 0.0034 on taxi pickups. From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py), stage `counts`, on the same three splits, scored the same way.
+
+| Target | Model | CRPS ↓ | NLL ↓ | 80% coverage | 80% width |
+|---|---|---:|---:|---:|---:|
+| Bike rentals, all | Ashlar `negative_binomial` | **16.56 ± 0.52** | **4.50** | 80% | 71 |
+| | LightGBM Poisson mean, one negative binomial dispersion | 18.28 ± 0.11 | 4.63 | 86% | 104 |
+| | LightGBM, Poisson objective | 18.42 ± 0.23 | 6.52 | 54% | 31 |
+| Taxi pickups | Ashlar `negative_binomial` | **314.7 ± 5.5** | **7.83** | 76% | 1,231 |
+| | LightGBM Poisson mean, one negative binomial dispersion | 362.3 ± 14.8 | 8.26 | 88% | 2,234 |
+| | LightGBM, Poisson objective | 397.8 ± 5.9 | 21.12 | 24% | 304 |
+
+One dispersion closes most of the gap in log mass, 4.63 against the head's 4.50 on bike rentals and 8.26 against 7.83 on pickups, and less of the gap in CRPS, 18.28 against 16.56 and 362.3 against 314.7. Its intervals now miss the other way: they hold 86% and 88% of counts and are 46% and 81% wider than the head's, since one dispersion has to serve every hour, steady or not. The head fits a dispersion for every row.
+
 ## Hurdle head
 
 From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi tips from the seaborn `taxis` table, 6,383 trips, 35.8% with no tip, payment type and total dropped. Five random 80/20 splits, seeds 0 to 4, mean ± standard error. Every model is `ASRRegressor(task=...)` with no other arguments. CRPS is from 2,000 draws of `predict_dist`; `P(no tip)` is `cdf(0)`, which for a smooth head is the mass it puts at or below zero; the interval is the uncalibrated 80% one.
@@ -672,6 +687,90 @@ From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi
 | `hurdle`, gamma | 0.867 ± 0.015 | **0.204 ± 0.003** | 93.2% | 4.00 |
 
 The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
+
+### Against LightGBM's two-model hurdle
+
+A LightGBM user builds a hurdle from two models: a classifier for P(tip > 0), and a regressor on the tipped trips, either with a gamma objective and one shape fitted on the early-stopping slice, or on the log tip with a constant normal. Composed, they give a distribution with an exact zero. From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py), stage `zero`, on the same five splits, mean ± standard error. The NLL is the negative log of the mass at $0 for an untipped trip and of the density for a tipped one.
+
+| Model | CRPS, $ ↓ | Brier of P(no tip) ↓ | NLL ↓ | 80% interval holds | Width, $ |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `hurdle`, gamma | 0.867 ± 0.015 | 0.204 ± 0.003 | 1.489 ± 0.012 | 93.2% | 4.00 |
+| Ashlar `hurdle`, lognormal | 0.892 ± 0.017 | 0.207 ± 0.002 | 1.648 ± 0.038 | 94.5% | 4.13 |
+| Ashlar `mixture` | 0.863 ± 0.022 | 0.239 ± 0.005 | — | 84.8% | 3.59 |
+| LightGBM classifier + gamma regressor | **0.856 ± 0.009** | **0.200 ± 0.003** | **1.487 ± 0.011** | 93.3% | 4.01 |
+| LightGBM classifier + log-tip regressor | 0.879 ± 0.009 | **0.200 ± 0.003** | 1.643 ± 0.023 | 95.0% | 4.43 |
+| LightGBM mean + constant normal | 0.982 ± 0.017 | 0.238 ± 0.006 | — | 86.6% | 4.70 |
+
+**The trees' hurdle ties Ashlar's.** With a gamma for the amount in both, the pair's CRPS is 0.856 against 0.867 and its Brier score 0.200 against 0.204, differences about the size of their standard errors, and the NLL is level at 1.487 against 1.489. What the head saves is the assembly: one model, one `predict_dist`, and draws and quantiles with the zero in them. A mean with a normal cannot say "no tip" at all; its P(no tip) is the mass it puts below zero, with a Brier score of 0.238.
+
+## Spikes, caps, and skew
+
+From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py). Four targets whose shape a tree's normal cannot take, each against LightGBM's mean with a constant normal (its scale the residual standard deviation on the early-stopping slice) and CatBoost `RMSEWithUncertainty` (a mean and a variance per row, early-stopped on the same slice); on the claim costs, also LightGBM with a gamma objective. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments except the histogram's 48 bins. CRPS is from 2,000 draws per row; the 80% intervals are uncalibrated; mean ± standard deviation over the splits.
+
+```bash
+pip install lightgbm xgboost catboost pyreadr
+JAX_PLATFORMS=cpu python examples/benchmark_shapes.py --stage all
+python examples/benchmark_shapes.py --stage report
+```
+
+### freMTPL2 cost per claim, at four fixed amounts
+
+The 24,944 claims of French motor insurance on the three splits of [Monotone constraints on freMTPL2](#monotone-constraints-on-fremtpl2), the log of the average cost per claim from the policy's features. 41.5% of claims sit at four amounts, €1,128.00, €1,128.12, €1,172.00, and €1,204.00, and 18.2% within 1% of €1,204 alone. The last two columns are the mass each model puts within 1% of €1,204 and between the four amounts widened by 1%.
+
+| Model | NLL of the log cost ↓ | CRPS of the log cost ↓ | 80% interval holds | Width | Within 1% of €1,204 | At the four amounts |
+|---|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.6761 ± 0.0053** | **0.5383 ± 0.0047** | 80.0% | 2.543 | 7.6% | 32.9% |
+| Ashlar `gaussian` | 1.4999 ± 0.0139 | 0.5791 ± 0.0052 | 83.5% | 2.818 | 0.7% | 3.1% |
+| LightGBM, gamma objective on the cost | 1.7458 ± 0.0329 | 0.6151 ± 0.0228 | 88.3% | 3.701 | 0.6% | 2.5% |
+| LightGBM on the log cost + constant normal | 1.5206 ± 0.0070 | 0.5841 ± 0.0046 | 83.2% | 2.828 | 0.7% | 3.0% |
+| CatBoost `RMSEWithUncertainty` on the log cost | 1.5011 ± 0.0139 | 0.5763 ± 0.0050 | 82.4% | 2.691 | 0.8% | 3.2% |
+
+The mixture puts a third of its mass at the four amounts, where 41.5% of the claims are; every smooth distribution puts about 3% there. Its NLL is 0.676 against 1.501 for CatBoost, the best of the trees, and its CRPS 0.538 against 0.576. LightGBM's gamma objective, with one shape for every claim, scores worst.
+
+### California housing, capped at $500,001
+
+The 20,640 block groups of the 1990 census, median house value in $100,000 from the other columns, three random 80/20 splits. The table caps the value at $500,001: 4.7% of block groups sit at the cap, and 45.9% of the 1,199 with a median income of $70,000 or more. The Brier score is for P(within $10,000 of the cap or above) against whether the block group is at the cap; "past the cap" is the mass more than $10,000 above it, where no block group is.
+
+| Model | CRPS ↓ | NLL ↓ | 80% holds | Width | Brier, at the cap ↓ | Past the cap | Income ≥ $70k: CRPS ↓ | Brier ↓ | Past the cap |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.2061 ± 0.0025** | 0.081 ± 0.060 | 75.9% | 0.814 | **0.0186 ± 0.0003** | 0.09% | **0.203 ± 0.015** | **0.092 ± 0.007** | 0.6% |
+| Ashlar `flow` | 0.2109 ± 0.0021 | **0.034 ± 0.016** | 77.1% | 0.860 | 0.0199 ± 0.0004 | 0.11% | 0.215 ± 0.023 | 0.102 ± 0.010 | 0.1% |
+| Ashlar `histogram`, 48 bins | 0.2200 ± 0.0030 | 0.298 ± 0.014 | 81.3% | 0.934 | 0.0200 ± 0.0008 | 1.42% | 0.251 ± 0.016 | 0.105 ± 0.004 | 14.0% |
+| LightGBM mean + constant normal | 0.2357 ± 0.0028 | 0.638 ± 0.020 | 86.7% | 1.178 | 0.0250 ± 0.0016 | 1.34% | 0.273 ± 0.012 | 0.153 ± 0.008 | 18.6% |
+| CatBoost `RMSEWithUncertainty` | 0.2467 ± 0.0022 | 0.579 ± 0.025 | 78.3% | 0.985 | 0.0264 ± 0.0023 | 1.29% | 0.282 ± 0.013 | 0.169 ± 0.015 | 16.9% |
+
+A normal is symmetric, so where the cap binds it spills past it. In the block groups earning $70,000 or more, LightGBM's normal puts 18.6% of its mass more than $10,000 above the cap and CatBoost's 16.9%; the mixture puts 0.6% there and stacks the rest at the cap, with a Brier score of 0.092 against 0.153 for whether a block group sits there. The histogram's fixed bins spill too (14.0%). LightGBM's constant width beats CatBoost's per-row variance on this table, 0.236 against 0.247 in CRPS. The mixture's uncalibrated 80% interval holds 75.9%; [`calibrate`](heads.md#calibrated-intervals) takes it to 80.6% on this table ([calibrated intervals](#calibrated-intervals)).
+
+### Diamonds, price in $1,000
+
+The 12,000-row sample of [Distributions on smaller tables](#diamonds-price-in-1000-12000-row-sample), three random 80/20 splits. The last column is the mass each model puts below $0 for the cheapest quarter of stones.
+
+| Model | CRPS ↓ | NLL ↓ | 80% holds | Width | Below $0, cheapest quarter |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.2042 ± 0.0078** | **-0.081 ± 0.057** | 80.5% | 0.915 | 0.0% |
+| Ashlar `flow` | 0.2119 ± 0.0236 | -0.060 ± 0.106 | 79.0% | 0.897 | 0.2% |
+| LightGBM mean + constant normal | 0.2849 ± 0.0118 | 0.914 ± 0.077 | 90.4% | 1.607 | 13.7% |
+| CatBoost `RMSEWithUncertainty` | 0.2250 ± 0.0064 | 0.113 ± 0.055 | 77.5% | 0.915 | 0.0% |
+
+Here CatBoost's per-row variance does most of the work: it narrows the normal for cheap stones, puts no mass below zero, and trails the mixture by 10% in CRPS. The constant width is what hurts the plain LightGBM normal, which puts 13.7% of a cheap stone's mass below $0.
+
+### NYC taxi fares, at the $52 flat fare
+
+The seaborn `taxis` table, 6,383 trips with zones; the fare from the zones, boroughs, hour, weekday, passengers, and cab colour, with distance, tolls, tip, and total left out. Every trip between JFK and Manhattan, 110 of them, ran at the $52 flat fare. Three random 80/20 splits; the last three columns are on the 20 to 27 JFK trips in each test set.
+
+| Model | CRPS, $ ↓ | NLL ↓ | 80% interval holds | Width, $ | Within $0.50 of $52 | Within $2 of $52 | CRPS on JFK trips, $ ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Ashlar `histogram`, 48 bins | 3.837 ± 0.033 | 3.075 ± 0.006 | 80.1% | 16.32 | 14.6% | 36.2% | 7.15 ± 2.35 |
+| Ashlar `mixture` | 2.961 ± 0.175 | **2.931 ± 0.095** | 74.0% | 9.82 | 7.5% | 29.1% | **2.19 ± 0.29** |
+| Ashlar `flow` | 3.824 ± 0.093 | 3.128 ± 0.029 | 73.3% | 13.61 | 7.9% | 30.3% | 2.69 ± 0.32 |
+| LightGBM mean + constant normal | 3.146 ± 0.061 | 3.275 ± 0.024 | 90.9% | 18.04 | 4.9% | 19.4% | 2.54 ± 0.35 |
+| CatBoost `RMSEWithUncertainty` | **2.762 ± 0.082** | 3.032 ± 0.023 | 82.1% | 11.35 | 5.2% | 20.7% | 2.50 ± 0.45 |
+
+**CatBoost wins this one.** Its per-row variance has the best CRPS over all trips, 2.76 against the mixture's 2.96, and no model learns the flat fare: on trips that all paid exactly $52, the histogram puts the most mass within 50 cents of it, 14.6%, against about 5% for the trees. With 83 to 90 JFK trips in a training set, the zones do not pin the fare down. The mixture is closest on those trips, CRPS 2.19 against 2.50, and has the best log likelihood overall.
+
+### The README's shapes figure
+
+[`examples/readme/shapes.py`](../examples/readme/shapes.py) refits split 0 of three of these runs and draws one held-out slice of each: the 256 hours LightGBM's Poisson puts at 350 to 450 bike rentals, every held-out claim, and the 235 block groups earning $70,000 or more. A model's line is its CDF across each bin averaged over the slice's rows; the numbers over the tiles are the three-split means above.
 
 ## Chained claim counts and costs
 
