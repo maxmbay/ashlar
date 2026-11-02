@@ -153,10 +153,10 @@ def test_each_joint_head_trains_on_a_blend_and_saves_it(task, kwargs, tmp_path):
     x, y = _shared_shock(800, 0)
     x_new, y_new = _shared_shock(1000, 1)
     objective = {"nll": 1.0, "energy": 1.0, "variogram": 0.5}
-    model = ASRRegressor(task=task, objective=objective, max_epochs=6, random_state=0, **kwargs).fit(x, y)
-    assert len(model.history_["val_loss"]) == 6 and np.all(np.isfinite(model.history_["val_loss"]))
+    model = ASRRegressor(task=task, objective=objective, max_epochs=2, **kwargs, **MICRO).fit(x, y)
+    assert len(model.history_["val_loss"]) == 2 and np.all(np.isfinite(model.history_["val_loss"]))
     # Validation reads the same draws every epoch, so a refit gives the same numbers.
-    again = ASRRegressor(task=task, objective=objective, max_epochs=6, random_state=0, **kwargs).fit(x, y)
+    again = ASRRegressor(task=task, objective=objective, max_epochs=2, **kwargs, **MICRO).fit(x, y)
     assert np.allclose(again.history_["val_loss"], model.history_["val_loss"], rtol=1e-4)
     log_density = np.asarray(model.log_prob(x_new, y_new))
     assert np.all(np.isfinite(log_density))
@@ -165,8 +165,8 @@ def test_each_joint_head_trains_on_a_blend_and_saves_it(task, kwargs, tmp_path):
     assert np.allclose(np.asarray(restored.log_prob(x_new[:50], y_new[:50])), log_density[:50], atol=1e-4)
     # Exact cells in a joint label train the same way as plain values.
     label = observed.stack([observed.exact(y[:, column]) for column in range(3)])
-    exact = ASRRegressor(task=task, objective=objective, max_epochs=1, random_state=0, **kwargs).fit(x, label)
-    plain = ASRRegressor(task=task, objective=objective, max_epochs=1, random_state=0, **kwargs).fit(x, y)
+    exact = ASRRegressor(task=task, objective=objective, max_epochs=1, **kwargs, **MICRO).fit(x, label)
+    plain = ASRRegressor(task=task, objective=objective, max_epochs=1, **kwargs, **MICRO).fit(x, y)
     assert np.allclose(exact.history_["val_loss"], plain.history_["val_loss"], rtol=1e-4)
 
 

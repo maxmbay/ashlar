@@ -12,6 +12,9 @@ from ashlar.chain import Chain, ChainHead, chain_columns, column_distribution, r
 from ashlar.errors import AshlarError, ShapeError
 from micro import MICRO
 
+# The automatic budget is 100 epochs at these sizes; a faster rate needs a fifth of that.
+FIT = {**MICRO, "max_epochs": 20, "learning_rate": 1e-2}
+
 INF = np.inf
 COLUMNS = ["poisson", "hurdle", "categorical", "gaussian"]
 
@@ -157,13 +160,13 @@ def test_chain_refuses_what_it_cannot_score():
 def test_chain_learns_that_the_amount_follows_the_count():
     x, y = _table(4000, seed=1)
     pair = y[:, :2]
-    model = ASRRegressor(task="chain", head_kwargs={"columns": ["poisson", "hurdle"]}, **MICRO).fit(x[:3000], pair[:3000])
+    model = ASRRegressor(task="chain", head_kwargs={"columns": ["poisson", "hurdle"]}, **FIT).fit(x[:3000], pair[:3000])
     draws = model.sample(x[3000:], n=200, seed=0)
     # An amount is zero exactly when there was no claim.
     agree = np.mean((draws[..., 0] == 0) == (draws[..., 1] == 0))
     assert agree > 0.97
-    independent = ASRRegressor(task="poisson", **MICRO).fit(x[:3000], pair[:3000, 0])
-    amount = ASRRegressor(task="hurdle", **MICRO).fit(x[:3000], pair[:3000, 1])
+    independent = ASRRegressor(task="poisson", **FIT).fit(x[:3000], pair[:3000, 0])
+    amount = ASRRegressor(task="hurdle", **FIT).fit(x[:3000], pair[:3000, 1])
     separate = independent.log_prob(x[3000:], pair[3000:, 0]) + amount.log_prob(x[3000:], pair[3000:, 1])
     assert model.log_prob(x[3000:], pair[3000:]).mean() > separate.mean() + 0.1
 
@@ -183,7 +186,7 @@ def test_chain_trains_on_unknown_classes_and_a_censored_last_column():
             observed.censored(np.minimum(time, limit), ~seen),
         ]
     )
-    model = ASRRegressor(task="chain", head_kwargs={"columns": ["categorical", "gaussian"]}, **MICRO).fit(x, label)
+    model = ASRRegressor(task="chain", head_kwargs={"columns": ["categorical", "gaussian"]}, **FIT).fit(x, label)
     draws = model.sample(x, n=100, seed=1)
     # The share of each cause is learned from every row, censored ones included.
     assert abs(draws[..., 0].mean() - cause.mean()) < 0.05
