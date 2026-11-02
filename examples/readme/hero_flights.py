@@ -39,8 +39,13 @@ It writes small artifacts under ``examples/readme/artifacts/hero-flights/``:
 - ``sweep.npz``: each card candidate's schedule with only the departure hour
   moved, 5:00 to 23:00, and both models' predictions for it.
 
-``draw`` reads them and writes ``docs/images/readme/hero-flights.png``;
-``examples/readme/one_flight.py`` draws the card from the same artifacts.
+``draw`` reads them and writes ``docs/images/readme/hero-flights.png``:
+sixteen of the pool's flights at evenly spaced ranks of P(delay > 60 min),
+each as its mixture's continuous part with the central 80% solid, and a stem
+for the component narrower than a quarter of a minute: the mass the mixture
+puts on leaving exactly on time (18% on average, where 18.5% of the pool's
+flights did). ``examples/readme/one_flight.py`` draws the card from the same
+artifacts.
 
     python examples/readme/hero_flights.py compute   # about 40 minutes on a laptop CPU
     python examples/readme/hero_flights.py draw
@@ -443,24 +448,205 @@ def compute(out: Path, models: Path, epochs=None) -> None:
 
 # ---------------------------------------------------------------- draw
 
+SOFT = 10.0  # minutes: the delay axis is asinh(delay / 10), linear near zero and logarithmic past half an hour
+X_LO, X_HI = -40.0, 300.0
+TICKS = (-30, -10, 0, 10, 30, 60, 120, 300)
+RIDGES = 16
+NEEDLE = 2.0  # the stem's length, in rows, per unit of probability at the point mass
+P60 = "P(delay\u00a0>\u00a01\u00a0h)"  # unbreakable
+EARLY = -15.0  # the wash at the left: departures this early, a tenth of a percent of flights
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+DAYS = "Mon Tue Wed Thu Fri Sat Sun".split()
 
-def draw() -> None:
-    raise SystemExit("the draw stage needs the style kit (examples/readme/style.py) from dev")
+
+def warp(x):
+    return np.arcsinh(np.asarray(x, dtype=np.float64) / SOFT)
+
+
+def unwarp(u):
+    return SOFT * np.sinh(np.asarray(u, dtype=np.float64))
+
+
+def load(folder: Path):
+    summary = json.loads((folder / "summary.json").read_text())
+    with np.load(folder / "pool.npz", allow_pickle=False) as data:
+        pool = {key: data[key] for key in data.files}
+    card = json.loads((folder / "card.json").read_text())
+    return summary, pool, card
+
+
+def early_share(folder: Path, cutoff: float = EARLY) -> float:
+    """The share of the scored flights that left more than ``-cutoff`` minutes early."""
+    with np.load(folder / "hours.npz", allow_pickle=False) as data:
+        grid, counts, flights = data["grid"], data["counts"].sum(axis=0), int(data["flights"].sum())
+    return float(counts[grid < cutoff].sum() / flights)
+
+
+def clock(value, fmt) -> str:
+    minutes = float(_minutes(value, fmt))
+    return f"{int(minutes // 60) % 24:02d}:{int(round(minutes % 60)) % 60:02d}"
+
+
+def flight_label(pool, i, summary) -> str:
+    """"DL ATL→LGA · Fri 18:05 · Dec" from a pool row's schedule."""
+    col = summary["columns"]
+    x = lambda name: pool[f"x_{col[name]}"][i]  # noqa: E731
+    return (f"{x('carrier')} {x('origin')}→{x('dest')} · {DAYS[int(x('weekday')) - 1]} "
+            f"{clock(x('departure'), summary['clock_format'])} · {MONTHS[int(x('month')) - 1]}")
+
+
+def pick_ridges(pool, count: int = RIDGES):
+    """A fixed rule: the random pool's flights at evenly spaced ranks of Ashlar's P(delay > 60 min)."""
+    candidates = np.flatnonzero(~pool["is_card"])
+    order = candidates[np.argsort(pool["p60"][candidates], kind="stable")]
+    ranks = ((np.arange(count) + 0.5) / count * len(order)).astype(int)
+    return order[ranks]
+
+
+ATOM = 0.25  # minutes: a mixture component narrower than this is a point mass (on-time departures, at zero)
+
+
+def split_atom(pool, i):
+    """Flight ``i``'s mixture as its continuous part and its point mass: ``(weight, loc, scale), (mass, at)``."""
+    weight, loc, scale = (pool[key][i].astype(np.float64) for key in ("weight", "loc", "scale"))
+    narrow = scale < ATOM
+    mass = float(weight[narrow].sum())
+    at = float(np.round(np.sum(weight[narrow] * loc[narrow]) / mass)) if mass > 0 else 0.0
+    return (weight[~narrow], loc[~narrow], scale[~narrow]), (mass, at)
+
+
+def warped_density(pool, i, u):
+    """Flight ``i``'s continuous density on the warped axis, so that area is probability."""
+    (weight, loc, scale), _ = split_atom(pool, i)
+    density = mixture_density(weight[None], loc[None], scale[None], unwarp(u))[0]
+    return density * SOFT * np.cosh(u)
+
+
+def legend(fig, k, items, *, line: int):
+    """``k.legend_row`` with one more kind, "needle": a short vertical stroke for a point mass."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    handles = []
+    for kind, color, label in items:
+        if kind in ("patch", "pale"):
+            handles.append(Patch(facecolor=color, edgecolor="none", label=label))
+        elif kind == "bar":
+            handles.append(Line2D([], [], color=color, lw=4.5, solid_capstyle="butt", label=label))
+        elif kind == "dot":
+            handles.append(Line2D([], [], color=color, marker="o", lw=0, ms=7, markeredgecolor=k.CARD, label=label))
+        elif kind == "needle":
+            handles.append(Line2D([], [], color=color, marker="|", lw=0, ms=16, mew=2.2, label=label))
+    box = fig.box
+    return fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(box.left / box.width, (0.3 + 0.32 * line) / box.height),
+                      ncol=len(handles), frameon=False, prop=k.F.label, handlelength=1.8, columnspacing=2.0,
+                      labelcolor=k.INK, borderaxespad=0, handletextpad=0.6)
+
+
+def p60_errors(bins, least: int = 1000) -> float:
+    """The largest gap, in points, between predicted and observed P(delay > 60) over bins of ``least`` flights."""
+    return max(abs(b["predicted"] - b["observed"]) * 100 for b in bins if b["flights"] >= least)
+
+
+def draw(folder: Path = ARTIFACTS) -> None:
+    import style as k
+
+    summary, pool, _card = load(folder)
+    scores = summary["scores"]
+    ours, theirs = scores["ashlar"], scores["catboost_uncertainty"]
+    exact = ours["exact_quantiles"]  # the drawn 80% is predict_quantiles' 0.1 to 0.9
+    picks = pick_ridges(pool)
+    u = np.linspace(warp(X_LO), warp(X_HI), 1200)
+    densities = np.stack([warped_density(pool, i, u) for i in picks])
+    inner = [(float(warp(pool["q10"][i])), float(warp(pool["q90"][i]))) for i in picks]
+    solid = k.mix(k.TEAL, k.CARD, 0.36)
+
+    fig = k.card(
+        "Every flight gets its own distribution.",
+        f"Airline delay: {summary['training_rows'] + summary['test_rows']:,} US flights, schedule only, no weather. "
+        "Each ridge is one held-out flight's predicted departure delay from a single ASRRegressor(task=\"mixture\") "
+        "fit, its central 80% solid. Under it, CatBoost RMSEWithUncertainty's 80% interval for the same flight, and "
+        "the delay that happened.",
+        height=11.4,
+        footer=3,
+    )
+    ax = k.panel(fig, (0.0, 0.0, 1.0, 1.0), head=0.1, tail=0.8, lpad=3.0, rpad=1.95)
+    height = 1.5
+    bases = k.ridgeline(ax, u, densities, inner=inner, gap=1.0, height=height, color=solid, pale=k.TEAL_PALE,
+                        edge=k.TEAL_DARK, lw=1.2, floor=0.0015)
+    left, right = u[0], u[-1]
+    # The point mass at zero, flights that leave on the minute: a stem from the baseline, its length the probability.
+    for row, i in enumerate(picks):
+        _, (mass, at) = split_atom(pool, i)
+        if mass <= 0:
+            continue
+        ua, base = float(warp(at)), bases[row]
+        ax.plot([ua, ua], [base, base + mass * NEEDLE], color=k.TEAL_DARK, lw=2.6, solid_capstyle="butt", zorder=403)
+        ax.scatter([ua], [base + mass * NEEDLE], s=34, color=k.TEAL_DARK, edgecolor=k.CARD, lw=0.8, zorder=404)
+    # Departures earlier than EARLY are rare: a wash, so a symmetric interval visibly spends width there.
+    top = bases[-1] + height + 0.25
+    ax.axvspan(left, warp(EARLY), color=k.GRID, lw=0, zorder=0)
+    share = early_share(folder)
+    ax.text((left + warp(EARLY)) / 2, top - 0.05, f"{k.pct(share, 1)} of flights\nleft this early",
+            fontproperties=k.F.small, color=k.MUTED, ha="center", va="top", linespacing=1.3, zorder=1)
+    ax.axvline(warp(0.0), color=k.HAIR, lw=1.0, zorder=0)
+    ax.axvline(warp(THRESHOLD), color=k.MUTED, lw=0.9, ls=(0, (2, 3)), zorder=0)
+    for row, i in enumerate(picks):
+        base = bases[row]
+        y = base - 0.2
+        lo = float(pool["cat_loc"][i] - bench.Z80 * pool["cat_scale"][i])
+        hi = float(pool["cat_loc"][i] + bench.Z80 * pool["cat_scale"][i])
+        a, b = max(warp(lo), left), min(warp(hi), right)
+        ax.plot([a, b], [y, y], color=k.CARD, lw=5.2, solid_capstyle="butt", zorder=399)
+        ax.plot([a, b], [y, y], color=k.CLAY, lw=2.6, solid_capstyle="butt", zorder=400)
+        actual = float(pool["actual"][i])
+        marker = ">" if actual > X_HI else "<" if actual < X_LO else "o"
+        ax.scatter([min(max(warp(actual), left), right)], [y], s=30, marker=marker, color=k.INK, edgecolor=k.CARD,
+                   lw=1.0, zorder=401, clip_on=False)
+        ax.text(left - 0.1, base - 0.08, flight_label(pool, i, summary), fontproperties=k.F.label, color=k.INK,
+                ha="right", va="center")
+        k.value(ax, right + 0.42, base - 0.08, k.pct(float(pool["p60"][i])), k.TEAL, ha="right")
+        k.value(ax, right + 1.12, base - 0.08, k.pct(float(pool["cat_p60"][i])), k.CLAY, ha="right")
+    head = bases[-1] + 1.0
+    ax.text(right + 0.77, head + 0.62, P60, fontproperties=k.F.small, color=k.MUTED, ha="center",
+            va="bottom")
+    ax.text(right + 0.42, head, "Ashlar", fontproperties=k.F.small, color=k.TEAL, ha="right", va="bottom")
+    ax.text(right + 1.12, head, "CatBoost", fontproperties=k.F.small, color=k.CLAY, ha="right", va="bottom")
+    k.style(ax, frame="b")
+    ax.set_yticks([])
+    ax.set_xticks(warp(TICKS))
+    ax.set_xticklabels([k.num(t) for t in TICKS])
+    for label in ax.get_xticklabels():
+        label.set_fontproperties(k.F.tick)
+    ax.set_xlim(left, right)
+    ax.set_ylim(-0.6, top)
+    k.axis_names(ax, x="departure delay, minutes (log scale beyond half an hour)")
+
+    legend(fig, k, [("patch", solid, "Ashlar's central 80%"), ("pale", k.TEAL_PALE, "its tails"),
+                    ("needle", k.TEAL_DARK, "its chance of leaving on the minute"),
+                    ("bar", k.CLAY, "CatBoost's 80%"), ("dot", k.INK, "what happened")], line=2)
+    k.footnote(fig, f"On {summary['scored_rows']:,} held-out flights, Ashlar's 80% intervals held "
+                    f"{k.pct(exact['coverage80'], 1)} of delays at {exact['width80']:.0f} minutes wide, CatBoost's "
+                    f"{k.pct(theirs['coverage80'], 1)} at {theirs['width80']:.0f}; CRPS {ours['crps']:.2f} against "
+                    f"{theirs['crps']:.2f}. Ashlar's {P60} was within {p60_errors(ours['p60_bins']):.1f} points "
+                    f"of the observed rate in every bin of 1,000 flights or more, CatBoost's off by up to "
+                    f"{p60_errors(theirs['p60_bins']):.1f}.", line=0)
+    k.save(fig, NAME)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("stage", choices=("compute", "draw"))
-    parser.add_argument("--out", default=str(ARTIFACTS), help="artifact folder (compute)")
+    parser.add_argument("--artifacts", default=str(ARTIFACTS), help="the artifact folder compute writes and draw reads")
     parser.add_argument("--models", default=str(bench.CACHE / "readme" / NAME), help="where the fits are saved")
     parser.add_argument("--smoke", action="store_true", help="a quick check of the pipeline on few epochs, never for the figure")
     args = parser.parse_args()
     if args.stage == "compute":
         if args.smoke:
             bench.DIST_ROWS = 4_000
-        compute(Path(args.out), Path(args.models), epochs=2 if args.smoke else None)
+        compute(Path(args.artifacts), Path(args.models), epochs=2 if args.smoke else None)
     else:
-        draw()
+        draw(Path(args.artifacts))
 
 
 if __name__ == "__main__":
