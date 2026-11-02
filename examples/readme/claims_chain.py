@@ -306,12 +306,11 @@ def compute() -> None:
         print(f"{path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}: {path.stat().st_size / 1024:.0f} KB", flush=True)
 
 
-POLICY_RANK = 0.999  # the policy drawn on the left: the one nearest this rank of the chain's P(N >= 1)
+POLICY_RANK = 0.997  # the policy drawn on the left: the one nearest this rank of the chain's P(N >= 1)
 ROW_NAMES = ("no claim", "1 claim", "2 claims", "3 claims", "4 claims")
 # Each curve on the right: (key in curves.json, legend label, colour, line style, width), drawn in this order.
 CURVES = (
-    ("independent heads", "two heads fitted apart", "SLATE", (0, (5, 3)), 2.0),
-    ("frequency and severity", "frequency × severity by hand", "SLATE", (0, (1, 2.2)), 2.2),
+    ("frequency and severity", "frequency × severity by hand", "SLATE", (0, (1, 2.2)), 2.4),
     ("LightGBM Poisson × gamma", "LightGBM Poisson × gamma", "CLAY", "-", 2.2),
     ("chain", 'task="chain"', "TEAL", "-", 3.0),
 )
@@ -341,8 +340,8 @@ def draw() -> None:
     colour = {"TEAL": k.TEAL, "CLAY": k.CLAY, "SLATE": k.SLATE}
 
     fig = k.card(
-        "The cost reads the count, and the total ties LightGBM's.",
-        f"freMTPL2, {curves['test_policies']:,} held-out French motor policies, split 0. One chained model: a negative "
+        "One chained model ties both compositions built by hand.",
+        f"freMTPL2, {curves['test_policies']:,} held-out French motor policies, split 0. The chain: a negative "
         "binomial claim count, then a hurdle cost per claim that reads the count. Right: the share of policies whose "
         "total for the year, T = count × cost per claim, is above t.",
         height=8.4,
@@ -441,9 +440,6 @@ def draw() -> None:
 
     k.value(ax, 1.5, at("observed", 1.5) * 1.3, f"what happened: {k.pct(observed[0], 2)} above €1",
             k.INK, va="bottom", size=12.5)
-    apart = curves["exceedance"]["independent heads"][0]
-    k.value(ax, 1.5, at("independent heads", 1.5) * 0.7, f"two heads fitted apart: {k.pct(apart, 2)}", k.SLATE,
-            va="top", size=12.5)
     handles = [Line2D([], [], color=k.INK, lw=1.7, label="what happened")]
     handles += [Line2D([], [], color=colour[name], lw=lw, linestyle=dash, label=label)
                 for _key, label, name, dash, lw in reversed(CURVES)]
@@ -452,17 +448,13 @@ def draw() -> None:
 
     # ---- the numbers, split 0
     k.rich(fig, box.left / box.width, (0.34 + 0.32 + 0.1) / box.height, [
-        ("Joint NLL per policy ", k.MUTED, k.F.label),
-        (f"{scores['chain']['nll']:.4f}", k.TEAL, k.F.value),
-        (" for the chain, ", k.MUTED, k.F.label),
-        (f"{scores['LightGBM Poisson × gamma']['nll']:.4f}", k.CLAY, k.F.value),
-        (" for LightGBM Poisson × gamma, ", k.MUTED, k.F.label),
-        (f"{scores['independent heads']['nll']:.4f}", k.SLATE, k.F.value),
-        (" fitted apart.  CRPS of T: ", k.MUTED, k.F.label),
+        ("Split 0, CRPS of T: ", k.MUTED, k.F.label),
         (f"{scores['chain']['crps']:.1f}", k.TEAL, k.F.value),
-        (" against ", k.MUTED, k.F.label),
+        (" for the chain, ", k.MUTED, k.F.label),
+        (f"{scores['frequency and severity']['crps']:.1f}", k.SLATE, k.F.value),
+        (" for frequency × severity by hand, ", k.MUTED, k.F.label),
         (f"{scores['LightGBM Poisson × gamma']['crps']:.1f}", k.CLAY, k.F.value),
-        (", a tie.", k.MUTED, k.F.label),
+        (" for LightGBM Poisson × gamma.", k.MUTED, k.F.label),
     ], va="bottom")
     k.footnote(fig, "Curves are exact, not drawn: the mean over policies of Σ P(N = n) P(S > t / n | N = n). "
                     "Frequency × severity by hand (dotted) lies under the chain.")

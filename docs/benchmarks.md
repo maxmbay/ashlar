@@ -1243,7 +1243,26 @@ The static residual correlation is 0.23 to 0.27.
 - **The mixture models the pair best but holds the total's interval least of Ashlar's models.** Its joint NLL is far ahead, 0.133 against 0.471 with a wide spread across splits, and so is its CRPS of the total, 16.25 against 17.24, but its 80% interval holds 77.1% of hours. The README draws the normal, whose coverage is the number it prints.
 - **LightGBM's quantiles of the total hold 68.2% of hours.** Quantile regression on the total itself, the direct route to this one interval, is too narrow on held-out hours. Summing each group's bounds holds 78.6%, with an interval 13% wider than the joint normal's, since a sum of quantiles is not a quantile of the sum.
 
-The README's figure, [`examples/readme/joint_blocks.py`](../examples/readme/joint_blocks.py), refits split 0's `joint` model the same way and stacks its predicted density for two held-out hours in the logo's blocks; the numbers it prints are this table's.
+#### The riders at equal coverage
+
+From the script's `calibrated` stage, on the same three splits and test hours. A fifth of each split's training hours, 2,781, is set aside; every model trains on the rest as above, and each total's 80% interval is then calibrated on the hours set aside. Ashlar's `joint` model and independent heads use `calibrate` with the total as its target (`target=riders_total`, read from 4,000 joint draws). Every model, LightGBM's included, also gets conformalized quantile regression (CQR): the interval from its 10% and 90% quantiles of the total, widened on both sides by the conformal quantile of how far the hours set aside fall outside their own intervals. The static correlation, fitted on validation rows as above, has CQR only.
+
+| Model, calibration | Holds before | Holds after | Width before | Width after ↓ |
+|---|---:|---:|---:|---:|
+| `joint`, `calibrate` | 81.6 ± 0.4% | 80.7 ± 0.4% | 82.5 ± 3.5 | 80.4 ± 3.7 |
+| independent heads, `calibrate` | 78.6 ± 0.1% | 80.8 ± 1.1% | 75.6 ± 2.9 | 79.4 ± 4.5 |
+| `joint`, CQR | 81.6 ± 0.4% | 80.6 ± 0.4% | 82.5 ± 3.5 | 81.8 ± 3.7 |
+| independent heads, CQR | 78.6 ± 0.1% | 80.5 ± 0.7% | 75.6 ± 2.9 | **76.8 ± 3.2** |
+| independent + static correlation, CQR | 82.2 ± 0.2% | 80.5 ± 0.9% | 81.8 ± 2.6 | 80.9 ± 3.0 |
+| LightGBM quantiles of the total, CQR | 66.4 ± 0.4% | 79.9 ± 0.5% | 74.0 ± 0.4 | 85.5 ± 0.9 |
+| LightGBM quantiles per group, summed, CQR | 78.5 ± 0.5% | 80.0 ± 0.1% | 95.6 ± 2.7 | 96.7 ± 2.7 |
+
+- **Calibrated, every model holds 79.9% to 80.8%, and Ashlar's intervals are the narrower ones.** The joint interval after `calibrate` is 80.4 riders wide, 6% narrower than LightGBM's quantiles of the total after CQR (85.5), and narrower on each split: 80.8 against 86.0, 75.6 against 84.2, and 84.8 against 86.2. LightGBM's per-group quantiles, summed, need 96.7.
+- **Two heads fitted apart are as narrow once calibrated.** After `calibrate` they are 79.4 riders wide against the joint's 80.4, and after CQR 76.8 against 81.8. The dependence makes the joint interval hold before calibration, 81.6% against 78.6% here, with no hours set aside; it does not make the interval narrower after. The joint model keeps the better joint likelihood of the two log counts, 0.471 against 0.526 in the table above.
+- **CQR repairs LightGBM's quantiles of the total.** They hold 66.4% as fitted; CQR widens them by 5.0 to 6.3 riders on each side, and they then hold 79.9%.
+- **LightGBM is the cheaper.** Its two quantile models of the total fit in 13 to 21 CPU seconds here, against 80 to 108 for the joint model, and `calibrate` adds 18 to 34 seconds for the joint model and 8 to 11 for the independent heads.
+
+The README's figure, [`examples/readme/joint_blocks.py`](../examples/readme/joint_blocks.py), refits split 0's `joint` model the same way as the first table and stacks its predicted density for two held-out hours in the logo's blocks; the table it prints is this one's, after calibration, for `joint` and the independent heads with `calibrate` and the other three with CQR.
 
 ## Member uncertainty
 
