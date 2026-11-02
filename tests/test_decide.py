@@ -18,6 +18,7 @@ from ashlar.decide import (
 )
 from ashlar.distributions import LowRankMultivariateNormal, Normal
 from ashlar.errors import AshlarError
+from micro import MICRO
 
 
 def test_closed_form_decisions_on_a_normal():
@@ -64,7 +65,7 @@ def test_predict_order_is_the_critical_ratio_quantile():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(600, 3)).astype(np.float32)
     y = np.exp(0.5 * X[:, 0] + 0.5 * rng.standard_gamma(2.0, size=600))
-    model = ASRRegressor(task="gaussian", max_epochs=3, random_state=0).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=3, **MICRO).fit(X, y)
     order = model.predict_order(X[:50], 9, 1)
     assert order.shape == (50,)
     np.testing.assert_allclose(order, model.predict_quantiles(X[:50], [0.9])[:, 0])

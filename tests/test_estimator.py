@@ -20,6 +20,7 @@ from ashlar import ASRClassifier, ASROrdinalClassifier
 from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, tabm
 from ashlar.train import surface_learning_rate
 from ashlar.search import DEFAULT_SEARCH
+from micro import MICRO
 
 
 def _regression(task="regression", **kwargs):
@@ -690,7 +691,7 @@ def test_softmax_ordinal_head_can_peak_on_one_class():
     assert np.allclose(probabilities.sum(axis=-1), 1.0, atol=1e-5)
     assert np.all(probabilities.argmax(axis=-1) == 2)
     try:
-        ASROrdinalClassifier(head="logits", max_epochs=1, patience=0, validation_size=0).fit(np.ones((8, 1)), np.arange(8) % 3)
+        ASROrdinalClassifier(head="logits", max_epochs=1, patience=0, validation_size=0, **MICRO).fit(np.ones((8, 1)), np.arange(8) % 3)
     except AshlarError:
         return
     raise AssertionError("a logits head was accepted for an ordinal task")
@@ -756,6 +757,7 @@ def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
             patience=0,
             validation_size=0.25,
             head_kwargs={"class_prior": "empirical"},
+            **MICRO,
         ).fit(measure[:, None], measure)
     except AshlarError:
         return
@@ -807,7 +809,7 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
     restored = type(model).load(model.save(tmp_path / "ordinal"))
     assert np.allclose(score, np.asarray(restored.predict_score(x), dtype=np.float64), atol=1e-5)
     try:
-        ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0).fit(x[:8], np.array(["low"] * 8, dtype=object))
+        ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x[:8], np.array(["low"] * 8, dtype=object))
     except AshlarError:
         return
     raise AssertionError("string labels were accepted for an ordinal task")
@@ -911,7 +913,7 @@ def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
     else:
         raise AssertionError("histogram variance was accepted on the cumulative head")
     try:
-        ASRModel(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x, y)
     except AshlarError:
         pass
     else:
@@ -963,7 +965,7 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
         random_state=0,
     )
     try:
-        ASRModel(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x, y)
     except AshlarError:
         pass
     else:

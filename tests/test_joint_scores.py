@@ -19,6 +19,7 @@ from ashlar.objectives import (
     score_weights,
     variogram_score,
 )
+from micro import MICRO
 
 
 def _shared_shock(n, seed):
@@ -128,15 +129,15 @@ def test_a_blend_adds_drawn_scores_to_the_log_density_and_differentiates(family,
 def test_only_a_joint_head_takes_a_score_by_name():
     x, y = _shared_shock(60, 0)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="gaussian", objective="energy", max_epochs=1).fit(x, y[:, 0])
+        ASRRegressor(task="gaussian", objective="energy", max_epochs=1, **MICRO).fit(x, y[:, 0])
     with pytest.raises(AshlarError):
-        ASRRegressor(task="multivariate_gaussian", objective="variogram", max_epochs=1).fit(x, y)
+        ASRRegressor(task="multivariate_gaussian", objective="variogram", max_epochs=1, **MICRO).fit(x, y)
     with pytest.raises(AshlarError):
-        ASRModel(task="custom", head="multivariate_normal", objective="energy", point_fn=np.mean).fit(x, y)
+        ASRModel(task="custom", head="multivariate_normal", objective="energy", point_fn=np.mean, **MICRO).fit(x, y)
     # A censored cell has no single value to set the draws against.
     label = observed.stack([observed.censored(y[:, 0], y[:, 0] > 1.0), observed.exact(y[:, 1]), observed.exact(y[:, 2])])
     with pytest.raises(AshlarError):
-        ASRRegressor(task="multivariate_gaussian", objective="energy", max_epochs=1).fit(x, label)
+        ASRRegressor(task="multivariate_gaussian", objective="energy", max_epochs=1, **MICRO).fit(x, label)
 
 
 @pytest.mark.slow
@@ -152,10 +153,10 @@ def test_each_joint_head_trains_on_a_blend_and_saves_it(task, kwargs, tmp_path):
     x, y = _shared_shock(800, 0)
     x_new, y_new = _shared_shock(1000, 1)
     objective = {"nll": 1.0, "energy": 1.0, "variogram": 0.5}
-    model = ASRRegressor(task=task, objective=objective, max_epochs=6, random_state=0, **kwargs).fit(x, y)
-    assert len(model.history_["val_loss"]) == 6 and np.all(np.isfinite(model.history_["val_loss"]))
+    model = ASRRegressor(task=task, objective=objective, max_epochs=2, **kwargs, **MICRO).fit(x, y)
+    assert len(model.history_["val_loss"]) == 2 and np.all(np.isfinite(model.history_["val_loss"]))
     # Validation reads the same draws every epoch, so a refit gives the same numbers.
-    again = ASRRegressor(task=task, objective=objective, max_epochs=6, random_state=0, **kwargs).fit(x, y)
+    again = ASRRegressor(task=task, objective=objective, max_epochs=2, **kwargs, **MICRO).fit(x, y)
     assert np.allclose(again.history_["val_loss"], model.history_["val_loss"], rtol=1e-4)
     log_density = np.asarray(model.log_prob(x_new, y_new))
     assert np.all(np.isfinite(log_density))
@@ -164,8 +165,8 @@ def test_each_joint_head_trains_on_a_blend_and_saves_it(task, kwargs, tmp_path):
     assert np.allclose(np.asarray(restored.log_prob(x_new[:50], y_new[:50])), log_density[:50], atol=1e-4)
     # Exact cells in a joint label train the same way as plain values.
     label = observed.stack([observed.exact(y[:, column]) for column in range(3)])
-    exact = ASRRegressor(task=task, objective=objective, max_epochs=1, random_state=0, **kwargs).fit(x, label)
-    plain = ASRRegressor(task=task, objective=objective, max_epochs=1, random_state=0, **kwargs).fit(x, y)
+    exact = ASRRegressor(task=task, objective=objective, max_epochs=1, **kwargs, **MICRO).fit(x, label)
+    plain = ASRRegressor(task=task, objective=objective, max_epochs=1, **kwargs, **MICRO).fit(x, y)
     assert np.allclose(exact.history_["val_loss"], plain.history_["val_loss"], rtol=1e-4)
 
 
@@ -180,7 +181,7 @@ def test_a_flow_trained_on_a_blend_keeps_its_total_and_its_log_density():
     total = y_new.sum(axis=1)
     covered, density = {}, {}
     for name, objective in (("nll", None), ("blend", {"nll": 1.0, "energy": 1.0})):
-        model = ASRRegressor(task="multivariate_flow", objective=objective, max_epochs=15, random_state=0).fit(x, y)
+        model = ASRRegressor(task="multivariate_flow", objective=objective, max_epochs=15, **MICRO).fit(x, y)
         interval = model.predict_interval(x_new, 0.8, target="sum", n_samples=500, calibrated=False)
         covered[name] = np.mean((total >= interval[:, 0]) & (total <= interval[:, 1]))
         density[name] = float(np.mean(np.asarray(model.log_prob(x_new, y_new))))

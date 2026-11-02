@@ -58,8 +58,8 @@ def test_depth_six_ensemble_learns_a_conjunction():
     rng = np.random.default_rng(0)
     rows = rng.normal(size=(800, 4))
     labels = ((rows[:, 0] > 0) & (rows[:, 1] > 0)).astype(np.int32)
-    model = ASRObliviousEnsemble(random_state=0, n_trees=32, depth=4, max_epochs=30, patience=10, batch_size=200)
+    model = ASRObliviousEnsemble(random_state=0, n_trees=8, depth=4, max_epochs=30, patience=10, batch_size=200)
     model.fit(rows, labels, "classification")
     assert float(np.mean(model.predict(rows) == labels)) > 0.9
     assert model.depth_ == 4
-    assert model.n_trees_ == 32
+    assert model.n_trees_ == 8

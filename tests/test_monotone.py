@@ -12,6 +12,7 @@ from ashlar import ASRRegressor
 from ashlar.distributions import QuantileSpline
 from ashlar.errors import AshlarError
 from ashlar.monotone import MonotoneTerm, check_monotone, output_signs
+from micro import MICRO
 
 
 def _spline(seed=0, rows=2):
@@ -85,7 +86,7 @@ def test_every_quantile_moves_one_way(task, tmp_path):
     frame, y = _table()
     if task == "negative_binomial":
         y = np.round(np.exp(0.5 - 0.3 * frame["price"].to_numpy()) * 2.0)
-    model = ASRRegressor(task=task, monotone={"price": -1}, max_epochs=5, random_state=0).fit(frame, y)
+    model = ASRRegressor(task=task, monotone={"price": -1}, max_epochs=5, **MICRO).fit(frame, y)
     rows = frame.iloc[:50]
     series = []
     for value in np.linspace(-3.5, 3.5, 15):
@@ -104,20 +105,20 @@ def test_monotone_refuses_what_it_cannot_constrain():
         with pytest.raises(AshlarError):
             check_monotone(bad)
     with pytest.raises(AshlarError, match="one way"):
-        ASRRegressor(task="mixture", monotone={"price": 1}).fit(frame, y)
+        ASRRegressor(task="mixture", monotone={"price": 1}, **MICRO).fit(frame, y)
     with pytest.raises(AshlarError, match="numeric"):
-        ASRRegressor(task="gaussian", monotone={"kind": 1}, max_epochs=1).fit(frame, y)
+        ASRRegressor(task="gaussian", monotone={"kind": 1}, max_epochs=1, **MICRO).fit(frame, y)
     with pytest.raises(AshlarError, match="numeric"):
-        ASRRegressor(task="gaussian", monotone={"missing": 1}, max_epochs=1).fit(frame, y)
+        ASRRegressor(task="gaussian", monotone={"missing": 1}, max_epochs=1, **MICRO).fit(frame, y)
     with pytest.raises(AshlarError, match="cure"):
-        ASRRegressor(task="gaussian", monotone={"price": 1}, head_kwargs={"cure": True}).fit(frame, y)
+        ASRRegressor(task="gaussian", monotone={"price": 1}, head_kwargs={"cure": True}, **MICRO).fit(frame, y)
 
 
 def test_the_quantile_spline_head_trains_and_scores():
     rng = np.random.default_rng(0)
     x = rng.normal(size=(800, 2)).astype(np.float32)
     y = np.exp(0.5 * x[:, 0] + 0.4 * rng.normal(size=800))
-    model = ASRRegressor(task="quantile_spline", max_epochs=10, random_state=0).fit(x, y)
+    model = ASRRegressor(task="quantile_spline", max_epochs=10, **MICRO).fit(x, y)
     assert np.isfinite(model.log_prob(x, y)).all()
     quantiles = model.predict_quantiles(x[:5], [0.1, 0.5, 0.9])
     assert np.all(np.diff(quantiles, axis=1) > 0)

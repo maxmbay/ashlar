@@ -7,6 +7,7 @@ from scipy import stats
 from ashlar import ASRRegressor
 from ashlar.errors import AshlarError
 from ashlar.inputs import InputModel
+from micro import MICRO
 
 
 def _correlated(n=4000, seed=0):
@@ -59,7 +60,7 @@ def test_uncertain_inputs_widen_intervals_and_save(tmp_path):
     rng = np.random.default_rng(0)
     y = 2 * values[:, 0] + values[:, 2] + 0.2 * rng.normal(size=1500)
     X = {"a": values[:, 0], "b": values[:, 1], "c": values[:, 2], "city": rng.choice(["x", "y"], 1500).astype(object)}
-    model = ASRRegressor(task="gaussian", max_epochs=4, random_state=0).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=20, learning_rate=1e-2, **MICRO).fit(X, y)
     rows = {key: value[:20].copy() for key, value in X.items()}
     rows["a"][:10] = np.nan
     plain = model.predict_interval(rows, 0.8)
@@ -93,7 +94,7 @@ def test_drawing_missing_cells_holds_coverage():
     rng = np.random.default_rng(1)
     y = 2 * values[:, 0] + values[:, 2] + 0.3 * rng.normal(size=6000)
     X = values[:4000].astype(np.float32)
-    model = ASRRegressor(task="mixture", max_epochs=30, random_state=0).fit(X, y[:4000])
+    model = ASRRegressor(task="mixture", max_epochs=30, **MICRO).fit(X, y[:4000])
     test = values[4000:].copy()
     missing = rng.random(len(test)) < 0.5
     test[missing, 0] = np.nan

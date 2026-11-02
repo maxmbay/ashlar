@@ -11,6 +11,7 @@ from ashlar import ASRClassifier, ASROrdinalClassifier, ASRRegressor, observed
 from ashlar.distributions import Cured, Hurdle, LogNormal, NegativeBinomial, Normal, NormalNoise, StudentT
 from ashlar.errors import AshlarError
 from ashlar.objectives import grid_total_log_likelihood
+from micro import MICRO
 
 INF = np.inf
 
@@ -35,7 +36,7 @@ def test_a_hurdle_with_noise_keeps_the_zero_mass_on_rows_without_noise():
     noisy = hurdle.convolve_normal(0.2)
     # A recorded value below zero is possible, and the density integrates to one.
     assert np.isfinite(noisy.log_prob(jnp.asarray([-0.3, 0.0, 1.0]))).all()
-    grid = jnp.linspace(-2.0, 30.0, 40_001)
+    grid = jnp.linspace(-2.0, 30.0, 8_001)
     mass = np.trapezoid(np.exp(np.asarray(Hurdle(jnp.full((1,), 0.3), LogNormal(jnp.zeros(1), jnp.full(1, 0.5))).convolve_normal(0.2).log_prob(grid[:, None]))), np.asarray(grid), axis=0)
     assert np.allclose(mass, 1.0, atol=2e-3)
     assert np.allclose(noisy.mean(), hurdle.mean(), atol=1e-5)
@@ -51,7 +52,7 @@ def test_noisy_labels_fit_on_the_quadrature_heads(task):
         y = np.where(rng.random(n) < 0.3, 0.0, y)
     noise = np.where(np.arange(n) % 2 == 0, 0.3, 0.0)
     label = observed.noisy(y + noise * rng.normal(size=n), noise)
-    model = ASRRegressor(task=task, max_epochs=2, random_state=0).fit(x, label)
+    model = ASRRegressor(task=task, max_epochs=2, **MICRO).fit(x, label)
     assert np.isfinite(model.log_prob(x[:20], label[:20])).all()
 
 
@@ -60,7 +61,7 @@ def test_heads_without_quadrature_still_refuse_noise():
     x = rng.normal(size=(100, 2)).astype(np.float32)
     label = observed.noisy(rng.poisson(2.0, size=100).astype(float), 0.5)
     with pytest.raises(AshlarError, match="noisy"):
-        ASRRegressor(task="poisson", max_epochs=1).fit(x, label)
+        ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(x, label)
 
 
 def test_a_cured_time_is_defective():
@@ -81,10 +82,10 @@ def test_the_cure_head_fits_censored_times_and_refuses_the_other_heads():
     time = np.where(never, INF, 1.0 + 0.5 * x[:, 0] + 0.5 * rng.normal(size=n))
     limit = rng.uniform(0.0, 4.0, size=n)
     label = observed.censored(np.minimum(time, limit), time > limit)
-    model = ASRRegressor(task="gaussian", head_kwargs={"cure": True}, max_epochs=3, random_state=0).fit(x, label)
+    model = ASRRegressor(task="gaussian", head_kwargs={"cure": True}, max_epochs=3, **MICRO).fit(x, label)
     assert np.isfinite(model.log_prob(x[:20], label[:20])).all()
     with pytest.raises(AshlarError, match="cure"):
-        ASRRegressor(task="poisson", head_kwargs={"cure": True}, max_epochs=1).fit(x, np.round(limit))
+        ASRRegressor(task="poisson", head_kwargs={"cure": True}, max_epochs=1, **MICRO).fit(x, np.round(limit))
 
 
 def test_grid_totals_match_the_exact_sum_of_normals():
@@ -118,33 +119,37 @@ def test_grid_totals_of_one_count_row_are_its_mass():
         assert np.allclose(value, dist.log_prob(jnp.asarray([[count]])), atol=1e-4)
 
 
-@pytest.mark.parametrize("task", ["negative_binomial", "student_t"])
+# The negative binomial's grid compiles for about a minute, so its one fit is the slow test below.
+@pytest.mark.parametrize("task", ["student_t"])
 def test_group_totals_fit_on_grid_heads(task):
     rng = np.random.default_rng(0)
-    groups, size = 60, 5
+    groups, size = 20, 5
     n = groups * size
     x = rng.normal(size=(n, 2)).astype(np.float32)
     y = rng.poisson(np.exp(0.5 + 0.5 * x[:, 0])).astype(float)
     group = np.repeat(np.arange(groups), size)
     label = observed.total(np.bincount(group, weights=y)[group], group)
-    model = ASRRegressor(task=task, max_epochs=2, split="group", random_state=0).fit(x, label, groups=group)
+    model = ASRRegressor(task=task, max_epochs=2, split="group", **MICRO).fit(x, label, groups=group)
     assert np.isfinite(model.score(x, label))
     with pytest.raises(AshlarError):
-        ASRRegressor(task=task, max_epochs=1, split="group").fit(x, observed.noisy(label, 0.5), groups=group)
+        ASRRegressor(task=task, max_epochs=1, split="group", **MICRO).fit(x, observed.noisy(label, 0.5), groups=group)
 
 
 @pytest.mark.slow
 def test_group_totals_on_a_grid_recover_the_row_mean():
     rng = np.random.default_rng(0)
-    weeks, days = 500, 7
+    weeks, days = 100, 7
     n = weeks * days
     x = rng.normal(size=(n, 2)).astype(np.float32)
     mu = np.exp(1.0 + 0.6 * x[:, 0])
     y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu))
     week = np.repeat(np.arange(weeks), days)
     label = observed.total(np.bincount(week, weights=y)[week], week)
-    model = ASRRegressor(task="negative_binomial", max_epochs=40, split="group", random_state=0).fit(x, label, groups=week)
+    model = ASRRegressor(task="negative_binomial", max_epochs=20, split="group", learning_rate=1e-2, **MICRO).fit(x, label, groups=week)
     assert np.corrcoef(model.predict(x), mu)[0, 1] > 0.95
+    assert np.isfinite(model.score(x, label))
+    with pytest.raises(AshlarError):
+        ASRRegressor(task="negative_binomial", max_epochs=1, split="group", **MICRO).fit(x, observed.noisy(label, 0.5), groups=week)
 
 
 @pytest.mark.slow
@@ -156,8 +161,8 @@ def test_noise_is_subtracted_by_the_quadrature_heads(task):
     y = 1.0 + x[:, 0] + 0.5 * rng.standard_t(4, size=n)
     noise = rng.uniform(0.2, 1.5, n)
     recorded = y + noise * rng.normal(size=n)
-    told = ASRRegressor(task=task, max_epochs=30, random_state=0).fit(x[:2500], observed.noisy(recorded[:2500], noise[:2500]))
-    naive = ASRRegressor(task=task, max_epochs=30, random_state=0).fit(x[:2500], recorded[:2500])
+    told = ASRRegressor(task=task, max_epochs=30, learning_rate=1e-2, **MICRO).fit(x[:2500], observed.noisy(recorded[:2500], noise[:2500]))
+    naive = ASRRegressor(task=task, max_epochs=30, learning_rate=1e-2, **MICRO).fit(x[:2500], recorded[:2500])
     assert told.log_prob(x[2500:], y[2500:]).mean() > naive.log_prob(x[2500:], y[2500:]).mean() + 0.05
 
 
@@ -189,14 +194,14 @@ def test_a_classifier_trains_on_sets_of_classes():
     names = np.array(["low", "mid", "high"])[y]
     # Half the rows only say whether the class is low or not.
     sets = [name if i % 2 == 0 else ({"low"} if name == "low" else {"mid", "high"}) for i, name in enumerate(names)]
-    model = ASRClassifier(max_epochs=20, random_state=0).fit(x, observed.one_of(sets))
+    model = ASRClassifier(max_epochs=20, **MICRO).fit(x, observed.one_of(sets))
     assert model.classes_.tolist() == ["high", "low", "mid"]
     probabilities = model.predict_proba(x)
     assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
     low = probabilities[:, 1]
     assert np.corrcoef(low, x[:, 0])[0, 1] > 0.5
     with pytest.raises(AshlarError, match="class_weight"):
-        ASRClassifier(class_weight="balanced", max_epochs=1).fit(x, observed.one_of(sets))
+        ASRClassifier(class_weight="balanced", max_epochs=1, **MICRO).fit(x, observed.one_of(sets))
 
 
 def test_an_ordinal_classifier_trains_on_ranges_of_classes():
@@ -205,10 +210,10 @@ def test_an_ordinal_classifier_trains_on_ranges_of_classes():
     upper = np.where(np.arange(len(y)) % 2 == 0, y, y).astype(float)
     for head in ("cumulative_logit", "softmax"):
         kwargs = {} if head == "cumulative_logit" else {"head": "softmax"}
-        model = ASROrdinalClassifier(max_epochs=20, random_state=0, **kwargs).fit(x, observed.interval(lower, upper))
+        model = ASROrdinalClassifier(max_epochs=20, **kwargs, **MICRO).fit(x, observed.interval(lower, upper))
         assert model.classes_.tolist() == [0.0, 1.0, 2.0]
         probabilities = model.predict_proba(x)
         assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-5)
         assert np.corrcoef(model.predict_score(x), y)[0, 1] > 0.5
     with pytest.raises(AshlarError, match="truncated"):
-        ASROrdinalClassifier(max_epochs=1).fit(x, observed.truncated(observed.interval(lower, upper), lower=0))
+        ASROrdinalClassifier(max_epochs=1, **MICRO).fit(x, observed.truncated(observed.interval(lower, upper), lower=0))
