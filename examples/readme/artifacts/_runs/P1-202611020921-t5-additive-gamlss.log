@@ -1,0 +1,9 @@
+at 4299944 (claude/project-thread-dhh107)
+terms on bike split 0: the split whose saved gamlss pair fit was fastest (256 s)
+ashlar_additive 9.4 s, test CRPS 43.541 (saved 43.541000857078394)
+ashlar_additive_pair 10.4 s, test CRPS 24.033 (saved 24.033202933541702)
+gamlss_nbi seconds 108.6232 converged TRUE cycles 14 
+gamlss_nbi_pair seconds 260.1669 converged TRUE cycles 38 
+gamlss_nbi 109 s, converged TRUE, 14 cycles, lp check 2.4e-01
+gamlss_nbi_pair 260 s, converged TRUE, 38 cycles, lp check 1.1e-05
+wrote /Users/maxwellbay/projects/ashlar-readme/examples/readme/artifacts/additive-gamlss/terms.json (49 KB)
