@@ -406,9 +406,15 @@ def run_catboost_uncertainty(table, seed):
 # gradient. Both pin older torch, NumPy, pandas, and scikit-learn than the
 # rest of this script, so they run from their own environment:
 #
-#   python -m venv lss && lss/bin/pip install lightgbmlss==0.6.1 ngboost==0.5.11 lightgbm==4.7.0 pyarrow
+#   python -m venv lss && lss/bin/pip install lightgbmlss==0.6.1 ngboost==0.5.11 lightgbm==4.7.0 \
+#       torch==2.9.1 pyro-ppl==1.9.2 numpy==2.3.5 pandas==2.2.3 scipy==1.16.3 scikit-learn==1.7.2 pyarrow
 #   GBM_THREADS=6 lss/bin/python examples/benchmark_large.py --tables airlines_delay \
 #       --models lightgbmlss_gaussian lightgbmlss_studentt lightgbmlss_mixture ngboost --seeds 0 1 2
+#
+# On macOS, torch and LightGBM each bring an OpenMP runtime (libomp). With
+# both loaded, LightGBMLSS segfaults the first time torch runs an operation on
+# several threads inside LightGBM's objective, so ``run_lightgbmlss`` imports
+# torch first: LightGBM then uses the libomp that torch already loaded.
 #
 # The target is standardized with the fitting rows' mean and spread, and each
 # family starts from its unconditional fit (``initialize=True``); otherwise
@@ -485,8 +491,9 @@ def _save_predictions(table, name, seed, **arrays):
 
 def run_lightgbmlss(family, table, seed):
     """LightGBMLSS with a Gaussian, a Student-t, or a mixture of Gaussians, early-stopped like the trees."""
+    import torch  # before LightGBM: on macOS it then reuses torch's libomp instead of loading a second one
+
     import lightgbm
-    import torch
     from lightgbmlss.distributions.Gaussian import Gaussian
     from lightgbmlss.distributions.Mixture import Mixture
     from lightgbmlss.distributions.StudentT import StudentT
