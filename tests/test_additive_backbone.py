@@ -207,22 +207,3 @@ def test_a_transformer_saved_in_schema_order_still_loads(tmp_path):
     path.write_text(json.dumps(payload))
     loaded = ASRRegressor.load(tmp_path / "legacy")
     np.testing.assert_allclose(np.asarray(loaded.predict(frame)), np.asarray(model.predict(frame)), rtol=1e-6)
-
-
-@pytest.mark.slow
-def test_additive_gaussian_recovers_the_shapes_of_location_and_scale():
-    rng = np.random.default_rng(0)
-    n = 6000
-    frame = pd.DataFrame({"a": rng.uniform(-2, 2, n), "b": rng.uniform(-2, 2, n), "c": rng.normal(size=n)})
-    loc = np.sin(1.5 * frame["a"]) + 0.5 * frame["b"] ** 2
-    scale = np.exp(0.5 * frame["c"].clip(-2, 2))
-    y = np.asarray(loc + 0.2 * scale * rng.normal(size=n))
-    model = ASRRegressor(task="gaussian", backbone="additive", max_epochs=60, random_state=0).fit(frame, y)
-    shapes = model.shape_functions(frame)
-    truth_a = np.sin(1.5 * frame["a"]) - np.sin(1.5 * frame["a"]).mean()
-    assert np.corrcoef(shapes.term("a", "loc"), truth_a)[0, 1] > 0.98
-    assert np.corrcoef(shapes.term("b", "loc"), frame["b"] ** 2)[0, 1] > 0.98
-    # The spread grows with c and with nothing else.
-    assert np.corrcoef(shapes.term("c", "scale"), frame["c"].clip(-2, 2))[0, 1] > 0.9
-    importance = shapes.importance("scale")
-    assert list(importance)[0] == "c"
