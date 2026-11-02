@@ -73,18 +73,20 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2, and LightGBMLSS, ran one job at a time: Ashlar on every core, the trees and LightGBMLSS on six threads. A model with only seed 0 so far reads slow.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 3.052 | 2.56 | — | — | — | — | 521 |
-| Ashlar, `task="mixture"` | 1 | 3.05 | 2.558 | 1.621 | 2.005 | 79% | 8.03 | 536 |
-| LightGBM | 1 | 3.047 | 2.554 | 1.747 | 2.534 | 79% | 7.803 | 35 |
-| XGBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 59 |
-| CatBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 351 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 3.047 | 2.554 | 1.742 | 2.531 | 80% | 7.781 | 552 |
+| Ashlar, default | 1 | 3.052 | 2.56 | — | — | — | — | 521† |
+| Ashlar, `task="mixture"` | 1 | 3.05 | 2.558 | 1.621 | 2.005 | 79% | 8.03 | 536† |
+| LightGBM | 1 | 3.047 | 2.554 | 1.747 | 2.534 | 79% | 7.803 | 35† |
+| XGBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 59† |
+| CatBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 351† |
+| CatBoost, `RMSEWithUncertainty` | 1 | 3.047 | 2.554 | 1.742 | 2.531 | 80% | 7.781 | 552† |
+| LightGBMLSS, Gaussian | 1 | 3.047 | 2.553 | 1.742 | 2.531 | 80% | 7.781 | 85 |
+| LightGBMLSS, Student-t | 1 | 3.079 | 2.516 | 1.738 | 2.511 | 79% | 7.393 | 732 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 3.101 | 2.382 | 1.652 | 2.055 | 75% | 6.961 | 745 |
 
 ### Airline delay, departure delay in minutes, 2,000,000 of 10,000,000 rows
@@ -105,15 +107,15 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190 |
-| Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924 |
-| Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520 |
+| Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190† |
+| Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924† |
+| Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520† |
 | LightGBM | 3 | 1.799 ± 0.033 | 0.6503 ± 0.016 | 0.6755 ± 0.013 | 1.992 ± 0.0098 | 95% | 4.644 ± 0.2 | 18 |
 | XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 48 |
-| CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345 |
-| RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044 |
-| TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169 |
+| CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546† |
+| CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345† |
+| RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044† |
+| TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169† |
 
 ### Year prediction (MSD), release year, 515,345 rows
 
@@ -125,6 +127,8 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | XGBoost | 2 | 8.686 ± 0.024 | 6.085 ± 0.00029 | 4.605 ± 0.0034 | 3.581 ± 0.0026 | 85% | 22.13 ± 0.097 | 63 |
 | CatBoost | 2 | 8.746 ± 0.03 | 6.118 ± 0.0051 | 4.63 ± 0.0067 | 3.587 ± 0.0032 | 85% | 22.3 ± 0.1 | 49 |
 | CatBoost, `RMSEWithUncertainty` | 2 | 8.846 ± 0.037 | 6.189 ± 0.0082 | 4.399 ± 0.008 | 3.41 ± 0.0061 | 83% | 18.99 ± 0.017 | 42 |
+| LightGBMLSS, Gaussian | 1 | 9.103 | 6.139 | 4.424 | 3.41 | 83% | 19.28 | 33 |
+| LightGBMLSS, Student-t | 1 | 9.521 | 6.043 | 4.457 | 3.334 | 79% | 16.58 | 65 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 8.861 | 5.996 | 4.186 | 3.188 | 76% | 16.72 | 185 |
 
 ### Higgs, signal against background, 2,000,000 of 5,100,000 rows
@@ -149,19 +153,19 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.6601 | 0.71 | 0.6143 | 267 |
-| LightGBM | 1 | 0.6655 | 0.7185 | 0.6085 | 13 |
-| XGBoost | 1 | 0.6642 | 0.7181 | 0.6089 | 14 |
-| CatBoost | 1 | 0.6675 | 0.7215 | 0.6062 | 1011 |
+| Ashlar, default | 1 | 0.6601 | 0.71 | 0.6143 | 267† |
+| LightGBM | 1 | 0.6655 | 0.7185 | 0.6085 | 13† |
+| XGBoost | 1 | 0.6642 | 0.7181 | 0.6089 | 14† |
+| CatBoost | 1 | 0.6675 | 0.7215 | 0.6062 | 1011† |
 
 ### Click prediction, clicked or not, 1,997,410 rows
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.8421 | 0.7382 | 0.3943 | 365 |
-| LightGBM | 1 | 0.8444 | 0.7544 | 0.3858 | 132 |
-| XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188 |
-| CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726 |
+| Ashlar, default | 1 | 0.8421 | 0.7382 | 0.3943 | 365† |
+| LightGBM | 1 | 0.8444 | 0.7544 | 0.3858 | 132† |
+| XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188† |
+| CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726† |
 
 ### The README's airline figure
 

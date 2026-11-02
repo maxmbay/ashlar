@@ -773,6 +773,8 @@ METRIC_NAMES = {
 }
 
 
+SHARED = "†"  # a time from seed 0's first runs, which shared the laptop with each tree on one thread
+
 # NGBoost's seed-0 CRPS on airline delay (90.7) disagrees with its NLL (4.76): held out of the report until the
 # diagnostic runs (variants diag-lr0.05, lr0.01, leaf100) show why.
 HELD = ("ngboost",)
@@ -812,10 +814,13 @@ def report(out, variant_for=None, seeds=None, held=HELD):
                     cells.append(f"{values.iloc[0]:.4g}")
                 else:
                     cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
-            # Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2 and LightGBMLSS ran one
-            # job at a time, the trees on six threads, so the fastest seed is the fairest time.
-            seconds = group["seconds"].min()
-            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {seconds:.0f} |")
+            # Seed 0's first runs shared the laptop, each tree on one thread. Seeds 1 and 2, LightGBMLSS, and
+            # NGBoost ran one job at a time, the trees on six threads, so the fastest seed is the fairest time;
+            # a time from those shared seed-0 runs is marked.
+            fastest = group.loc[group["seconds"].idxmin()]
+            shared = int(fastest["seed"]) == 0 and not model.startswith(("lightgbmlss_", "ngboost"))
+            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) +
+                  f" | {fastest['seconds']:.0f}{SHARED if shared else ''} |")
 
 
 def done_runs(out):
