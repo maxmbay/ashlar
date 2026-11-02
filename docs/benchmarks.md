@@ -158,6 +158,32 @@ One split each (seed 0). Ashlar's seconds include every core of the laptop; each
 | XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188 |
 | CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726 |
 
+### The README's airline figure
+
+The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. Scores are on the benchmark's 100,000 scored test flights.
+
+| Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
+|---|---:|---:|---:|---:|---:|
+| Ashlar, `task="mixture"` | 9.169 | 2.660 | 79.8% | 32.8 | 0.0388 |
+| CatBoost, `RMSEWithUncertainty` | 11.46 | 4.722 | 93.9% | 66.8 | 0.0392 |
+| LightGBM, normal of one width | 12.20 | 4.813 | 94.3% | 74.9 | 0.0389 |
+
+The mixture's 0.1 and 0.9 quantiles from `predict_quantiles`, rather than from 200 draws, hold 80.6% at 33.1 minutes wide; after `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
+
+- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, the mixture's is within 0.6 points of the observed rate in every bin of more than 1,000 flights; CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
+
+  | Predicted | Ashlar flights | Ashlar said | Happened | CatBoost flights | CatBoost said | Happened |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 0 to 2% | 20,246 | 1.4% | 1.3% | 52,172 | 0.5% | 2.0% |
+  | 2% to 5% | 46,208 | 3.3% | 2.9% | 19,524 | 3.3% | 4.0% |
+  | 5% to 10% | 27,051 | 6.9% | 6.3% | 15,888 | 7.2% | 6.3% |
+  | 10% to 20% | 6,303 | 12.7% | 12.3% | 10,451 | 13.7% | 9.4% |
+  | 20% to 30% | 190 | 22.2% | 25.8% | 1,832 | 23.4% | 16.9% |
+  | 30% and over | 2 | 31.1% | 0% | 133 | 32.9% | 18.8% |
+
+- **Leaving on the minute.** 18.6% of the scored flights left at their scheduled minute. Every flight's mixture has one component at zero with a scale of about 0.005 minutes, a point mass. On the 1,500 scored flights drawn at random for the figure (seed 0), its weight averages 18.4% where 18.5% of them left on the minute; by quartile of the weight, 7.7%, 11.4%, 16.6%, and 37.7% predicted against 7.2%, 14.1%, 13.9%, and 38.9% observed. CatBoost's normal gives a delay between −0.5 and 0.5 minutes 1.6% on average.
+- **Leaving early.** 0.1% of the scored flights left more than 15 minutes early. 95% of CatBoost's 80% intervals on the same 1,500 flights start earlier than that (the median at 24 minutes early), and none of the mixture's do (the median 0.1 quantile is 4.8 minutes early).
+
 ## Beside other neural packages
 
 PyTabKit 1.7.3's tuned-default recipes (`RealMLP_TD`, `TabM_D`, `FTT_D`, `MLP_PLR_D`) on one split (seed 0), missing numbers filled with the training median because PyTabKit refuses them, four threads each. Same split as the ablations: adult is not stratified here. The taxi column is the large-table split above; `tabm_piecewise()` ran there before the automatic epoch budget grew, with 10 epochs.
