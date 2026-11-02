@@ -73,7 +73,7 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian. On airline delay, NGBoost's default scores a CRPS of 90.7 because a few flights get an exploded scale, up to 3.4 × 10⁷ minutes where 99.9% of flights get under 66; its NLL, 4.76, barely notices. With `min_samples_leaf=100` its largest scale is 138 minutes and its CRPS 11.57, near LightGBMLSS's Gaussian. NGBoost ran alone; its scikit-learn trees use one thread.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
@@ -102,6 +102,8 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | LightGBMLSS, Gaussian | 1 | 29.14 | 13.91 | 11.49 | 4.753 | 94% | 66.34 | 16 |
 | LightGBMLSS, Student-t | 1 | 30.57 | 11.22 | 9.686 | 3.727 | 76% | 18.99 | 163 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 29.16 | 12.79 | 9.144 | 3.076 | 79% | 28.44 | 1201 |
+| NGBoost, normal, 200,000 training rows | 1 | 29.26 | 14.19 | 90.73 | 4.758 | 94% | 935.3 | 44 |
+| NGBoost, normal, 200,000 training rows, `min_samples_leaf=100` | 1 | 29.2 | 14.11 | 11.57 | 4.785 | 94% | 66.61 | 72 |
 
 ### NYC green taxi, tip in $, 581,835 rows
 
