@@ -1,0 +1,44 @@
+{
+ "crps": {
+  "1-5": {
+   "coverage": 0.7203,
+   "saved": 0.0945,
+   "this_fit": 0.0945
+  },
+  "101-300": {
+   "coverage": 0.7894,
+   "saved": 0.05752,
+   "this_fit": 0.05752
+  },
+  "21-100": {
+   "coverage": 0.8091,
+   "saved": 0.06014,
+   "this_fit": 0.06014
+  },
+  "6-20": {
+   "coverage": 0.7563,
+   "saved": 0.075,
+   "this_fit": 0.075
+  },
+  "all_seen": {
+   "coverage": 0.767,
+   "saved": 0.07339,
+   "this_fit": 0.07339
+  },
+  "unseen": {
+   "coverage": 0.7453,
+   "saved": 0.19024,
+   "this_fit": 0.19024
+  },
+  "unseen_context": {
+   "coverage": 0.7006,
+   "saved": 0.0889,
+   "this_fit": 0.0889
+  }
+ },
+ "epochs": null,
+ "seconds": 83.4,
+ "seed": 0,
+ "unseen_coverage_after": 0.7070254110612855,
+ "unseen_coverage_before": 0.7521674140508221
+}
