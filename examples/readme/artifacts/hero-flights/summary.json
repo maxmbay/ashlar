@@ -1,0 +1,223 @@
+{
+ "table": "airlines_delay",
+ "seed": 0,
+ "threshold": 60.0,
+ "training_rows": 1600000,
+ "test_rows": 400000,
+ "scored_rows": 100000,
+ "clock_format": "hhmm",
+ "columns": {
+  "departure": "CRSDepTime",
+  "arrival": "CRSArrTime",
+  "carrier": "UniqueCarrier",
+  "origin": "Origin",
+  "dest": "Dest",
+  "month": "Month",
+  "weekday": "DayOfWeek",
+  "distance": "Distance"
+ },
+ "late_share": 0.04145,
+ "below_zero_share": 0.40665,
+ "lightgbm_sigma": 29.21021863299616,
+ "seconds": {
+  "ashlar": 259.0729458332062,
+  "catboost_uncertainty": 127.31860613822937,
+  "lightgbm": 3.9
+ },
+ "epochs": 20,
+ "scores": {
+  "ashlar": {
+   "crps": 9.168947471010199,
+   "nll": 2.6603995426511764,
+   "pinball": 4.3450323903862955,
+   "coverage80": 0.79813,
+   "width80": 32.79986180893039,
+   "brier60": 0.038767432614547424,
+   "p60_bins": [
+    {
+     "low": 0.0,
+     "high": 0.02,
+     "flights": 20246,
+     "predicted": 0.014164791060191162,
+     "observed": 0.013039612763014916
+    },
+    {
+     "low": 0.02,
+     "high": 0.05,
+     "flights": 46208,
+     "predicted": 0.03326840961088847,
+     "observed": 0.029237361495844875
+    },
+    {
+     "low": 0.05,
+     "high": 0.1,
+     "flights": 27051,
+     "predicted": 0.06871036469246701,
+     "observed": 0.06299212598425197
+    },
+    {
+     "low": 0.1,
+     "high": 0.2,
+     "flights": 6303,
+     "predicted": 0.12684375446750193,
+     "observed": 0.12327463112803427
+    },
+    {
+     "low": 0.2,
+     "high": 0.3,
+     "flights": 190,
+     "predicted": 0.2218009534635042,
+     "observed": 0.2578947368421053
+    },
+    {
+     "low": 0.3,
+     "high": 0.5,
+     "flights": 2,
+     "predicted": 0.31060075759887695,
+     "observed": 0.0
+    },
+    {
+     "low": 0.5,
+     "high": 1.0,
+     "flights": 0,
+     "predicted": null,
+     "observed": null
+    }
+   ],
+   "exact_quantiles": {
+    "coverage80": 0.80565,
+    "width80": 33.09981852062266
+   },
+   "rmse": 29.111081051487623,
+   "mae": 13.940818680709347,
+   "calibrated": {
+    "rows": 20000,
+    "coverage80": 0.8012,
+    "width80": 32.36013723982387,
+    "brier60": 0.03876484903723204
+   }
+  },
+  "catboost_uncertainty": {
+   "crps": 11.457328763069876,
+   "nll": 4.721556686489289,
+   "pinball": 5.487338049570988,
+   "coverage80": 0.93914,
+   "width80": 66.81706154243096,
+   "brier60": 0.039196190074916655,
+   "p60_bins": [
+    {
+     "low": 0.0,
+     "high": 0.02,
+     "flights": 52172,
+     "predicted": 0.005470362448938066,
+     "observed": 0.020087403204784176
+    },
+    {
+     "low": 0.02,
+     "high": 0.05,
+     "flights": 19524,
+     "predicted": 0.033171852410244874,
+     "observed": 0.04025814382298709
+    },
+    {
+     "low": 0.05,
+     "high": 0.1,
+     "flights": 15888,
+     "predicted": 0.07167425812942829,
+     "observed": 0.06268882175226587
+    },
+    {
+     "low": 0.1,
+     "high": 0.2,
+     "flights": 10451,
+     "predicted": 0.1368404491706325,
+     "observed": 0.09377093101138648
+    },
+    {
+     "low": 0.2,
+     "high": 0.3,
+     "flights": 1832,
+     "predicted": 0.2342443348782326,
+     "observed": 0.16921397379912664
+    },
+    {
+     "low": 0.3,
+     "high": 0.5,
+     "flights": 132,
+     "predicted": 0.32411036358672074,
+     "observed": 0.1893939393939394
+    },
+    {
+     "low": 0.5,
+     "high": 1.0,
+     "flights": 1,
+     "predicted": 0.9879546560501555,
+     "observed": 0.0
+    }
+   ],
+   "rmse": 29.058593615639595,
+   "mae": 13.917393666026527
+  },
+  "lightgbm_normal": {
+   "crps": 12.195495424007827,
+   "nll": 4.812569920046454,
+   "pinball": 5.747237291012163,
+   "coverage80": 0.94299,
+   "width80": 74.86880283803258,
+   "brier60": 0.038869746811763646,
+   "p60_bins": [
+    {
+     "low": 0.0,
+     "high": 0.02,
+     "flights": 2369,
+     "predicted": 0.018275650788395867,
+     "observed": 0.007598142676234698
+    },
+    {
+     "low": 0.02,
+     "high": 0.05,
+     "flights": 75112,
+     "predicted": 0.032757770149093875,
+     "observed": 0.02821120460112898
+    },
+    {
+     "low": 0.05,
+     "high": 0.1,
+     "flights": 19869,
+     "predicted": 0.06528279627957222,
+     "observed": 0.07997382857718054
+    },
+    {
+     "low": 0.1,
+     "high": 0.2,
+     "flights": 2447,
+     "predicted": 0.12600580364257044,
+     "observed": 0.15610952186350632
+    },
+    {
+     "low": 0.2,
+     "high": 0.3,
+     "flights": 163,
+     "predicted": 0.2320773073026939,
+     "observed": 0.17177914110429449
+    },
+    {
+     "low": 0.3,
+     "high": 0.5,
+     "flights": 34,
+     "predicted": 0.35602878314164116,
+     "observed": 0.23529411764705882
+    },
+    {
+     "low": 0.5,
+     "high": 1.0,
+     "flights": 6,
+     "predicted": 0.631181372893395,
+     "observed": 0.16666666666666666
+    }
+   ],
+   "rmse": 29.05790719539307,
+   "mae": 13.906599694634727
+  }
+ }
+}
