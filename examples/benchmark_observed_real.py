@@ -269,6 +269,17 @@ def integrated_brier(time_, event, curves, grid) -> float:
 def d_calibration(at_time, event, bins: int = D_BINS, before=None) -> tuple[float, float]:
     """Haider et al. (2020): the chi-square statistic and p-value of ``S(T)`` against uniform in equal bins.
 
+    The weights in the bins are ``d_calibration_counts``.
+    """
+    counts = d_calibration_counts(at_time, event, bins, before)
+    expected = len(np.asarray(at_time)) / bins
+    chi2 = float(np.sum((counts - expected) ** 2 / expected))
+    return chi2, float(stats.chi2.sf(chi2, bins - 1))
+
+
+def d_calibration_counts(at_time, event, bins: int = D_BINS, before=None) -> np.ndarray:
+    """The weight of the test rows in each of ``bins`` equal bins of ``S(T)``, low survival first.
+
     An event puts its weight in the bin of ``S(T)``. A row censored at ``c``
     has ``S(T)`` uniform on ``[0, S(c)]`` if the model is right, so it
     spreads its weight over that range. A step curve that drops at an
@@ -286,9 +297,7 @@ def d_calibration(at_time, event, bins: int = D_BINS, before=None) -> tuple[floa
     counts += np.sum(np.clip(np.minimum(edges[1:], high) - np.maximum(edges[:-1], low), 0.0, None) / (high - low), axis=0)
     censored = s[~event][:, None]
     counts += np.sum(np.clip(np.minimum(edges[1:], censored) - edges[:-1], 0.0, None) / censored, axis=0)
-    expected = len(s) / bins
-    chi2 = float(np.sum((counts - expected) ** 2 / expected))
-    return chi2, float(stats.chi2.sf(chi2, bins - 1))
+    return counts
 
 
 def _step_grid(times, survival, grid) -> np.ndarray:
