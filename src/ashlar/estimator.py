@@ -524,6 +524,16 @@ class ASRModel(BaseEstimator):
         stump has two class-logit leaves, mixed by a sigmoid gate. The
         stumps are summed with shrinkage 0.3 and added to the head's
         log-probabilities. The residual default leaves this off.
+    monotone:
+        ``None`` (default) leaves every feature to the trunk. A dict of
+        numeric feature names to ``+1`` or ``-1`` keeps those features out
+        of the trunk and adds them back through rising (or falling)
+        piecewise-linear shapes, on the head outputs whose rise moves every
+        quantile up, so the whole predictive distribution moves one way
+        with each: first-order stochastic dominance. For ``regression``,
+        ``gaussian``, ``student_t``, ``quantile_spline``, ``poisson``, and
+        ``negative_binomial``. A constrained feature does not interact with
+        the others. See ``ashlar.monotone``.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
