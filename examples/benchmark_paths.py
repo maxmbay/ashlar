@@ -63,7 +63,11 @@ by then, weighted with a half-life of 14 days. A calibration's intervals,
 quantiles, and exceedance probabilities are read as ``predict_interval``,
 ``predict_quantiles``, and ``predict_exceedance`` read them, from 1,000
 draws of each path; the weighted one puts the forecast row's own weight at
-infinity (Barber, Candès, Ramdas, and Tibshirani, 2023).
+infinity (Barber, Candès, Ramdas, and Tibshirani, 2023). It also saves each
+row's PIT and its draws' order statistics, from which stage ``adaptive``
+scores intervals whose level follows each quantity's own misses, as they
+come in 12 days late (quantile tracking, Angelopoulos, Candès, and
+Tibshirani, 2023), at several step sizes.
 
 Data: the fev benchmark's ``rossmann/1D`` (``autogluon/fev_datasets`` on
 Hugging Face), saved as ``$ASHLAR_BENCH/rossmann-1D.parquet``
@@ -73,6 +77,7 @@ Hugging Face), saved as ``$ASHLAR_BENCH/rossmann-1D.parquet``
     python examples/benchmark_paths.py chronos seeds=0,1,2   # needs chronos-forecasting
     python examples/benchmark_paths.py deepar seeds=0,1,2    # needs gluonts[torch]
     python examples/benchmark_paths.py recalibrate seeds=0,1,2
+    python examples/benchmark_paths.py adaptive seeds=0,1,2
     python examples/benchmark_paths.py report seeds=0,1,2
 """
 
@@ -674,7 +679,8 @@ def run_recalibrate(stores: int, seed: int, models, epochs):
     common = dict(target="sales", lookback=LOOKBACK, horizon=HORIZON, series="store", time="day", known=KNOWN, static=STATIC)
     for name in models:
         path = ROOT / f"recalibrate-{name}-{stores}-{seed}.json"
-        if path.exists():
+        archive = path.with_suffix(".npz")
+        if path.exists() and archive.exists():
             continue
         train, calibration, _test = frames(data, covariates=True)
         pool = horizon_frame(data, start=CAL_START, **common)
@@ -710,6 +716,13 @@ def run_recalibrate(stores: int, seed: int, models, epochs):
         base = {strategy: np.zeros((test.size, 2)) for strategy in ("spring", "rolling")}
         calibration_rows = {strategy: [] for strategy in STRATEGIES}
         position = {row: index for index, row in enumerate(test)}
+        grids = {
+            "daily_grid": np.zeros((test.size, HORIZON, GRID.size), dtype=np.float32),
+            "total_grid": np.zeros((test.size, GRID.size), dtype=np.float32),
+            "peak_grid": np.zeros((test.size, GRID.size), dtype=np.float32),
+            "total_below": np.zeros(test.size),
+            "peak_below": np.zeros(test.size),
+        }
         drawn = np.asarray(model.sample(pool.X.iloc[test], n=CALIBRATED_DRAWS, seed=seed), dtype=np.float32)
         for at in days:
             rows = np.flatnonzero(origin == at)
@@ -725,6 +738,13 @@ def run_recalibrate(stores: int, seed: int, models, epochs):
                 block[f"{path_name}_truth"] = events[f"{path_name}_truth"][rows]
                 block[f"{path_name}_below"] = np.mean(block[path_name] <= events[f"{path_name}_threshold"][rows][None], axis=0)
             where = np.asarray([position[row] for row in rows])
+            every = np.arange(rows.size)
+            for step in range(HORIZON):
+                grid = _order_statistic(block["daily"][..., step], GRID, every)
+                grids["daily_grid"][where, step] = np.expm1(np.minimum(grid, cap)).T
+            for path_name in PATHS:
+                grids[f"{path_name}_grid"][where] = _order_statistic(block[path_name], GRID, every).T
+                grids[f"{path_name}_below"][where] = block[f"{path_name}_below"]
             for strategy in STRATEGIES:
                 part = {key: value[where] for key, value in outs[strategy].items()}
                 local = np.arange(rows.size)
@@ -774,6 +794,19 @@ def run_recalibrate(stores: int, seed: int, models, epochs):
                 for strategy, values in base.items()
             },
         }
+        np.savez(
+            archive,
+            origin=origin.astype(np.int64),
+            test=test,
+            spring=spring,
+            calendar=calendar.astype(str),
+            columns=scores["columns"].astype(np.float32),
+            total=np.asarray(scores["total"], dtype=np.float32),
+            peak=np.asarray(scores["peak"], dtype=np.float32),
+            daily_truth=np.expm1(pool.Y[test]).astype(np.float32),
+            **{f"{path_name}_{kind}": events[f"{path_name}_{kind}"] for path_name in PATHS for kind in ("truth", "threshold", "event")},
+            **grids,
+        )
         path.write_text(json.dumps(result))
         print("recalibrate", name, stores, seed, json.dumps(result), flush=True)
 
@@ -812,6 +845,136 @@ def report_recalibrate(stores: int, seeds) -> None:
         print("\nCalendar of the 12 days ahead, share of rows (seed " + str(seeds[0]) + "): " + ", ".join(
             f"{label} {share['spring']:.0%} in spring, {share['test']:.0%} in summer" for label, share in shares.items()
         ))
+
+
+# Stage ``adaptive``: each quantity's interval follows its own recent misses, scored from ``recalibrate``'s archives.
+# Steps of the tracked level per origin, for a miss rate one unit off.
+RATES = (0.02, 0.05, 0.1, 0.2)
+
+
+def tracked_levels(scores: np.ndarray, day: np.ndarray, rate: float, coverage: float = 0.8) -> np.ndarray:
+    """Each row's nominal level by quantile tracking on its PIT score ``|2u - 1|``, one level per origin.
+
+    Origins come one a day. The level starts at ``coverage`` at the first
+    origin; at each origin it moves by ``rate`` times the share of rows that
+    the origin ``HORIZON`` days back, whose days are all observed by then,
+    left outside its own interval, less ``1 - coverage`` (Angelopoulos,
+    Candès, and Tibshirani, 2023; adaptive conformal inference, Gibbs and
+    Candès, 2021). A row is inside when its score is at most its level.
+    """
+    offset = (day - day.min()).astype(np.int64)
+    order = np.argsort(offset, kind="stable")
+    bounds = np.searchsorted(offset[order], np.arange(offset.max() + 2))
+    levels = np.empty(offset.max() + 1)
+    level = coverage
+    for k in range(levels.size):
+        back = k - HORIZON
+        if back >= 0 and bounds[back + 1] > bounds[back]:
+            rows = order[bounds[back] : bounds[back + 1]]
+            miss = float(np.mean(scores[rows] > levels[back]))
+            level = float(np.clip(level + rate * (miss - (1.0 - coverage)), 0.0, 1.0))
+        levels[k] = level
+    return levels[offset]
+
+
+def _grid_at(grid: np.ndarray, levels: np.ndarray) -> np.ndarray:
+    """Each row's value at its own level from its draws' order statistics at ``GRID``, ``(rows, GRID)``, linear between."""
+    position = np.clip((np.asarray(levels) - GRID[0]) / (GRID[1] - GRID[0]), 0.0, GRID.size - 1.0)
+    low = np.floor(position).astype(np.int64)
+    high = np.minimum(low + 1, GRID.size - 1)
+    share = position - low
+    rows = np.arange(grid.shape[0])
+    return grid[rows, low] * (1.0 - share) + grid[rows, high] * share
+
+
+def _level_scores(archive, test_levels: dict, weeks: np.ndarray) -> dict:
+    """Coverage and width of the central intervals at each test row's nominal level, per quantity."""
+    test = archive["test"]
+    out = {"by_week": {}}
+    covered = np.zeros((test.size, HORIZON), dtype=bool)
+    width = np.zeros((test.size, HORIZON))
+    for step in range(HORIZON):
+        level = test_levels["columns"][step]
+        score = np.abs(2.0 * archive["columns"][test, step] - 1.0)
+        covered[:, step] = score <= level
+        grid = archive["daily_grid"][:, step]
+        width[:, step] = _grid_at(grid, 0.5 * (1.0 + level)) - _grid_at(grid, 0.5 * (1.0 - level))
+    out["daily"] = {"coverage": float(covered.mean()), "width": float(width.mean())}
+    out["by_week"]["daily"] = [float(covered[weeks == week].mean()) for week in np.unique(weeks)]
+    for name in PATHS:
+        level = test_levels[name]
+        score = np.abs(2.0 * archive[name][test] - 1.0)
+        inside = score <= level
+        grid = archive[f"{name}_grid"]
+        spread = _grid_at(grid, 0.5 * (1.0 + level)) - _grid_at(grid, 0.5 * (1.0 - level))
+        out[name] = {"coverage": float(inside.mean()), "width": float(spread.mean())}
+        out["by_week"][name] = [float(inside[weeks == week].mean()) for week in np.unique(weeks)]
+    return out
+
+
+def run_adaptive(stores: int, seed: int, models) -> None:
+    """Score quantile tracking at each rate in ``RATES``, the spring table, and the level fixed in hindsight."""
+    from ashlar.calibrate import conformal_quantile
+
+    for name in models:
+        source = ROOT / f"recalibrate-{name}-{stores}-{seed}.npz"
+        if not source.exists():
+            continue
+        archive = dict(np.load(source))
+        day, test, spring = archive["origin"], archive["test"], archive["spring"]
+        weeks = (day[test] - day[test].min()) // 7
+        keys = [("columns", step) for step in range(HORIZON)] + [(path_name, None) for path_name in PATHS]
+
+        def score(key):
+            values = archive[key[0]] if key[1] is None else archive[key[0]][:, key[1]]
+            return np.abs(2.0 * np.asarray(values, dtype=np.float64) - 1.0)
+
+        def levels(make):
+            chosen = {"columns": [None] * HORIZON}
+            for key in keys:
+                value = make(score(key))
+                if key[1] is None:
+                    chosen[key[0]] = value
+                else:
+                    chosen["columns"][key[1]] = value
+            return chosen
+
+        result = {
+            "spring": _level_scores(archive, levels(lambda s: np.full(test.size, min(conformal_quantile(s[spring], 0.8), 1.0))), weeks),
+            "hindsight": _level_scores(archive, levels(lambda s: np.full(test.size, float(np.quantile(s[test], 0.8)))), weeks),
+        }
+        for rate in RATES:
+            result[f"adaptive {rate}"] = _level_scores(archive, levels(lambda s, rate=rate: tracked_levels(s, day, rate)[test]), weeks)
+        (ROOT / f"adaptive-{name}-{stores}-{seed}.json").write_text(json.dumps(result))
+        print("adaptive", name, stores, seed, json.dumps({key: {part: value[part] for part in ("daily", "total", "peak")} for key, value in result.items()}), flush=True)
+
+
+def report_adaptive(stores: int, seeds) -> None:
+    """Coverage and width of the 80% intervals when each quantity's level follows its recent misses."""
+    for name in RECALIBRATED:
+        runs = _runs(f"adaptive-{name}", stores, seeds)
+        if not runs:
+            continue
+        print(f"\n{name}: 80% intervals read from the PIT, {len(runs)} seeds (hindsight: one level per quantity fixed on the test rows)\n")
+        print("| Calibration | Daily 80% | Daily width | Total 80% | Total width | Peak 80% | Peak width |")
+        print("|---|---:|---:|---:|---:|---:|---:|")
+        for key in runs[0]:
+            cells = [run[key] for run in runs]
+
+            def mean(part, field, cells=cells):
+                return float(np.mean([cell[part][field] for cell in cells]))
+
+            print(
+                f"| {key} | {mean('daily', 'coverage'):.1%} | {mean('daily', 'width'):,.0f} | {mean('total', 'coverage'):.1%} | "
+                f"{mean('total', 'width'):,.0f} | {mean('peak', 'coverage'):.1%} | {mean('peak', 'width'):,.0f} |"
+            )
+        print("\nCoverage by week of origin (daily / total / peak):")
+        for key in runs[0]:
+            parts = []
+            for part in ("daily", "total", "peak"):
+                weeks = np.mean([run[key]["by_week"][part] for run in runs], axis=0)
+                parts.append(" ".join(f"{value:5.1%}" for value in weeks))
+            print(f"  {key:<15} " + "  |  ".join(parts))
 
 
 def _runs(name: str, stores: int, seeds) -> list[dict]:
@@ -895,9 +1058,15 @@ def main(argv):
             chosen = [name for name in models if name in RECALIBRATED] if "models" in options else list(RECALIBRATED)
             for seed in seeds:
                 run_recalibrate(stores, seed, chosen, epochs)
+        elif stage == "adaptive":
+            chosen = [name for name in models if name in RECALIBRATED] if "models" in options else list(RECALIBRATED)
+            for seed in seeds:
+                run_adaptive(stores, seed, chosen)
+            report_adaptive(stores, seeds)
         elif stage == "report":
             report(stores, seeds)
             report_recalibrate(stores, seeds)
+            report_adaptive(stores, seeds)
         else:
             raise SystemExit(f"unknown stage {stage!r}")
 
