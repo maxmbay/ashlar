@@ -120,6 +120,12 @@ class MonotoneTerm(Module):
         shapes = jnp.einsum("bjn,kjpn->bkp", ramps, jax.nn.softplus(MONOTONE_GAIN * self.weight))
         return shapes * jnp.asarray(self.signs, dtype=shapes.dtype)
 
+    def parts(self, numeric_z):
+        """``(batch, members, features, outputs)``: each constrained feature's shape; they sum to the term."""
+        ramps = self.encode(numeric_z)
+        shapes = jnp.einsum("bjn,kjpn->bkjp", ramps, jax.nn.softplus(MONOTONE_GAIN * self.weight))
+        return shapes * jnp.asarray(self.signs, dtype=shapes.dtype)
+
     def without(self, numeric_z):
         """``numeric_z`` with the constrained columns set to 0, the trunk's input."""
         return numeric_z.at[:, list(self.columns)].set(0.0)

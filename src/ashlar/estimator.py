@@ -42,6 +42,7 @@ from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_sta
 from ashlar.monotone import MONOTONE_TASKS, MonotoneTerm, check_monotone, monotone_edges, output_signs
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
+    AdditiveBackbone,
     CategoricalEmbeddings,
     FeatureTransformer,
     LateBottleneck,
@@ -134,7 +135,9 @@ from ashlar.effects import (
     offset_terms,
 )
 from ashlar.effects import report as effect_report
+from ashlar.shapes import ADDITIVE_REFUSED, additive_terms, check_pairs
 from ashlar.preprocess import (
+    FIELD_ORDER,
     NUMERIC_SCALINGS,
     EncodedBatch,
     FeatureEncoder,
@@ -153,6 +156,7 @@ _BACKBONES = {
     "tabm": TabMBackbone,
     "transformer": FeatureTransformer,
     "set": SetEncoder,
+    "additive": AdditiveBackbone,
 }
 _FIELD_BACKBONES = (FeatureTransformer, SetEncoder)
 _HEADS = {
@@ -466,8 +470,12 @@ class ASRModel(BaseEstimator):
         ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
         Jeffreys prior from the training counts. The default cuts stay learnable.
     backbone:
-        ``residual_mlp``, ``tabm``, or an Equinox class with
-        ``__init__(d_in, *, key, **kwargs)`` and attributes ``k`` and ``d_out``.
+        ``residual_mlp``, ``tabm``, ``transformer``, ``set``, ``additive``, or
+        an Equinox class with ``__init__(d_in, *, key, **kwargs)`` and
+        attributes ``k`` and ``d_out``. ``additive`` gives each column, and
+        each pair named in ``backbone_kwargs={"pairs": [[a, b], ...]}``, a
+        network of its own, so every head output is a sum of one shape per
+        term; ``shape_functions`` reads them (``ashlar.shapes``).
     objective:
         ``None`` (default) trains on the task's own loss. A callable
         ``objective(raw, y, sample_weight)`` replaces it, and ``custom``
@@ -792,7 +800,7 @@ class ASRModel(BaseEstimator):
         if self.task in {*DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} and policy != "mixture":
             raise AshlarError("a distribution task predicts the equal-weight mixture of its members: prediction_policy='mixture'.")
         if isinstance(self.backbone, str) and self.backbone not in _BACKBONES:
-            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', or a class.")
+            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', 'additive', or a class.")
         if int(self.categorical_embedding_dim) < 1 or int(self.set_max_length) < 1:
             raise AshlarError("categorical_embedding_dim and set_max_length must be positive.")
         self._bottleneck_width()
@@ -809,11 +817,15 @@ class ASRModel(BaseEstimator):
         self._expectation_weight()
         self._soft_stage_count()
         kwargs = dict(self.backbone_kwargs or {})
-        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs:
+        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
             raise AshlarError(
-                "scaling_chunks and feature_chunks are derived from the fitted schema, and arch_type "
+                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema, and arch_type "
                 "other than batch-ensemble TabM is not implemented. Refusing to ignore those arguments."
             )
+        if self._backbone_cls() is AdditiveBackbone:
+            self._check_additive()
+        elif isinstance(self.backbone, str) and "pairs" in kwargs:
+            raise AshlarError("pairs are the additive backbone's pairwise terms; pass backbone='additive'.")
 
     def _policy(self) -> str:
         if self.prediction_policy is not None:
@@ -860,8 +872,9 @@ class ASRModel(BaseEstimator):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
         self._trial = None
         if not resume:
-            # A fresh fit resolves its own settings; a previous fit's must not leak in.
+            # A fresh fit resolves its own settings and builds its fields in today's order; a previous fit's must not leak in.
             self.resolved_ = None
+            self._legacy_field_order = False
         y, validation = self._candidate_inputs(y, validation)
         y_array = target_array(y)
         X = self._with_cyclical(X)
@@ -1394,6 +1407,43 @@ class ASRModel(BaseEstimator):
                     f"a random slope on a monotone feature ({sloped}) could turn its effect around for a group."
                 )
 
+    def _check_additive(self):
+        """Refuse what would mix the additive backbone's terms before the head's outputs."""
+        if self.task in ADDITIVE_REFUSED:
+            raise AshlarError(
+                f"the {self.task} head reads the hidden layer through a network of its own, so its outputs would not "
+                "be sums of per-feature terms. backbone='additive' takes every other built-in head."
+            )
+        if self._bottleneck_width() is not None:
+            raise AshlarError("a bottleneck mixes the additive backbone's terms; leave bottleneck=None.")
+        if self._soft_stage_count() is not None:
+            raise AshlarError("soft_stages adds stumps outside the additive terms; leave soft_stages=None.")
+        if not self.share_training_batches:
+            raise AshlarError("the additive backbone shows every member the same rows; leave share_training_batches=True.")
+        constrained = check_monotone(self.monotone)
+        for pair in check_pairs((self.backbone_kwargs or {}).get("pairs")):
+            clash = [name for name in pair if name in constrained]
+            if clash:
+                raise AshlarError(f"a monotone feature does not interact with the others, so {clash} cannot be in a pair.")
+
+    def _field_source(self, name: str) -> str:
+        """The column of ``X`` a field comes from: a cyclical column's ``_sin`` and ``_cos`` come from it."""
+        for suffix in ("_sin", "_cos"):
+            if self.cyclical and name.endswith(suffix) and name[: -len(suffix)] in self.cyclical:
+                return name[: -len(suffix)]
+        return name
+
+    def _additive_terms(self, names: list[str], pairs):
+        """The additive backbone's terms over the core's fields ``names``, and each term's columns.
+
+        One term per column of ``X``, so a cyclical column's sine and cosine
+        are one term, and one per pair, over both columns' fields. A monotone
+        feature reaches the outputs through its own shape, so no term reads it.
+        """
+        return additive_terms(
+            [self._field_source(name) for name in names], check_pairs(pairs), set(check_monotone(self.monotone))
+        )
+
     def _categorical_names(self, names, columns):
         requested = set(self.categorical or [])
         requested.update(self.categorical_embeddings or [])
@@ -1759,12 +1809,9 @@ class ASRModel(BaseEstimator):
         if self.num_embeddings is not None:
             embedding_dim = int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
-        chunks = encoder.feature_chunks(embedding_dim, cat_dim)
+        fields = self._core_fields(encoder)
         effects = check_random_effects(self.random_effects)
-        if effects:
-            # A grouping column reaches the network only through its pooled embedding, a field of its own at the end.
-            chunks = [width for column, width in zip(encoder.columns, chunks, strict=True) if column.name not in effects]
-            chunks += [cat_dim for _ in embedding_leaves(effects, nesting(self.random_effects))]
+        chunks = [width for _, width in fields]
         d_in = sum(chunks)
         backbone_cls = self._backbone_cls()
         kwargs = dict(self._resolved_training()["backbone_kwargs"] or {})
@@ -1773,6 +1820,9 @@ class ASRModel(BaseEstimator):
             kwargs["share_training_batches"] = bool(self.share_training_batches)
         if backbone_cls in _FIELD_BACKBONES:
             kwargs["feature_chunks"] = chunks
+        if backbone_cls is AdditiveBackbone:
+            kwargs["feature_chunks"] = chunks
+            kwargs["terms"] = self._additive_terms([name for name, _ in fields], kwargs.pop("pairs", None))[0]
         embeddings = None
         if self.num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
@@ -1851,6 +1901,21 @@ class ASRModel(BaseEstimator):
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
         )
+
+    def _core_fields(self, encoder: FeatureEncoder) -> list[tuple[str, int]]:
+        """``(column, width)`` of each field the backbone reads, in the core's order (``FeatureEncoder.fields``).
+
+        A grouping column of ``random_effects`` reaches the network only
+        through its pooled embedding, a field of its own after the others.
+        """
+        embedding_dim = None if self.num_embeddings is None else int(self.num_embedding_dim)
+        cat_dim = int(self.categorical_embedding_dim)
+        fields = encoder.fields(embedding_dim, cat_dim, legacy=bool(getattr(self, "_legacy_field_order", False)))
+        effects = check_random_effects(self.random_effects)
+        if effects:
+            fields = [(name, width) for name, width in fields if name not in effects]
+            fields += [(name, cat_dim) for name in embedding_leaves(effects, nesting(self.random_effects))]
+        return fields
 
     def _fit_target_scale(self, y):
         if not self.standardize_target or self.task not in _SCALED_TASKS:
@@ -2063,6 +2128,20 @@ class ASRModel(BaseEstimator):
 
         self._require_distribution("explain")
         return explain(self, X, target, **kwargs)
+
+    def shape_functions(self, X, *, center: bool = True):
+        """Each additive term's part of each head output, row by row, for ``backbone="additive"``.
+
+        Returns an ``ashlar.shapes.ShapeFunctions``: per row, the intercept
+        plus the terms is the head's output (a location, a raw scale, a log
+        mean, a logit), so a term's values against its column draw that
+        column's shape on that output. Terms are centered on the rows of
+        ``X``; pass the training rows, or a sample, to read them against the
+        data's average. ``center=False`` leaves each term as the network gives it.
+        """
+        from ashlar.shapes import read_shapes
+
+        return read_shapes(self, X, center=center)
 
     def forward_transformed(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
         """Point predictions from raw numeric values, keeping JAX arrays."""
@@ -3626,6 +3705,7 @@ class ASRModel(BaseEstimator):
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
             "flow_layout": FLOW_LAYOUT,
+            "field_order": FIELD_ORDER,
         }
         (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
         save_leaves(directory / "core.eqx", self.core_)
@@ -3687,6 +3767,8 @@ class ASRModel(BaseEstimator):
         )
         estimator._effect_mass = payload.get("random_effects_mass")
         estimator.tree_ = parse_tree(tree_json(estimator.tree)) if estimator.task == "tree" else None
+        # Saved before the fields followed the core's order: build the core the way it was trained.
+        estimator._legacy_field_order = payload.get("field_order") != FIELD_ORDER
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
