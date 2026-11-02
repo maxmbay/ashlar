@@ -379,6 +379,78 @@ def test_quantile_scaling_matches_sklearn_and_standard_stays_zscore():
     assert np.max(np.abs(got_q - expected_q)) < 1e-4
 
 
+def test_numeric_clip_widens_or_removes_the_clip_past_the_training_range():
+    from ashlar.preprocess import FeatureEncoder
+
+    rng = np.random.default_rng(0)
+    train = rng.normal(size=(400, 2))
+    query = jnp.asarray([[0.0, 0.0], [9.0, 0.0], [90.0, -30.0]], dtype=jnp.float32)
+    median, divisor = FeatureEncoder.fit(train).columns[0].median, FeatureEncoder.fit(train).columns[0].std
+    scaled = (np.asarray(query)[:, 0] - median) / divisor
+
+    def soft(z, clip):
+        return z / np.sqrt(1.0 + z * z / (clip * clip))
+
+    # Robust: 3 by default, a wider soft clip on request, and none at all.
+    for clip, expected in ((3.0, soft(scaled, 3.0)), (6.0, soft(scaled, 6.0)), (None, scaled)):
+        encoder = FeatureEncoder.fit(train, numeric_clip=clip)
+        got = np.asarray(encoder.numeric_transform(query))[:, 0]
+        assert np.allclose(got, expected, rtol=1e-5, atol=1e-5)
+        again = FeatureEncoder.from_json(encoder.to_json())
+        assert again.numeric_clip == clip
+        assert np.allclose(np.asarray(again.numeric_transform(query)), np.asarray(encoder.numeric_transform(query)))
+
+    # Quantile: the map stops at its edge by default; without the clip it goes on at 1.349 / IQR from there.
+    for scaling in ("quantile", "quantile_tabr"):
+        edge = FeatureEncoder.fit(train, numeric_scaling=scaling)
+        linear = FeatureEncoder.fit(train, numeric_scaling=scaling, numeric_clip=None)
+        inside = jnp.asarray(train[:50], dtype=jnp.float32)
+        assert np.allclose(np.asarray(edge.numeric_transform(inside)), np.asarray(linear.numeric_transform(inside)))
+        knots = np.asarray(linear.numeric_transform.quantiles, dtype=np.float64)[:, 0]
+        references = np.asarray(linear.numeric_transform.references, dtype=np.float64)
+        slope = 1.3489795003921634 / (np.interp(0.75, references, knots) - np.interp(0.25, references, knots))
+        clipped = np.asarray(edge.numeric_transform(query))
+        lines = np.asarray(linear.numeric_transform(query))
+        assert np.allclose(clipped[1:, 0], 5.199337582605575, atol=1e-4)
+        assert np.allclose(lines[1:, 0], 5.199337582605575 + (np.asarray(query)[1:, 0] - knots[-1]) * slope, rtol=1e-4)
+        assert lines[2, 1] < -5.2 and np.isfinite(lines).all()
+        assert FeatureEncoder.from_json(linear.to_json()).numeric_clip is None
+
+    # Standard scaling never clips, so the option changes nothing there.
+    standard = FeatureEncoder.fit(train, numeric_scaling="standard")
+    unclipped = FeatureEncoder.fit(train, numeric_scaling="standard", numeric_clip=None)
+    assert np.allclose(np.asarray(standard.numeric_transform(query)), np.asarray(unclipped.numeric_transform(query)))
+
+    # A schema saved before the option keeps the clip it was trained with.
+    old = FeatureEncoder.fit(train).to_json()
+    del old["numeric_clip"]
+    assert FeatureEncoder.from_json(old).numeric_clip == 3.0
+
+    for bad in (0, -1.0, float("nan"), float("inf"), True, "off"):
+        with pytest.raises(AshlarError, match="numeric_clip"):
+            FeatureEncoder.fit(train, numeric_clip=bad)
+    with pytest.raises(AshlarError, match="numeric_clip sizes the robust soft clip"):
+        FeatureEncoder.fit(train, numeric_scaling="quantile", numeric_clip=5.0)
+    with pytest.raises(AshlarError, match="numeric_clip"):
+        _regression(numeric_scaling="standard", numeric_clip=2.0).fit(train, train[:, 0])
+
+
+@pytest.mark.slow
+def test_numeric_clip_is_saved_and_extrapolates(tmp_path):
+    rng = np.random.default_rng(1)
+    x = rng.uniform(-1.0, 1.0, size=(256, 1))
+    y = 2.0 * x[:, 0]
+    far = np.array([[4.0], [8.0]])
+    clipped = _regression(task="gaussian", max_epochs=40, patience=40).fit(x, y)
+    linear = _regression(task="gaussian", numeric_clip=None, max_epochs=40, patience=40).fit(x, y)
+    # With the clip, 4 and 8 land almost on the same input; without it the fit keeps moving.
+    assert abs(float(np.diff(clipped.predict(far))[0])) < 0.5 * abs(float(np.diff(linear.predict(far))[0]))
+    linear.save(tmp_path / "linear")
+    loaded = ASRModel.load(tmp_path / "linear")
+    assert loaded.numeric_clip is None and loaded.numeric_transform_.clip is None
+    assert np.allclose(loaded.predict(far), linear.predict(far), atol=1e-5)
+
+
 def test_quantile_tabr_knot_count_skips_the_zscore():
     from ashlar.preprocess import FeatureEncoder
 
