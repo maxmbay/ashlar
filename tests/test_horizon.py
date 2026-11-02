@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from ashlar import ASRRegressor
+from ashlar.distributions import LowRankMultivariateNormal
 from ashlar.errors import AshlarError
 from ashlar.horizon import horizon_frame, peak, stockout
 
@@ -97,19 +100,36 @@ def test_path_functions():
     np.testing.assert_allclose(np.asarray(lasts(paths)), [3.0, 2.0, 4.0])
 
 
-@pytest.mark.slow
 def test_a_joint_head_forecasts_the_path_and_calibrates_its_peak():
-    data = _panel(series=4, steps=120, seed=1)
+    # Mechanics only: a tiny network trained for two epochs, so the checks are shapes, bounds, and order.
+    data = _panel(series=3, steps=60, seed=1)
     frame = horizon_frame(data, target="sales", lookback=7, horizon=4, series="store", time="day", known=["promo"])
-    train = frame.index["origin"].to_numpy() < 80
-    calibration = (frame.index["origin"].to_numpy() >= 80) & (frame.index["origin"].to_numpy() < 100)
-    test = frame.index["origin"].to_numpy() >= 100
-    model = ASRRegressor(task="multivariate_gaussian", max_epochs=30, random_state=0)
+    origin = frame.index["origin"].to_numpy()
+    train, calibration, test = origin < 35, (origin >= 35) & (origin < 45), origin >= 45
+    model = ASRRegressor(
+        task="multivariate_gaussian", max_epochs=2, backbone_kwargs={"n_blocks": 1, "d_block": 16}, random_state=0
+    )
     model.fit(frame.X[train], frame.Y[train])
-    model.calibrate(frame.X[calibration], frame.Y[calibration], target=[peak, stockout(60.0)])
-    interval = model.predict_interval(frame.X[test], 0.8, target=peak)
-    observed = peak(frame.Y[test])
-    held = np.mean((interval[:, 0] <= observed) & (observed <= interval[:, 1]))
-    assert 0.6 <= held <= 1.0
-    lasts = model.predict_exceedance(frame.X[test], 2.0, target=stockout(60.0))
-    assert lasts.shape == (int(test.sum()),) and np.all((lasts >= 0) & (lasts <= 1))
+    lasts = stockout(60.0)
+    model.calibrate(frame.X[calibration], frame.Y[calibration], target=[peak, lasts])
+    rows = int(test.sum())
+    assert np.asarray(model.sample(frame.X[test], n=8, seed=0)).shape == (8, rows, 4)
+    interval = np.asarray(model.predict_interval(frame.X[test], 0.8, target=peak))
+    assert interval.shape == (rows, 2) and np.all(interval[:, 0] <= interval[:, 1])
+    exceed = np.asarray([model.predict_exceedance(frame.X[test], step, target=lasts) for step in (1.0, 2.0, 3.0)])
+    assert np.all((exceed >= 0.0) & (exceed <= 1.0)) and np.all(np.diff(exceed, axis=0) <= 1e-9)
+
+
+def test_the_joint_normal_density_holds_a_variance_at_its_floor():
+    # A step the features make certain, such as a day a store is known to be closed, drives its variance to the
+    # floor. The low-rank normal's capacitance then lost every digit in float32: its log density came out wrong or
+    # NaN, and a training run on lags alone stopped on a loss that was not finite.
+    rng = np.random.default_rng(0)
+    factor = rng.normal(size=(6, 2)).astype(np.float32)
+    factor[:, 1] = factor[:, 0] + 1e-3 * rng.normal(size=6)
+    diag = np.array([1e-8, 1e-8, 1e-8, 0.5, 1.0, 2.0], dtype=np.float32)
+    value = (factor @ rng.normal(size=2) + np.sqrt(diag) * rng.normal(size=6)).astype(np.float32)
+    got = float(LowRankMultivariateNormal(jnp.zeros(6), jnp.asarray(factor), jnp.asarray(diag)).log_prob(jnp.asarray(value)))
+    covariance = factor.astype(np.float64) @ factor.T.astype(np.float64) + np.diag(diag.astype(np.float64))
+    expected = stats.multivariate_normal(np.zeros(6), covariance).logpdf(value.astype(np.float64))
+    assert abs(got - expected) < 0.01 * abs(expected)

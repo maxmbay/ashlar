@@ -949,17 +949,28 @@ class LowRankMultivariateNormal(Distribution):
     def log_prob(self, value):
         diff = jnp.asarray(value) - self.loc
         d = self.loc.shape[-1]
+        scale = jnp.sqrt(self.cov_diag)
+        z = diff / scale
         log_det = jnp.sum(jnp.log(self.cov_diag), axis=-1)
-        mahalanobis = jnp.sum(jnp.square(diff) / self.cov_diag, axis=-1)
-        if self.rank:
-            scaled = self.cov_factor / self.cov_diag[..., :, None]
-            capacitance = jnp.eye(self.rank, dtype=diff.dtype) + jnp.einsum("...dr,...ds->...rs", self.cov_factor, scaled)
-            chol = jnp.linalg.cholesky(capacitance)
-            log_det = log_det + 2.0 * jnp.sum(jnp.log(jnp.diagonal(chol, axis1=-2, axis2=-1)), axis=-1)
-            projected = jnp.einsum("...dr,...d->...r", jnp.broadcast_to(scaled, diff.shape + (self.rank,)), diff)
-            chol = jnp.broadcast_to(chol, projected.shape + (self.rank,))
-            solved = jax.scipy.linalg.solve_triangular(chol, projected[..., None], lower=True)[..., 0]
-            mahalanobis = mahalanobis - jnp.sum(jnp.square(solved), axis=-1)
+        if not self.rank:
+            return -0.5 * (d * math.log(2 * math.pi) + log_det + jnp.sum(jnp.square(z), axis=-1))
+        # Whitened by D, the covariance is I + A Aᵀ with A = D^(-1/2) W. The QR of [A; I] = [Q1; Q2] T gives
+        # TᵀT = I + AᵀA without forming AᵀA, which float32 cannot hold once a variance in D is tiny next to W,
+        # and (I + A Aᵀ)⁻¹ = I - Q1 Q1ᵀ, so the Mahalanobis term is a residual, |z - Q1 c|² + |Q2 c|² with
+        # c = Q1ᵀ z, rather than the difference of two huge numbers. T is well conditioned, every singular value
+        # at least 1, so its gradient is too.
+        whitened = self.cov_factor / scale[..., :, None]
+        batch = jnp.broadcast_shapes(whitened.shape[:-2], z.shape[:-1])
+        identity = jnp.broadcast_to(jnp.eye(self.rank, dtype=z.dtype), batch + (self.rank, self.rank))
+        stacked = jnp.concatenate([jnp.broadcast_to(whitened, batch + (d, self.rank)), identity], axis=-2)
+        q, triangle = jnp.linalg.qr(stacked)
+        log_det = log_det + 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diagonal(triangle, axis1=-2, axis2=-1))), axis=-1)
+        top, bottom = q[..., :d, :], q[..., d:, :]
+        z = jnp.broadcast_to(z, batch + (d,))
+        c = jnp.einsum("...dr,...d->...r", top, z)
+        residual = z - jnp.einsum("...dr,...r->...d", top, c)
+        rest = jnp.einsum("...sr,...r->...s", bottom, c)
+        mahalanobis = jnp.sum(jnp.square(residual), axis=-1) + jnp.sum(jnp.square(rest), axis=-1)
         return -0.5 * (d * math.log(2 * math.pi) + log_det + mahalanobis)
 
     def sample(self, key, sample_shape=()):
