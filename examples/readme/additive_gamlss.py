@@ -41,6 +41,10 @@ def compute(seed=None):
 
 TEMP_C, HUM_PCT = 41.0, 100.0  # the UCI table's temp is °C / 41 and hum is % / 100
 DAYS = ((1, "working days"), (0, "other days"))
+# The saved results keep each fit's seconds but not whether it converged. docs/benchmarks.md ("They take a fraction
+# of the time") records that the slowest gamlss fit, split 1's with the pair (2,691 seconds), stopped at its limit of
+# 200 cycles without converging. The figure draws it as a ring and leaves it out of the title's minutes.
+UNCONVERGED = {"gamlss_nbi_pair": ("1",)}
 
 
 def softplus(z):
@@ -88,12 +92,16 @@ def column_curve(model: dict, name: str, output: str, transform=None):
 
 
 def benchmark_stats(benchmark: dict, model: str) -> dict:
-    runs = list(benchmark.get(model, {}).values())
+    runs = benchmark.get(model, {})
     if not runs:
         return {}
-    pick = lambda key: np.asarray([run[key] for run in runs], dtype=np.float64)  # noqa: E731
-    return {"crps": float(pick("crps").mean()), "nll": float(pick("nll").mean()), "seconds": pick("seconds"),
-            "splits": len(runs)}
+    pick = lambda key: np.asarray([run[key] for run in runs.values()], dtype=np.float64)  # noqa: E731
+    seconds = pick("seconds")
+    converged = np.asarray([split not in UNCONVERGED.get(model, ()) for split in runs])
+    if not converged.all():  # the record names the slowest fit; check that it still is
+        assert seconds[~converged].min() > seconds[converged].max(), (model, seconds)
+    return {"crps": float(pick("crps").mean()), "nll": float(pick("nll").mean()), "seconds": seconds,
+            "converged": converged, "splits": len(runs)}
 
 
 def draw():
@@ -117,14 +125,16 @@ def draw():
     splits = bench["ashlar_additive"]["splits"]
 
     k.setup()
-    low, high = (float(value) for value in np.round(np.asarray([slow["seconds"].min(), slow["seconds"].max()]) / 60))
-    span = f"{low:.0f} to {high:.0f} minutes" if high >= 2 else f"{slow['seconds'].min():.0f} to {slow['seconds'].max():.0f} seconds"
+    done = slow["seconds"][slow["converged"]]  # the title's range: the gamlss fits that converged
+    low, high = (float(value) for value in np.round(np.asarray([done.min(), done.max()]) / 60))
+    span = f"{low:.0f} to {high:.0f} minutes" if high >= 2 else f"{done.min():.0f} to {done.max():.0f} seconds"
     fig = k.card(
         f"The same shapes as R's gamlss, in {np.mean(fast['seconds']):.0f} seconds instead of {span}.",
         f"Hourly bike rentals, {rows_total:,} hours: a negative binomial whose log mean and log dispersion are each "
         "a sum of one shape per column" + (", plus the hour × working day pair" if paired else "") +
         f". Ashlar's additive backbone against gamlss's NBI with penalized splines, both fitted to the same "
-        f"{data['train_rows']:,} hours, every curve centred on its mean. Right: {WORDS.get(splits, splits)} splits.",
+        f"{data['train_rows']:,} hours, every curve centred on its mean. Right: {WORDS.get(splits, splits)} splits, "
+        "Ashlar on every core of a laptop and gamlss on one thread.",
         height=9.0, footer=1,
     )
     cols = (0.0, 0.245, 0.49, 0.735)
@@ -200,7 +210,8 @@ def draw():
         for cell, colour in ((quick, k.TEAL), (slow_, k.CLAY)):
             if not cell:
                 continue
-            seconds = cell["seconds"]
+            ok = cell["converged"]
+            seconds, stopped = cell["seconds"][ok], cell["seconds"][~ok]
             speed.scatter(seconds, np.full(len(seconds), y), s=46, color=colour, edgecolor=k.CARD, lw=1.0, zorder=3)
             if colour == k.TEAL:
                 k.value(speed, seconds.min() / 1.45, y, k.num(np.mean(seconds)), colour, ha="right", va="center",
@@ -209,6 +220,11 @@ def draw():
                 text_ = k.num(seconds.min()) + "–" + k.num(seconds.max())
                 k.value(speed, np.sqrt(seconds.min() * seconds.max()), y + 0.2, text_, colour, ha="center",
                         va="bottom", size=12.5).set_path_effects(halo)
+            if len(stopped):  # a fit that hit its cycle limit: a ring, named above it
+                speed.scatter(stopped, np.full(len(stopped), y), s=40, facecolor=k.CARD, edgecolor=colour, lw=1.6,
+                              zorder=3)
+                speed.text(stopped.max(), y + 0.2, "did not\nconverge", fontproperties=k.F.small, color=k.MUTED,
+                           ha="center", va="bottom", linespacing=1.0)
         for name, colour, dy in ((mine, k.TEAL, 0.12), (other, k.CLAY, -0.12)):
             cell = bench[name]
             if not cell:
