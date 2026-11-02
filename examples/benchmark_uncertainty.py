@@ -16,9 +16,10 @@ Five stages, each written to its own JSON file in ``/tmp/ashlar-bench``:
   the 80% interval hold within every group after ``calibrate``, and after
   ``calibrate(..., groups=column)``, which calibrates each group on its own?
   Beside them, LightGBM's 0.1 and 0.9 quantile models with the conformal
-  step once over every calibration row (CQR) and once per group (Mondrian
+  step once over every calibration row (CQR), once per group (Mondrian
   CQR, a margin of its own for each group with as many calibration rows as
-  Ashlar's ``min_group_rows`` asks).
+  Ashlar's ``min_group_rows`` asks), and once over every row with the
+  score scaled by each row's interval width, so the margin grows with it.
 - ``localize``: the shift test of ``uncertainty`` with a calibration slice.
   Does ``calibrate(..., localize="members")``, which calibrates rows in bins
   of member disagreement, keep the 80% interval on rows past the training
@@ -233,6 +234,9 @@ def _cqr_by_group(predict, x_cal, y_cal, x_test, y_test, column, groups):
     cal, test = predict(x_cal), predict(x_test)
     scores = np.maximum(cal[:, 0] - y_cal, y_cal - cal[:, 1])
     margin = _conformal(scores, 0.8)
+    # The score in units of the row's own interval width: one table whose margin grows with the interval.
+    cal_width, test_width = (np.maximum(levels[:, 1] - levels[:, 0], 1e-9) for levels in (cal, test))
+    scaled = _conformal(scores / cal_width, 0.8)
     cal_groups, margins, own = x_cal[column].to_numpy(), np.full(len(y_test), margin), []
     for key in sorted(set(cal_groups.tolist()), key=str):
         rows = cal_groups == key
@@ -241,8 +245,11 @@ def _cqr_by_group(predict, x_cal, y_cal, x_test, y_test, column, groups):
             own.append(str(key))
     pooled = (test[:, 0] - margin, test[:, 1] + margin)
     grouped = (test[:, 0] - margins, test[:, 1] + margins)
+    widened = (test[:, 0] - scaled * test_width, test[:, 1] + scaled * test_width)
     return {
         "cqr_raw": _by_group(test[:, 0], test[:, 1], y_test, groups),
+        "cqr_scaled": _by_group(*widened, y_test, groups),
+        "cqr_scaled_all": _interval(*widened, y_test),
         "cqr_pooled": _by_group(*pooled, y_test, groups),
         "cqr_pooled_all": _interval(*pooled, y_test),
         "cqr_grouped": _by_group(*grouped, y_test, groups),
@@ -259,7 +266,7 @@ def stage_groups(results):
         rows = out.setdefault(name, {"rows": int(len(y)), "column": column, "runs": {}})
         for seed in SEEDS:
             # A run saved before LightGBM's CQR was added runs again.
-            if "cqr_grouped" in rows["runs"].get(str(seed), {}):
+            if "cqr_scaled" in rows["runs"].get(str(seed), {}):
                 continue
             x_train, x_cal, x_test, y_train, y_cal, y_test = _three_way(x, y, seed)
             groups = x_test[column].to_numpy()
@@ -285,7 +292,7 @@ def stage_groups(results):
             rows["runs"][str(seed)] = run
             spread = {
                 key: (min(v["coverage"] for v in run[key].values()), max(v["coverage"] for v in run[key].values()))
-                for key in ("raw", "pooled", "grouped", "cqr_pooled", "cqr_grouped")
+                for key in ("raw", "pooled", "grouped", "cqr_pooled", "cqr_scaled", "cqr_grouped")
             }
             print(name, seed, {key: tuple(round(v, 3) for v in value) for key, value in spread.items()}, flush=True)
             _save(results)
@@ -609,7 +616,7 @@ def stage_report(_results):
         print()
 
 
-GROUP_STAGES = ("raw", "pooled", "grouped", "cqr_raw", "cqr_pooled", "cqr_grouped")
+GROUP_STAGES = ("raw", "pooled", "grouped", "cqr_raw", "cqr_pooled", "cqr_scaled", "cqr_grouped")
 
 
 def report_groups():
@@ -639,8 +646,10 @@ def report_groups():
               f"{_mean_sd([r['pooled_all']['width'] for r in runs], 3)} and {_mean_sd([r['grouped_all']['width'] for r in runs], 3)}")
         if all("cqr_grouped_all" in run for run in runs):
             print(f"CQR: every-row margin {_mean_sd([r['cqr_pooled_all']['coverage'] for r in runs], 3)}, "
+                  f"scaled {_mean_sd([r['cqr_scaled_all']['coverage'] for r in runs], 3)}, "
                   f"per group {_mean_sd([r['cqr_grouped_all']['coverage'] for r in runs], 3)}; width "
-                  f"{_mean_sd([r['cqr_pooled_all']['width'] for r in runs], 3)} and "
+                  f"{_mean_sd([r['cqr_pooled_all']['width'] for r in runs], 3)}, "
+                  f"{_mean_sd([r['cqr_scaled_all']['width'] for r in runs], 3)}, and "
                   f"{_mean_sd([r['cqr_grouped_all']['width'] for r in runs], 3)}")
         print()
     print("## Coverage past the training range\n")

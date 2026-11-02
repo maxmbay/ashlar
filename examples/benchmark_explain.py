@@ -1,9 +1,10 @@
 """Explanations of the distribution, beside SHAP on LightGBM.
 
 On hourly Capital Bikeshare rentals (seeds 0 to 2, an 80/20 split), a
-``mixture`` head is fitted as in ``examples/explain_bike.py`` and
-``model.explain`` attributes four numbers per test row to the features: the
-mean, the median, the width of the 80% interval, and P(rentals > 500).
+``mixture`` head is fitted as in ``examples/explain_bike.py``, but with the
+hour as a plain number (see below), and ``model.explain`` attributes four
+numbers per test row to the features: the mean, the median, the width of the
+80% interval, and P(rentals > 500).
 
 Beside it, the gradient-boosting way, with SHAP's ``TreeExplainer``, on
 early-stopped LightGBM models (learning rate 0.05, up to 4,000 trees, 100
@@ -16,11 +17,19 @@ rounds of patience on a 20% validation slice of the training rows):
 - the tail: SHAP of a classifier of rentals > 500, in probability
   (interventional, against a background of training rows).
 
-``season`` and ``weathersit`` are integer codes to the trees. Reported per
-target: each feature's mean absolute attribution and its rank, averaged over
-the seeds, and how often the two quantile models cross. The question is what
-each method can attribute, not a score: there is no true attribution to
-score against.
+``season`` and ``weathersit`` are integer codes to the trees. The hour
+enters both models as a plain number. With ``cyclical={"hr": 24}`` the
+baseline of the sine and cosine columns is their separate medians, near the
+centre of the circle, an hour the network never saw, and on one split that
+doubled the hour's attribution. The straight path from the baseline hour to
+a row's hour crosses the rush-hour peaks, so the integral takes 256 steps,
+not the default 32; the numeric gap (what the integration misses, as a share
+of how far the target moved from the baseline) is reported per target.
+
+Reported per target: each feature's mean absolute attribution and its rank,
+averaged over the seeds, and how often the two quantile models cross. The
+question is what each method can attribute, not a score: there is no true
+attribution to score against.
 
     python examples/benchmark_explain.py [--seeds 0 1 2] [--rows 2000] [--out explain.json]
 """
@@ -50,6 +59,7 @@ from benchmark_uncertainty import bike
 from ashlar import ASRRegressor
 
 EPOCHS = 40
+STEPS = 256
 THRESHOLD = 500.0
 BACKGROUND = 2000
 TREE_BACKGROUND = 200
@@ -88,22 +98,25 @@ def run(seeds, n_rows, out):
     names = list(X.columns)
     results = []
     for seed in seeds:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=seed)
+        X_train, X_test, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=seed)
         rows = X_test.iloc[:n_rows]
         background = X_train.sample(BACKGROUND, random_state=seed)
-        result = {"seed": seed, "rows": int(len(rows)), "importance": {}, "prediction": {}, "seconds": {}}
+        result = {"seed": seed, "rows": len(rows), "importance": {}, "prediction": {}, "seconds": {}}
 
         start = time.time()
-        model = ASRRegressor(task="mixture", max_epochs=EPOCHS, cyclical={"hr": 24}, random_state=seed)
+        model = ASRRegressor(task="mixture", max_epochs=EPOCHS, random_state=seed)
         model.fit(X_train, y_train)
         result["seconds"]["ashlar_fit"] = time.time() - start
+        result["gap"] = {}
         for label, kwargs in ASHLAR_TARGETS.items():
             start = time.time()
-            explanation = model.explain(rows, background=background, **kwargs)
+            explanation = model.explain(rows, background=background, steps=STEPS, **kwargs)
             result["seconds"][f"ashlar_{label}"] = time.time() - start
             importance = explanation.importance()
             result["importance"][f"ashlar_{label}"] = {name: importance[name] for name in names}
             result["prediction"][f"ashlar_{label}"] = float(np.mean(explanation.prediction))
+            moved = float(np.mean(np.abs(explanation.prediction - explanation.baseline)))
+            result["gap"][f"ashlar_{label}"] = {"missed": float(np.mean(np.abs(explanation.numeric_gap()))), "moved": moved}
 
         trees_X, trees_rows = _codes(X_train), _codes(rows)
         start = time.time()
@@ -165,6 +178,12 @@ def report(results):
             rho = [stats.spearmanr([r["importance"][a][n] for n in names], [r["importance"][b][n] for n in names]).statistic
                    for r in results]
             print(f"  {a} ~ {b}: {np.mean(rho):.2f}")
+    gaps = [c for c in columns if c.startswith("ashlar_") and all(c in r.get("gap", {}) for r in results)]
+    if gaps:
+        print("\nIntegration gap (mean |numeric_gap()| over mean |prediction - baseline|), per seed:")
+        for c in gaps:
+            shares = [r["gap"][c]["missed"] / max(r["gap"][c]["moved"], 1e-12) for r in results]
+            print(f"  {c}: " + ", ".join(f"{100 * s:.1f}%" for s in shares))
     crossed = [r["crossed"]["test_rows"] for r in results if "crossed" in r]
     if crossed:
         print(f"\nLightGBM's 0.9 model below its 0.1 model on {100 * np.mean(crossed):.2f}% of test rows "
