@@ -31,6 +31,7 @@ Stages, each skipping what is already saved:
 
     JAX_PLATFORMS=cpu python examples/benchmark_additive.py ashlar
     python examples/benchmark_additive.py gamlss      # needs R with gamlss
+    python examples/benchmark_additive.py rescore     # scores the saved gamlss fits again, without refitting
     python examples/benchmark_additive.py report
     JAX_PLATFORMS=cpu python examples/benchmark_additive.py figure
 
@@ -181,12 +182,44 @@ def run_ashlar(tables, seeds):
 
 # ---------------------------------------------------------------- gamlss
 
-R_SCRIPT = r"""
+# Shared by the fit and the rescoring scripts: the grid, the CRPS, and every score of a fit's per-row parameters.
+R_SCORING = r"""
 args <- commandArgs(trailingOnly = TRUE)
-name <- args[1]; train_path <- args[2]; test_path <- args[3]; out_prefix <- args[4]
-models <- strsplit(args[5], ",")[[1]]
+name <- args[1]
 .libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
 suppressPackageStartupMessages(library(gamlss))
+if (name == "bike") { grid <- 0:4000; step <- 1 } else { grid <- (1:4000) * 0.01; step <- 0.01 }
+crps <- function(cdf, y) rowSums((cdf - outer(y, grid, "<="))^2) * step
+# Each row's CDF at every grid point. gamlss.dist's p functions do not recycle q against parameters of another
+# length (pNBI keeps sigma's length, so every grid point got the CDF at 0), so every argument is given in full.
+on_grid <- function(pfun, ...) {
+  parameters <- list(...)
+  n <- length(parameters[[1]])
+  full <- lapply(parameters, rep, times = length(grid))
+  matrix(do.call(pfun, c(list(rep(grid, each = n)), full)), nrow = n)
+}
+score <- function(model, y, mu, sigma, nu = NULL) {
+  if (model %in% c("gamlss_nbi", "gamlss_nbi_pair")) {
+    nll <- -dNBI(y, mu = mu, sigma = sigma, log = TRUE)
+    cdf <- on_grid(pNBI, mu = mu, sigma = sigma)
+    low <- qNBI(0.1, mu = mu, sigma = sigma); high <- qNBI(0.9, mu = mu, sigma = sigma)
+  } else if (model == "gamlss_no") {
+    nll <- -dNO(y, mu = mu, sigma = sigma, log = TRUE)
+    cdf <- on_grid(pNO, mu = mu, sigma = sigma)
+    low <- qNO(0.1, mu = mu, sigma = sigma); high <- qNO(0.9, mu = mu, sigma = sigma)
+  } else {
+    nll <- -dBCCGo(y, mu = mu, sigma = sigma, nu = nu, log = TRUE)
+    cdf <- on_grid(pBCCGo, mu = mu, sigma = sigma, nu = nu)
+    low <- qBCCGo(0.1, mu = mu, sigma = sigma, nu = nu); high <- qBCCGo(0.9, mu = mu, sigma = sigma, nu = nu)
+  }
+  data.frame(nll = nll, crps = crps(cdf, y), low = low, high = high, y = y,
+             mu = mu, sigma = sigma, nu = if (is.null(nu)) NA else nu)
+}
+"""
+
+R_FIT = r"""
+train_path <- args[2]; test_path <- args[3]; out_prefix <- args[4]
+models <- strsplit(args[5], ",")[[1]]
 train <- read.csv(train_path, stringsAsFactors = FALSE)
 test <- read.csv(test_path, stringsAsFactors = FALSE)
 factors <- strsplit(args[6], ",")[[1]]
@@ -195,17 +228,10 @@ for (f in factors) {
   train[[f]] <- factor(as.character(train[[f]]), levels = levels)
   test[[f]] <- factor(as.character(test[[f]]), levels = levels)
 }
-crps <- function(cdf, y, grid, step) rowSums((cdf - outer(y, grid, "<="))^2) * step
-on_grid <- function(pfun, grid, ...) {
-  n <- length(list(...)[[1]])
-  matrix(pfun(rep(grid, each = n), ...), nrow = n)
-}
 if (name == "bike") {
   main <- "season + yr + mnth + hr + holiday + weekday + weathersit + pb(temp) + pb(atemp) + pb(hum) + pb(windspeed)"
-  grid <- 0:4000; step <- 1
 } else {
   main <- "sex + pb(length) + pb(diameter) + pb(height) + pb(whole) + pb(shucked) + pb(viscera) + pb(shell)"
-  grid <- (1:4000) * 0.01; step <- 0.01
 }
 response <- if (name == "bike") "cnt" else "rings"
 y <- test[[response]]
@@ -222,25 +248,17 @@ for (model in models) {
   if (is.null(fit)) next
   seconds <- as.numeric(difftime(Sys.time(), started, units = "secs"))
   p <- predictAll(fit, newdata = test, data = train, type = "response")
-  if (model %in% c("gamlss_nbi", "gamlss_nbi_pair")) {
-    nll <- -dNBI(y, mu = p$mu, sigma = p$sigma, log = TRUE)
-    cdf <- on_grid(pNBI, grid, mu = p$mu, sigma = p$sigma)
-    low <- qNBI(0.1, mu = p$mu, sigma = p$sigma); high <- qNBI(0.9, mu = p$mu, sigma = p$sigma)
-  } else if (model == "gamlss_no") {
-    nll <- -dNO(y, mu = p$mu, sigma = p$sigma, log = TRUE)
-    cdf <- on_grid(pNO, grid, mu = p$mu, sigma = p$sigma)
-    low <- qNO(0.1, mu = p$mu, sigma = p$sigma); high <- qNO(0.9, mu = p$mu, sigma = p$sigma)
-  } else {
-    nll <- -dBCCGo(y, mu = p$mu, sigma = p$sigma, nu = p$nu, log = TRUE)
-    cdf <- on_grid(pBCCGo, grid, mu = p$mu, sigma = p$sigma, nu = p$nu)
-    low <- qBCCGo(0.1, mu = p$mu, sigma = p$sigma, nu = p$nu); high <- qBCCGo(0.9, mu = p$mu, sigma = p$sigma, nu = p$nu)
-  }
-  rows <- data.frame(nll = nll, crps = crps(cdf, y, grid, step), low = low, high = high, y = y,
-                     mu = p$mu, sigma = p$sigma, nu = if (is.null(p$nu)) NA else p$nu)
-  write.csv(rows, paste0(out_prefix, "-", model, ".csv"), row.names = FALSE)
+  write.csv(score(model, y, p$mu, p$sigma, p$nu), paste0(out_prefix, "-", model, ".csv"), row.names = FALSE)
   cat(model, "seconds", seconds, "df", fit$df.fit, "deviance", deviance(fit), "\n")
   writeLines(as.character(seconds), paste0(out_prefix, "-", model, ".seconds"))
 }
+"""
+
+R_RESCORE = r"""
+rows_path <- args[2]; model <- args[3]
+rows <- read.csv(rows_path)
+nu <- if (all(is.na(rows$nu))) NULL else rows$nu
+write.csv(score(model, rows$y, rows$mu, rows$sigma, nu), rows_path, row.names = FALSE)
 """
 
 
@@ -263,7 +281,7 @@ def _gamlss_frame(name: str, X_train, y_train, X_test, y_test):
 def run_gamlss(tables, seeds):
     ROOT.mkdir(parents=True, exist_ok=True)
     script = ROOT / "fit_gamlss.R"
-    script.write_text(R_SCRIPT)
+    script.write_text(R_SCORING + R_FIT)
     for name in tables:
         for seed in seeds:
             missing = [model for model in GAMLSS[name] if not _path(name, seed, model).exists()]
@@ -282,19 +300,41 @@ def run_gamlss(tables, seeds):
             sys.stdout.write(completed.stdout)
             sys.stderr.write(completed.stderr[-4000:])
             for model in missing:
+                _gamlss_result(name, seed, model, prefix)
+
+
+def rescore_gamlss(tables, seeds):
+    """Score every saved gamlss fit again from its per-row parameters, without refitting."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    script = ROOT / "score_gamlss.R"
+    script.write_text(R_SCORING + R_RESCORE)
+    for name in tables:
+        for seed in seeds:
+            prefix = ROOT / f"{name}-{seed}"
+            for model in GAMLSS[name]:
                 rows_path = Path(f"{prefix}-{model}.csv")
                 if not rows_path.exists():
-                    print(name, seed, model, "no result", flush=True)
                     continue
-                rows = pd.read_csv(rows_path)
-                seconds = float(Path(f"{prefix}-{model}.seconds").read_text())
-                result = _summary(
-                    rows["nll"].to_numpy(), rows["crps"].to_numpy(), rows["low"].to_numpy(), rows["high"].to_numpy(),
-                    rows["y"].to_numpy(), seconds,
-                )
-                result["check"] = _python_check(name, model, rows)
-                _path(name, seed, model).write_text(json.dumps(result))
-                print(name, seed, model, json.dumps({key: round(value, 4) for key, value in result.items()}), flush=True)
+                completed = subprocess.run(["Rscript", str(script), name, str(rows_path), model], capture_output=True, text=True)
+                sys.stderr.write(completed.stderr[-4000:])
+                _gamlss_result(name, seed, model, prefix)
+
+
+def _gamlss_result(name: str, seed: int, model: str, prefix: Path):
+    """Summarize one gamlss fit's per-row scores into its result file."""
+    rows_path = Path(f"{prefix}-{model}.csv")
+    if not rows_path.exists():
+        print(name, seed, model, "no result", flush=True)
+        return
+    rows = pd.read_csv(rows_path)
+    seconds = float(Path(f"{prefix}-{model}.seconds").read_text())
+    result = _summary(
+        rows["nll"].to_numpy(), rows["crps"].to_numpy(), rows["low"].to_numpy(), rows["high"].to_numpy(),
+        rows["y"].to_numpy(), seconds,
+    )
+    result["check"] = _python_check(name, model, rows)
+    _path(name, seed, model).write_text(json.dumps(result))
+    print(name, seed, model, json.dumps({key: round(value, 4) for key, value in result.items()}), flush=True)
 
 
 def _python_check(name: str, model: str, rows: pd.DataFrame) -> float:
@@ -436,6 +476,8 @@ def main(argv):
             run_ashlar(tables, seeds)
         elif stage == "gamlss":
             run_gamlss(tables, seeds)
+        elif stage == "rescore":
+            rescore_gamlss(tables, seeds)
         elif stage == "report":
             report()
         elif stage == "figure":
