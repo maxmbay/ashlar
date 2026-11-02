@@ -150,10 +150,10 @@ def draw() -> None:
     heights = k.stacks(total, COURSES)
 
     fig = k.card(
-        "The logo is a joint density. So is this one.",
-        f"Capital Bikeshare, {data['total_hours']:,} hours of 2011 and 2012. One fit predicts casual and registered "
-        "riders together. Two held-out hours on one 16 × 16 floor of log riders: each stack is the predicted "
-        "chance of its cell, and the ink dot is what happened.",
+        "Joint predicted distribution of casual and registered riders",
+        f"Capital Bikeshare, {data['total_hours']:,} hours of 2011 and 2012. One model predicts casual and registered "
+        "riders together. Two held-out hours on a 16 × 16 grid of log rider counts: the height of each stack is the "
+        "predicted probability of its cell, and the ink dot is the actual count.",
         height=9.0,
     )
     box = fig.box

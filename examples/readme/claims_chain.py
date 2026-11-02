@@ -340,9 +340,9 @@ def draw() -> None:
     colour = {"TEAL": k.TEAL, "CLAY": k.CLAY, "SLATE": k.SLATE}
 
     fig = k.card(
-        "One chained model ties both compositions built by hand.",
+        "A chained model of claim counts and cost per claim",
         f"freMTPL2, {curves['test_policies']:,} held-out French motor policies, split 0. The chain: a negative "
-        "binomial claim count, then a hurdle cost per claim that reads the count. Right: the share of policies whose "
+        "binomial claim count, then a hurdle model for the cost per claim given the count. Right: the share of policies whose "
         "total for the year, T = count × cost per claim, is above t.",
         height=8.4,
         footer=2,

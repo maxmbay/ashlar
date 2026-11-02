@@ -147,35 +147,6 @@ def _span(items, floor):
 WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
 
 
-def headline(error, distribution) -> str:
-    """The card's title, in numbers: the README's heading above the figure says the claim in words.
-
-    The tables whose error is within half a percent of the best tree's, the ones ahead by more, and the
-    range of the CRPS gain on the regression tables where the mixture is ahead.
-    """
-    level = [abs(v["mean"]) for v in error.values() if abs(v["mean"]) < TIE]
-    ahead = [v for v in error.values() if v["mean"] <= -TIE]
-    regression = {table for table, _, _ in GROUPS[0][1]}
-    gains = sorted(-v["mean"] for t, v in distribution.items() if t in regression and v["mean"] <= -TIE)
-    parts = []
-    if level:
-        parts.append(f"Within {np.ceil(max(level) * 10 - 1e-9) / 10:g}% on {WORDS[len(level)]} tables")
-    if ahead:
-        parts.append(f"ahead on {WORDS[len(ahead)]}" if level else f"Ahead on {WORDS[len(ahead)]} tables")
-    first = ", ".join(parts) or "Against the best tree on each table"
-    if not gains:
-        return first + "."
-    low, high = round(gains[0]), round(gains[-1])
-    ranges = [f"{high}%"] if low == high else [f"{low}% to {high}%", f"{low}–{high}%"]
-    fonts = k.setup()
-    room = k.WIDTH - 2 * 0.62 - 0.2  # the card's text width, less a little air
-    for span in ranges:
-        text = f"{first}; CRPS {span} lower on {WORDS[len(gains)]}."
-        if k.text_width(text, fonts.title) <= room:
-            return text
-    return first + "."
-
-
 POSSESSIVE = {  # the best tree distribution, as the footnote names it
     "lightgbm": "LightGBM's normal of one width", "xgboost": "XGBoost's normal of one width",
     "catboost": "CatBoost's normal of one width", "catboost_uncertainty": "CatBoost's RMSEWithUncertainty",
@@ -223,13 +194,15 @@ def splits_text(items) -> str:
 def draw() -> None:
     rows = load()
     error, distribution = results(rows)
+    every = list(error.values()) + list(distribution.values())
+    single = any(len(item["seeds"]) == 1 for item in every)  # a dot drawn as a tie by TIE
     fig = k.card(
-        headline(error, distribution),
-        "Eight OpenML tables of half a million to two million rows, defaults on every side, "
-        f"{splits_text(list(error.values()) + list(distribution.values()))}. Each dot is Ashlar's change "
-        "against the best tree on that table; left of zero, Ashlar is better.",
+        "Ashlar compared with the best tree-based model on eight tables",
+        "Eight OpenML tables of half a million to two million rows, no tuning for any model, "
+        f"{splits_text(every)}. Each dot shows how Ashlar's score differs from the best tree-based model's "
+        "on that table; left of zero means Ashlar is better.",
         height=9.3,
-        footer=3,
+        footer=3 if single else 2,
     )
     left, right = k.panels(fig, 1, 2, wspace=0.55, widths=[1.0, 1.0], head=0.95, tail=0.5, lpad=2.75, rpad=0.25)[0]
     positions, heads, y = {}, [], 0.0
@@ -272,8 +245,9 @@ def draw() -> None:
     for group, gy in heads:
         left.text(-0.03, gy + 0.18, group.upper(), transform=left.get_yaxis_transform(), fontproperties=k.F.small,
                   color=k.MUTED, ha="right", va="center")
+    tie = f" or, with one split, where the change is under {TIE:g}%" if single else ""
     k.footnote(fig, "The dot is the mean change over the splits and the whisker one standard deviation; grey where the "
-                    f"whisker crosses zero or, with one split, where the change is under {TIE:g}%. "
+                    f"whisker crosses zero{tie}. "
                     f"{best_distributions(distribution)} Every number is in docs/benchmarks.md, Large tables.", line=0)
     k.save(fig, "scoreboard")
     for panel, items in (("error", error), ("distribution", distribution)):

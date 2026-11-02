@@ -130,12 +130,12 @@ CODE = [
 ]
 
 CAPTION = [
-    "Every slot is a keyword argument, and the label says",
-    "what was observed. Change one and the rest stays put:",
-    'task="mixture" for a free shape, backbone="tabm" for',
-    "an ensemble, a plain y for an exact label. Teal marks",
-    "the heads that return a distribution and the labels",
-    "that need one.",
+    "Each row except the label is a keyword argument; the",
+    "label is set by what you pass to fit. Each choice can",
+    'be changed on its own: task="mixture" for a mixture',
+    'of normals, backbone="tabm" for an ensemble, a plain',
+    "y for an exact label. Teal marks heads that return",
+    "a distribution and the labels that need one.",
 ]
 
 

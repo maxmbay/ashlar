@@ -231,11 +231,11 @@ def draw() -> None:
     days = np.asarray(figure["days"], float)
     patients = figure["patients"]
     fig = k.card(
-        "Each patient gets a curve of its own shape, not a shifted copy.",
+        "Predicted survival curves for five test patients",
         f"SUPPORT: {k.num(data['patients'])} seriously ill patients, {data['features']} features, "
-        f"{k.pct(data['died'])} died during follow-up. Five test patients of one 80/20 split, A to E by the "
-        "mixture's chance of living a year: × is a death, ○ a patient alive when last seen. The mixture head "
-        "fitted to censored log times, against XGBoost's AFT model tuned on a 42-fit grid.",
+        f"{k.pct(data['died'])} died during follow-up. Five test patients from one 80/20 split, labelled A to E by "
+        "the mixture's predicted chance of surviving a year: × marks a death, ○ a patient alive at the last "
+        "follow-up. Ashlar's mixture head fitted to censored log times, and XGBoost's AFT model tuned over 42 settings.",
         height=8.58,
         footer=1,
     )

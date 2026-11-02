@@ -335,10 +335,10 @@ def draw() -> None:
 
     sold = int(days["sold_out"].sum())
     fig = k.card(
-        "Read the sold-out days as censored, and the demand comes back.",
+        "Demand estimated from sales, with sold-out days treated as censored",
         f"FreshRetailNet-50K: one store's fresh product over its {len(days['day'])} test days, {when(days['day'][0])} "
-        f"to {when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the demand a "
-        "sold-out day hid is known. Bands run from 10% to 90% of demand, fitted to the censored sales: Ashlar's "
+        f"to {when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the true "
+        "demand on sold-out days is known. Bands run from 10% to 90% of demand, fitted to the censored sales: Ashlar's "
         "mixture head in teal, XGBoost's AFT model in clay. LightGBM's 90% quantile, fitted to sales, in slate.",
         height=9.18,
         footer=3,
@@ -350,7 +350,7 @@ def draw() -> None:
     left.set_xticks(weekly, [when(day) for day in weekly])
     k.style(left, frame="lb", grid="y")
     k.axis_names(left, y="sales and demand, a day")
-    k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days: the bars stop at the stock, the demand does not")
+    k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days, when sales equal the stock and demand is higher")
     _costs(right, k, costs, seeds)
 
     # The three seeds' costs are printed on the inset's bars and quoted once in the README's prose.

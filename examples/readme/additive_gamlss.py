@@ -129,12 +129,12 @@ def draw():
     low, high = (float(value) for value in np.round(np.asarray([done.min(), done.max()]) / 60))
     span = f"{low:.0f} to {high:.0f} minutes" if high >= 2 else f"{done.min():.0f} to {done.max():.0f} seconds"
     fig = k.card(
-        f"The same shapes as R's gamlss, in {np.mean(fast['seconds']):.0f} seconds instead of {span}.",
+        "Additive model terms from Ashlar and from R's gamlss",
         f"Hourly bike rentals, {rows_total:,} hours: a negative binomial whose log mean and log dispersion are each "
-        "a sum of one shape per column" + (", plus the hour × working day pair" if paired else "") +
+        "a sum of one function per column" + (", plus the hour × working day pair" if paired else "") +
         f". Ashlar's additive backbone against gamlss's NBI with penalized splines, both fitted to the same "
         f"{data['train_rows']:,} hours, every curve centred on its mean. Right: {WORDS.get(splits, splits)} splits, "
-        "Ashlar on every core of a laptop and gamlss on one thread.",
+        "Ashlar on all 12 cores of a laptop, gamlss on one thread.",
         height=9.0, footer=1,
     )
     cols = (0.0, 0.245, 0.49, 0.735)

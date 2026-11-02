@@ -1,4 +1,4 @@
-"""The hero figure and the one-flight card: every flight gets its own distribution.
+"""The hero figure and the one-flight card: predicted delay distributions for held-out flights.
 
 Airline delay (OpenML 42728): the departure delay in minutes of a fixed
 sample of 2,000,000 US flights, from the schedule alone (month, weekday,
@@ -804,12 +804,12 @@ def draw(folder: Path = ARTIFACTS) -> None:
     solid = k.mix(k.TEAL, k.CARD, 0.36)
 
     fig = k.card(
-        "Every flight gets its own distribution.",
+        f"Predicted departure delays for {len(picks)} held-out flights",
         f"Airline delay: {summary['training_rows'] + summary['test_rows']:,} US flights from 1987 to 2008, schedule "
-        "only, no weather. "
-        "Each ridge is one held-out flight's predicted departure delay from a single ASRRegressor(task=\"mixture\") "
-        "fit, its central 80% solid. Under it, the 80% interval of LightGBMLSS's mixture of three normals for the "
-        "same flight, the best tree distribution on this table, and the delay that happened.",
+        "information only, no weather. "
+        "Each ridge is one flight's predicted distribution of departure delay from ASRRegressor(task=\"mixture\"), "
+        "with its central 80% shaded dark. Under it are the 80% interval from LightGBMLSS's mixture of three "
+        "normals, the best tree-based model on this table, and a dot for the actual delay.",
         height=11.4,
         footer=3,
     )

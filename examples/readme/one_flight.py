@@ -71,9 +71,9 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
     departure = h.clock(x_of("departure"), fmt)
 
     fig = k.card(
-        "One fit, one flight, every answer.",
-        "A held-out flight. Each line is a call from the quick start on this one row, its answer placed on the "
-        "same delay axis as the flight's predicted distribution.",
+        "The quick-start calls on one held-out flight",
+        "Each line shows what one call from the quick start returns for this flight, placed on the same delay "
+        "axis as the flight's predicted distribution.",
         height=9.2,
         footer=3,
     )
