@@ -272,9 +272,9 @@ def draw() -> None:
     for group, gy in heads:
         left.text(-0.03, gy + 0.18, group.upper(), transform=left.get_yaxis_transform(), fontproperties=k.F.small,
                   color=k.MUTED, ha="right", va="center")
-    k.footnote(fig, "The dot is the mean change over the splits and the whisker one standard deviation; grey where it "
-                    f"crosses zero. {best_distributions(distribution)} Ashlar trains in minutes on a laptop CPU, where "
-                    "LightGBM takes seconds to minutes. Every number is in docs/benchmarks.md, Large tables.", line=0)
+    k.footnote(fig, "The dot is the mean change over the splits and the whisker one standard deviation; grey where the "
+                    f"whisker crosses zero or, with one split, where the change is under {TIE:g}%. "
+                    f"{best_distributions(distribution)} Every number is in docs/benchmarks.md, Large tables.", line=0)
     k.save(fig, "scoreboard")
     for panel, items in (("error", error), ("distribution", distribution)):
         for item in items.values():

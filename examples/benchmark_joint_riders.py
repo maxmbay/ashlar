@@ -42,9 +42,20 @@ NLL of the two log counts; and for the total ``casual + registered``, the
 coverage and mean width of its central 80% interval and its CRPS, read from
 4,000 joint draws per hour, mapped back to counts.
 
+The ``calibrated`` stage asks the same question at equal coverage. A fifth
+of each split's training hours is set aside, every model trains on the rest
+as above, and each total's 80% interval is calibrated on the hours set
+aside: Ashlar's ``joint`` and ``independent heads`` with ``calibrate`` on the
+total (``target=riders_total``), and every model, LightGBM's included, with
+conformalized quantile regression (CQR: the interval from the model's 10%
+and 90% quantiles of the total, widened on both sides by the conformal
+quantile of how far the hours set aside fall outside it). Reported: each
+interval's coverage and mean width on the test hours, before and after.
+
 Run with::
 
-    JAX_PLATFORMS=cpu python examples/benchmark_joint_riders.py run       # about 30 minutes on four cores
+    JAX_PLATFORMS=cpu python examples/benchmark_joint_riders.py run         # about 30 minutes on four cores
+    JAX_PLATFORMS=cpu python examples/benchmark_joint_riders.py calibrated  # about 20 minutes on four cores
     python examples/benchmark_joint_riders.py report
 """
 
@@ -75,6 +86,8 @@ SOURCES.setdefault(
     "bike_hour.csv", f"{RAW}/udacity/deep-learning-v2-pytorch/master/project-bikesharing/Bike-Sharing-Dataset/hour.csv"
 )
 RESULTS = DATA_DIR / "joint-riders.json"
+CALIBRATED = DATA_DIR / "joint-riders-calibrated.json"
+COVERAGE = 0.8
 SEEDS = (0, 1, 2)
 DRAWS = 4000
 GROUPS = ("casual", "registered")
@@ -206,6 +219,106 @@ def run() -> None:
         RESULTS.write_text(json.dumps(results, indent=1))
 
 
+def riders_total(y):
+    """The bikes out in the hour, casual plus registered, from the two log counts ``(..., 2)``."""
+    return np.expm1(np.maximum(np.asarray(y, dtype=np.float64), 0.0)).sum(axis=-1)
+
+
+def cqr(low, high, low_cal, high_cal, observed_cal, coverage: float = COVERAGE):
+    """Conformalized quantile regression: ``[low, high]`` widened on both sides by the conformal quantile of the
+    calibration rows' scores, how far each one falls outside its own interval (negative inside it)."""
+    scores = np.maximum(low_cal - observed_cal, observed_cal - high_cal)
+    n = len(scores)
+    margin = float(np.quantile(scores, min(1.0, np.ceil((n + 1) * coverage) / n), method="higher"))
+    return low - margin, high + margin, margin
+
+
+def _before_after(low, high, low_cal, high_cal, observed, observed_cal) -> dict:
+    after_low, after_high, margin = cqr(low, high, low_cal, high_cal, observed_cal)
+    return {"before": interval_scores(low, high, observed), "after": interval_scores(after_low, after_high, observed),
+            "margin": margin}
+
+
+def calibrated() -> None:
+    """The total's 80% interval at equal coverage: ``calibrate`` and CQR on a fifth of the training hours."""
+    x, counts = riders()
+    y = np.log1p(counts)
+    results = json.loads(CALIBRATED.read_text()) if CALIBRATED.exists() else {}
+    for seed in SEEDS:
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=seed)
+        observed = np.expm1(y_test).sum(axis=1)
+        # A fifth of the training hours to calibrate on; every model trains on the rest, early-stopping as `run` does.
+        x_rest, x_cal, y_rest, y_cal = train_test_split(x_train, y_train, test_size=0.2, random_state=seed + 100)
+        observed_cal = np.expm1(y_cal).sum(axis=1)
+        x_fit, x_val, y_fit, y_val = train_test_split(x_rest, y_rest, test_size=0.2, random_state=seed)
+        key = jax.random.PRNGKey(seed)
+        record = {}
+        fitted = {}
+        for name in ("joint", "independent heads"):
+            start = time.process_time()
+            model = ASRRegressor(random_state=seed, **ASHLAR[name]).fit(x_fit, y_fit, validation=(x_val, y_val))
+            fit_seconds = time.process_time() - start
+            raw = model.predict_interval(x_test, COVERAGE, n_samples=DRAWS, target=riders_total)
+            raw_cal = model.predict_interval(x_cal, COVERAGE, n_samples=DRAWS, target=riders_total)
+            start = time.process_time()
+            model.calibrate(x_cal, y_cal, n_samples=DRAWS, target=riders_total)
+            calibrate_seconds = time.process_time() - start
+            after = model.predict_interval(x_test, COVERAGE, n_samples=DRAWS, target=riders_total)
+            record[f"{name}, calibrate"] = {
+                "before": interval_scores(raw[:, 0], raw[:, 1], observed),
+                "after": interval_scores(after[:, 0], after[:, 1], observed),
+                "cpu": fit_seconds,
+                "calibrate cpu": calibrate_seconds,
+            }
+            record[f"{name}, CQR"] = _before_after(raw[:, 0], raw[:, 1], raw_cal[:, 0], raw_cal[:, 1], observed,
+                                                    observed_cal)
+            fitted[name] = model
+        loose = fitted["independent heads"]
+        correlation = _static_correlation(loose, x_val, y_val)
+        bounds = {}
+        for part, rows in (("test", x_test), ("cal", x_cal)):
+            dist = _with_correlation(loose.predict_dist(rows), correlation)
+            total = total_draws(dist, len(rows), jax.random.fold_in(key, 1 if part == "test" else 2))
+            bounds[part] = np.quantile(total, [0.1, 0.9], axis=0)
+        record["independent + static correlation, CQR"] = _before_after(*bounds["test"], *bounds["cal"], observed,
+                                                                         observed_cal)
+        start = time.process_time()
+        total_rest = np.expm1(y_rest).sum(axis=1)
+        low_model, high_model = (_lightgbm_quantile(x_rest, total_rest, level, seed) for level in (0.1, 0.9))
+        record["LightGBM quantiles of the total, CQR"] = _before_after(
+            low_model(x_test), high_model(x_test), low_model(x_cal), high_model(x_cal), observed, observed_cal)
+        record["LightGBM quantiles of the total, CQR"]["cpu"] = time.process_time() - start
+        start = time.process_time()
+        summed = {"test": np.zeros((2, len(observed))), "cal": np.zeros((2, len(observed_cal)))}
+        for column in range(2):
+            for row, level in enumerate((0.1, 0.9)):
+                predict = _lightgbm_quantile(x_rest, np.expm1(y_rest[:, column]), level, seed)
+                summed["test"][row] += predict(x_test)
+                summed["cal"][row] += predict(x_cal)
+        record["LightGBM quantiles per group, summed, CQR"] = _before_after(*summed["test"], *summed["cal"], observed,
+                                                                             observed_cal)
+        record["LightGBM quantiles per group, summed, CQR"]["cpu"] = time.process_time() - start
+        record["static correlation"] = float(correlation[0, 1])
+        record["test hours"] = int(len(observed))
+        record["calibration hours"] = int(len(observed_cal))
+        for name, scores in record.items():
+            print(seed, name, json.dumps(scores), flush=True)
+        results[str(seed)] = record
+        CALIBRATED.parent.mkdir(parents=True, exist_ok=True)
+        CALIBRATED.write_text(json.dumps(results, indent=1))
+
+
+CALIBRATED_MODELS = (
+    "joint, calibrate",
+    "independent heads, calibrate",
+    "joint, CQR",
+    "independent heads, CQR",
+    "independent + static correlation, CQR",
+    "LightGBM quantiles of the total, CQR",
+    "LightGBM quantiles per group, summed, CQR",
+)
+
+
 def report() -> None:
     results = json.loads(RESULTS.read_text())
     splits = [results[str(seed)] for seed in SEEDS if str(seed) in results]
@@ -221,10 +334,27 @@ def report() -> None:
         rows = [split[name] for split in splits]
         print(f"| {name} | {cell(rows, 'joint_nll', '{:.3f}')} | {cell(rows, 'total_coverage_80', '{:.1f}', 100.0)}% | "
               f"{cell(rows, 'total_width_80', '{:.0f}')} | {cell(rows, 'total_crps', '{:.2f}')} |")
-    print(f"\nStatic residual correlation: {', '.join(f'{split['static correlation']:.2f}' for split in splits)}")
+    print("\nStatic residual correlation: " + ", ".join(f"{split['static correlation']:.2f}" for split in splits))
+    if not CALIBRATED.exists():
+        return
+    results = json.loads(CALIBRATED.read_text())
+    splits = [results[str(seed)] for seed in SEEDS if str(seed) in results]
+    print(f"\nAt equal coverage: {len(splits)} splits, {splits[0]['calibration hours']:,} calibration hours each, "
+          "mean ± standard deviation\n")
+    print("| Model, calibration | Holds before | Holds after | Width before | Width after |")
+    print("|---|---:|---:|---:|---:|")
+    def mean(rows, stage, key, scale=1.0):
+        values = np.array([row[stage][key] for row in rows]) * scale
+        return f"{values.mean():.1f} ± {values.std():.1f}"
+
+    for name in CALIBRATED_MODELS:
+        rows = [split[name] for split in splits]
+        print(f"| {name} | {mean(rows, 'before', 'total_coverage_80', 100.0)}% | "
+              f"{mean(rows, 'after', 'total_coverage_80', 100.0)}% | {mean(rows, 'before', 'total_width_80')} | "
+              f"{mean(rows, 'after', 'total_width_80')} |")
 
 
-STAGES = {"run": run, "report": report}
+STAGES = {"run": run, "calibrated": calibrated, "report": report}
 
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "report"

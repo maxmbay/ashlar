@@ -79,18 +79,20 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2, and LightGBMLSS, ran one job at a time: Ashlar on every core, the trees and LightGBMLSS on six threads. A model with only seed 0 so far reads slow.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian. On airline delay, NGBoost's default scores a CRPS of 90.7 because a few flights get an exploded scale, up to 3.4 × 10⁷ minutes where 99.9% of flights get under 66; its NLL, 4.76, barely notices. With `min_samples_leaf=100` its largest scale is 138 minutes and its CRPS 11.57, near LightGBMLSS's Gaussian. NGBoost ran alone; its scikit-learn trees use one thread.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 3.052 | 2.56 | — | — | — | — | 521 |
-| Ashlar, `task="mixture"` | 1 | 3.05 | 2.558 | 1.621 | 2.005 | 79% | 8.03 | 536 |
-| LightGBM | 1 | 3.047 | 2.554 | 1.747 | 2.534 | 79% | 7.803 | 35 |
-| XGBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 59 |
-| CatBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 351 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 3.047 | 2.554 | 1.742 | 2.531 | 80% | 7.781 | 552 |
+| Ashlar, default | 1 | 3.052 | 2.56 | — | — | — | — | 521† |
+| Ashlar, `task="mixture"` | 1 | 3.05 | 2.558 | 1.621 | 2.005 | 79% | 8.03 | 536† |
+| LightGBM | 1 | 3.047 | 2.554 | 1.747 | 2.534 | 79% | 7.803 | 35† |
+| XGBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 59† |
+| CatBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 351† |
+| CatBoost, `RMSEWithUncertainty` | 1 | 3.047 | 2.554 | 1.742 | 2.531 | 80% | 7.781 | 552† |
+| LightGBMLSS, Gaussian | 1 | 3.047 | 2.553 | 1.742 | 2.531 | 80% | 7.781 | 85 |
+| LightGBMLSS, Student-t | 1 | 3.079 | 2.516 | 1.738 | 2.511 | 79% | 7.393 | 732 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 3.101 | 2.382 | 1.652 | 2.055 | 75% | 6.961 | 745 |
 
 ### Airline delay, departure delay in minutes, 2,000,000 of 10,000,000 rows
@@ -106,20 +108,25 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | LightGBMLSS, Gaussian | 1 | 29.14 | 13.91 | 11.49 | 4.753 | 94% | 66.34 | 16 |
 | LightGBMLSS, Student-t | 1 | 30.57 | 11.22 | 9.686 | 3.727 | 76% | 18.99 | 163 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 29.16 | 12.79 | 9.144 | 3.076 | 79% | 28.44 | 1201 |
+| NGBoost, normal, 200,000 training rows | 1 | 29.26 | 14.19 | 90.73 | 4.758 | 94% | 935.3 | 44 |
+| NGBoost, normal, 200,000 training rows, `min_samples_leaf=100` | 1 | 29.2 | 14.11 | 11.57 | 4.785 | 94% | 66.61 | 72 |
 
 ### NYC green taxi, tip in $, 581,835 rows
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190 |
-| Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924 |
-| Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520 |
+| Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190† |
+| Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924† |
+| Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520† |
 | LightGBM | 3 | 1.799 ± 0.033 | 0.6503 ± 0.016 | 0.6755 ± 0.013 | 1.992 ± 0.0098 | 95% | 4.644 ± 0.2 | 18 |
 | XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 48 |
-| CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345 |
-| RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044 |
-| TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169 |
+| CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546† |
+| CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345† |
+| LightGBMLSS, Gaussian | 1 | 1.949 | 0.6637 | 0.4865 | 0.2762 | 84% | 2.053 | 27 |
+| LightGBMLSS, Student-t | 1 | 1.988 | 0.646 | 0.4888 | -1.057 | 77% | 1.699 | 118 |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 1.903 | 0.6011 | 0.4378 | -1.449 | 75% | 1.372 | 1063 |
+| RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044† |
+| TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169† |
 
 ### Year prediction (MSD), release year, 515,345 rows
 
@@ -131,6 +138,8 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | XGBoost | 2 | 8.686 ± 0.024 | 6.085 ± 0.00029 | 4.605 ± 0.0034 | 3.581 ± 0.0026 | 85% | 22.13 ± 0.097 | 63 |
 | CatBoost | 2 | 8.746 ± 0.03 | 6.118 ± 0.0051 | 4.63 ± 0.0067 | 3.587 ± 0.0032 | 85% | 22.3 ± 0.1 | 49 |
 | CatBoost, `RMSEWithUncertainty` | 2 | 8.846 ± 0.037 | 6.189 ± 0.0082 | 4.399 ± 0.008 | 3.41 ± 0.0061 | 83% | 18.99 ± 0.017 | 42 |
+| LightGBMLSS, Gaussian | 1 | 9.103 | 6.139 | 4.424 | 3.41 | 83% | 19.28 | 33 |
+| LightGBMLSS, Student-t | 1 | 9.521 | 6.043 | 4.457 | 3.334 | 79% | 16.58 | 65 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 8.861 | 5.996 | 4.186 | 3.188 | 76% | 16.72 | 185 |
 
 ### Higgs, signal against background, 2,000,000 of 5,100,000 rows
@@ -155,23 +164,23 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.6601 | 0.71 | 0.6143 | 267 |
-| LightGBM | 1 | 0.6655 | 0.7185 | 0.6085 | 13 |
-| XGBoost | 1 | 0.6642 | 0.7181 | 0.6089 | 14 |
-| CatBoost | 1 | 0.6675 | 0.7215 | 0.6062 | 1011 |
+| Ashlar, default | 1 | 0.6601 | 0.71 | 0.6143 | 267† |
+| LightGBM | 1 | 0.6655 | 0.7185 | 0.6085 | 13† |
+| XGBoost | 1 | 0.6642 | 0.7181 | 0.6089 | 14† |
+| CatBoost | 1 | 0.6675 | 0.7215 | 0.6062 | 1011† |
 
 ### Click prediction, clicked or not, 1,997,410 rows
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.8421 | 0.7382 | 0.3943 | 365 |
-| LightGBM | 1 | 0.8444 | 0.7544 | 0.3858 | 132 |
-| XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188 |
-| CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726 |
+| Ashlar, default | 1 | 0.8421 | 0.7382 | 0.3943 | 365† |
+| LightGBM | 1 | 0.8444 | 0.7544 | 0.3858 | 132† |
+| XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188† |
+| CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726† |
 
 ### The README's airline figure
 
-The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
+The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
 
 | Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
 |---|---:|---:|---:|---:|---:|
@@ -179,10 +188,23 @@ The figure at the top of the README and the one-flight card come from one more f
 | LightGBMLSS, mixture of 3 Gaussians | 9.144 | 3.076 | 78.7% | 28.4 | 0.0391 |
 | CatBoost, `RMSEWithUncertainty` | 11.46 | 4.722 | 93.9% | 66.8 | 0.0392 |
 | LightGBM, normal of one width | 12.20 | 4.813 | 94.3% | 74.9 | 0.0389 |
+| CatBoost, `RMSEWithUncertainty`, σ scaled on 20,000 other flights | 10.51 | — | 80.1% | 28.4 | 0.0410 |
 
-The CRPS is a tie. The NLL is not a comparison here: it turns on how narrow each model makes its spike at zero, and Ashlar's is 2.66 on this split and 3.19 on seed 1 at nearly the same CRPS (9.17 and 9.27). Ashlar's coverage and width are from 200 draws per flight; its 0.1 and 0.9 quantiles from `predict_quantiles`, exact like LightGBMLSS's, hold 80.6% at 33.1 minutes wide. After `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
+The CRPS is a tie. The NLL is not a comparison here: it turns on how narrow each model makes its spike at zero, and Ashlar's is 2.66 on this split and 3.19 on seed 1 at nearly the same CRPS (9.17 and 9.27). Ashlar's coverage and width are from 200 draws per flight; its 0.1 and 0.9 quantiles from `predict_quantiles`, exact like LightGBMLSS's, hold 80.6% at 33.1 minutes wide. After `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4. The last row scales CatBoost's σ by one factor, 0.426, chosen by the same step on those 20,000 flights, so that its 80% interval holds 80%: its CRPS falls from 11.46 to 10.51, still 15% above Ashlar's, and its Brier score rises from 0.0392 to 0.0410.
 
-- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, Ashlar's is within 0.6 points of the observed rate in every bin of more than 1,000 flights. LightGBMLSS's spreads further and overshoots at the top: it says 13.6% where 10.4% happen and 23.7% where 15.4% do. CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
+- **80% intervals at equal coverage.** Raw, Ashlar's interval holds 80.6% and LightGBMLSS's 78.7%, so their widths do not compare. `hero_flights.py coverage` brings all three to 80% with `calibrate`'s step for a density head, the central level whose interval held 80% of held-out flights, cross-fitted on the scored flights: a random half calibrates the other half, then the halves swap. LightGBMLSS's parameters exist only for the scored flights, so this is the calibration all three can share. Coverage is in percent, by scheduled departure and by fifth of each model's own P(delay > 60), calmest first; widths are in minutes.
+
+  | 80% interval | Holds | Mean width | Before 9:00, 9 to 14, 14 to 20, 20:00 on | Fifths of its own risk |
+  |---|---:|---:|---|---|
+  | Ashlar, raw quantiles | 80.6% | 33.1 | 79, 81, 81, 81 | 80, 80, 80, 81, 81 |
+  | Ashlar, cross-fitted | 80.0% | 32.2 | 79, 80, 80, 80 | 80, 79, 80, 80, 81 |
+  | LightGBMLSS, raw | 78.7% | 28.4 | 77, 78, 80, 79 | 76, 77, 77, 79, 85 |
+  | LightGBMLSS, cross-fitted | 80.0% | 30.1 | 78, 80, 82, 80 | 77, 78, 78, 81, 86 |
+  | CatBoost `RMSEWithUncertainty`, raw | 93.9% | 66.8 | 95, 94, 93, 92 | 95, 95, 94, 94, 92 |
+  | CatBoost `RMSEWithUncertainty`, cross-fitted | 80.0% | 28.4 | 87, 82, 76, 70 | 85, 84, 82, 78, 72 |
+
+  At equal coverage Ashlar's interval is the widest: 7% wider than LightGBMLSS's and 13% wider than CatBoost's. It is also the one that holds 80% across flights: 78% to 81% in each of the 17 hours with 1,000 flights or more, and 79% to 81% in every fifth of its predicted risk. On the fifth of flights LightGBMLSS rates riskiest, its interval is 73 minutes wide and holds 86%, where Ashlar's is 56 and holds 79%; on the fifth it rates calmest, its interval is 11 minutes wide and holds 77%, where Ashlar's is 17 and holds 81%. CatBoost's normal, narrowed by one factor, holds 87% of the flights before 9:00 and 70% of those from 20:00 on, and 69% to 89% across those hours: one scale cannot fit a symmetric normal to a skewed target. With the 20,000 other held-out flights as the calibration instead, Ashlar's `calibrate` holds 80.1% at 32.4 minutes and CatBoost's scaled σ (the last row of the table above) 80.1% at 28.4, by hour and by risk as above. Every group is in [`examples/readme/artifacts/hero-coverage/coverage.json`](../examples/readme/artifacts/hero-coverage/coverage.json).
+- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, Ashlar's is within 0.6 points of the observed rate in every bin of more than 1,000 flights. LightGBMLSS's spreads further and overshoots at the top: it says 13.6% where 10.4% happen and 23.7% where 15.4% do. CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do. Scaled to hold 80%, CatBoost's normal gives 97,608 of the 100,000 flights less than a 2% chance, 0.1% on average, and 3.8% of them were an hour late.
 
   | Predicted | Ashlar flights | Ashlar said | Happened | LightGBMLSS flights | LightGBMLSS said | Happened |
   |---|---:|---:|---:|---:|---:|---:|
@@ -445,7 +467,7 @@ The methods, all with a normal head on log sales:
 
 ### The README's pooling figure
 
-From [`examples/readme/store_pooling.py`](../examples/readme/store_pooling.py). It refits offsets plus embeddings on the first split (seed 0) and reproduces that split's saved CRPS in every bucket. Loading the table and fitting took 68 seconds on the laptop, and the fitted `tau` is 0.278. The figure's left panel is that fit, and its right panel the three splits above. After five rows of a new store, over the three splits, the raw 80% interval of its scored rows holds:
+From [`examples/readme/store_pooling.py`](../examples/readme/store_pooling.py). It refits offsets plus embeddings on the first split (seed 0) and reproduces that split's saved CRPS in every bucket. Loading the table and fitting took 68 seconds on the laptop, and the fitted `tau` is 0.278. The figure's left panel is that fit: for each store with 1 to 5 training rows, a line runs from its own mean residual to its pooled effect. Its right panel is the three splits above. After five rows of a new store, over the three splits, the raw 80% interval of its scored rows holds:
 
 | Method | CRPS, unseen, 5 rows | 80% coverage | 80% width |
 |---|---:|---:|---:|
@@ -457,7 +479,7 @@ From [`examples/readme/store_pooling.py`](../examples/readme/store_pooling.py). 
 | mixed model | 0.1224 | 83.5% | 0.578 |
 
 - **One row moves a store most of the way to its own mean.** A seen store's pooled effect is on average 0.84 times its own mean residual from the population at 1 training row, 0.89 at 2 to 3, 0.96 at 4 to 10, and 0.98 to 1.00 above that: least-squares slopes through zero, over 63, 132, 181, and 516 stores. The stores' spread, `tau` 0.278 on log sales, is large beside the noise of a typical day, about 0.10, so the pull towards the average store is strongest at one row and nearly gone by ten.
-- **A new store's offset narrows faster than it learns.** For each of the split's 223 unseen stores, `with_context` reads its first 1, 2, 3, 5, 10, 20, and 35 rows (its 5 context rows, then its scored rows), each time from the prior, as the left panel draws for store 342. Against the store's level, its mean residual over all its 606 to 942 days, the offset's 80% interval holds 72%, 69%, 71%, 69%, 68%, 65%, and 66% of the stores. The prior alone holds 76%, and a plain mean of the same 35 rows with its own standard error holds 80%.
+- **A new store's offset narrows faster than it learns.** For each of the split's 223 unseen stores, `with_context` reads its first 1, 2, 3, 5, 10, 20, and 35 rows (its 5 context rows, then its scored rows), each time from the prior. Against the store's level, its mean residual over all its 606 to 942 days, the offset's 80% interval holds 72%, 69%, 71%, 69%, 68%, 65%, and 66% of the stores. The prior alone holds 76%, and a plain mean of the same 35 rows with its own standard error holds 80%.
 - **Probably because a new store's days scatter more than the head says.** The update is exact for a normal head: it weights each day by the head's precision and reads the days as independent around one offset. That precision was learned on stores whose embeddings fit them, and a new store's embedding stays at the average. Its days scatter about its level 1.26 times as widely as the head's spread says (the median over stores), and the head's weights do not suit them: after 35 rows the offset is 0.030 from the level (root mean square) where its posterior sd says 0.017, while the plain mean of the same rows is 0.024 from it. Offsets alone, whose head had no embedding to fit a store's own pattern, hold 75.4% of a new store's rows after five rows against 69.7% with the embedding. This is a reading of the numbers, not a tested cause.
 - **GPBoost's and the mixed model's intervals are nearer 80% after five rows,** 77.7% and 83.5%, at a CRPS 22% and 35% higher. In this split's refit, the offsets plus embeddings' interval holds 70.7% of the rows from `predict_interval` and 70.1% from 400 draws. Calibrate on held-out rows of new stores when their coverage matters.
 
@@ -492,14 +514,14 @@ The residual-network rows are Ashlar's default backbone with the same head. Scor
 | Ashlar `mixture`, residual network | 1.938 ± 0.019 | 1.071 ± 0.019 | 80.2% | 4.80 | 3 |
 
 - **On bike rentals the additive models match `gamlss`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the pair, each within a standard error. Ashlar's likelihood is 0.011 nats behind without the pair and 0.008 ahead with it.
-- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds. `gamlss` took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit. R also warned, after each split's `NO` fit, that an inner backfitting loop had stopped at its limit of 30 iterations.
+- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds, on every core of the laptop. `gamlss`, which R runs on one thread, took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest, split 1's with the pair, stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit. R also warned, after each split's `NO` fit, that an inner backfitting loop had stopped at its limit of 30 iterations.
 - **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
 - **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
 - **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
 
 ### The README's additive figure
 
-From [`examples/readme/additive_gamlss.py`](../examples/readme/additive_gamlss.py), which runs the `terms` stage of [`examples/benchmark_additive.py`](../examples/benchmark_additive.py). It refits Ashlar's additive negative binomial and `gamlss`'s `NBI`, each with the hour × working day pair, on split 0, the split whose saved `gamlss` pair fit was fastest, and reads every term on a grid of its column: Ashlar's from `shape_functions` on the 13,903 training hours, `gamlss`'s from `predict(type = "terms")` on the same hours. Ashlar's refit scored the saved test CRPS, 24.033, in 10 seconds. `gamlss` converged in 38 cycles and 260 seconds, and its terms add back to its fitted linear predictor within 1.1e-5 on the log mean and 5e-11 on the log dispersion. Without the pair, its log-dispersion terms miss its linear predictor by up to 0.24 on some hours, so the figure draws the pair models only.
+From [`examples/readme/additive_gamlss.py`](../examples/readme/additive_gamlss.py), which runs the `terms` stage of [`examples/benchmark_additive.py`](../examples/benchmark_additive.py). It refits Ashlar's additive negative binomial and `gamlss`'s `NBI`, each with the hour × working day pair, on split 0, the split whose saved `gamlss` pair fit was fastest, and reads every term on a grid of its column: Ashlar's from `shape_functions` on the 13,903 training hours, `gamlss`'s from `predict(type = "terms")` on the same hours. Ashlar's refit scored the saved test CRPS, 24.033, in 10 seconds. `gamlss` converged in 38 cycles and 260 seconds, and its terms add back to its fitted linear predictor within 1.1e-5 on the log mean and 5e-11 on the log dispersion. Without the pair, its log-dispersion terms miss its linear predictor by up to 0.24 on some hours, so the figure draws the pair models only. Its speed panel draws split 1's `gamlss` pair fit, the one that stopped without converging, as a ring, and its title's 4 to 6 minutes are the other two splits' 256 and 331 seconds.
 
 `NBI`'s sigma is Ashlar's dispersion: both make the variance the mean plus the dispersion times the mean squared. Ashlar's dispersion is `softplus(raw) + 1e-4`, so each of its raw dispersion terms is drawn as the change in log dispersion it makes at the average hour, `log(softplus(b + f) + 1e-4) − log(softplus(b) + 1e-4)`, where `b` is the intercept. Every curve is centred on the training hours. The hour's panel sums, for each day type, every term the hour or the working day enters (the hour, the working day, and the pair), centred on its 24 hours, since each tool splits that level between the three terms in its own way. The temperature's panel adds the terms of the temperature and the felt temperature, which move together.
 
@@ -1032,7 +1054,7 @@ XGBoost's CPU seconds are for its grid of 42 fits. One fit at the setting the gr
 
 #### The README's survival figure
 
-[`examples/readme/survival.py`](../examples/readme/survival.py) reruns the five SUPPORT splits for the README's figure on the current code, in a cloud container with 4 CPUs: the `mixture` head and XGBoost AFT on its 42-fit grid, split and scored as above. The results match the table. The mixture's NLL of the log time is 1.733 ± 0.018 against AFT's 1.874 ± 0.010, its concordance 0.623 ± 0.009 against 0.623 ± 0.010, and its integrated Brier score 0.1998 ± 0.0033 against 0.2049 ± 0.0033. It passes D-calibration on 4 of 5 splits, with a χ² of 12.8 ± 5.1, against 0 of 5 and 46.9 ± 12.0 for AFT.
+[`examples/readme/survival.py`](../examples/readme/survival.py) reruns the five SUPPORT splits for the README's figure on the current code, in a cloud container with 4 CPUs: the `mixture` head and XGBoost AFT on its 42-fit grid, split and scored as above. The results match the table. The mixture's NLL of the log time is 1.733 ± 0.018 against AFT's 1.874 ± 0.010, its concordance 0.623 ± 0.009 against 0.623 ± 0.010, and its integrated Brier score 0.1998 ± 0.0033 against 0.2049 ± 0.0033. It passes D-calibration on 4 of 5 splits, with a χ² of 12.8 ± 5.1, against 0 of 5 and 46.9 ± 12.0 for AFT. The README's figure draws this rerun, and its prose quotes the table above, which also has the Cox model.
 
 On the first split the script also reads every test patient's survival curve over five years. The mixture's curves cross, each lying at least 0.02 above the other somewhere, for 38% of the pairs among 400 test patients. AFT's never cross: each patient's curve is the same error family with the same spread, shifted along log time, so one patient's risk is above another's at every time or at none.
 
@@ -1087,7 +1109,7 @@ XGBoost's accelerated failure time model reads a censored label as a lower and a
 
 The grid chose a shift of 1, normal errors, and a spread of 0.2 on every seed, with depth 3 on two seeds and 6 on the third. One fit at its choice took 4.5 CPU seconds of the grid's 565.
 
-- **The one tree that reads censoring is ahead on this table.** Its orders cost 4.7% less than the mixture oracle's, less on every seed (3.6% to 6.3%), against 4.0% more for the censored `mixture` and 5.2% more for the censored `hurdle` on the same yardstick. Its CRPS is 7% below the censored mixture's, and its 90% quantile is above the true demand on 87.8% of days against 81.3%. Its NLL, 5.285, is level with the censored `hurdle`'s 5.280 and 0.09 nats ahead of the censored mixture's.
+- **XGBoost's AFT objective, which reads censored labels too, is ahead on this table.** Its orders cost 4.7% less than the mixture oracle's, less on every seed (3.6% to 6.3%), against 4.0% more for the censored `mixture` and 5.2% more for the censored `hurdle` on the same yardstick. Its CRPS is 7% below the censored mixture's, and its 90% quantile is above the true demand on 87.8% of days against 81.3%. Its NLL, 5.285, is level with the censored `hurdle`'s 5.280 and 0.09 nats ahead of the censored mixture's.
 - **The gap is not the censoring.** XGBoost's censored fit also beats Ashlar's fits to the true demand, whose CRPS is 0.283 to 0.284, so on these features its trees predict demand better than Ashlar's default network does, censored or not. Reading the sold-out days as censored is what both need: every fit that reads them as demand, or drops them, orders at a cost 12% to 19% above its oracle's.
 - **Its grid costs about five Ashlar fits, and one tuned fit costs a twenty-fifth of one**: 565 CPU seconds for 132 fits, against 111 to 119 for each censored Ashlar fit, and 4.5 for one fit at the setting the grid chose.
 
@@ -1105,7 +1127,7 @@ The daily load of the eight electricity clients of [the joint demand benchmark](
 
 - **From readings 2 to 12 days apart, the model learns the days nearly as well as from the days.** Its CRPS is 19.0 MWh against the oracle's 18.0, and its weekday profile is off by 2.9% against 2.0%. Its NLL is even a little lower, as it is less sure: its 80% interval holds 90% of the held-out days, the oracle's 63%, and the held-out blocks are not the training blocks.
 - **Weekly totals cannot place the load within the week, and the fit makes up a pattern.** Every way of splitting a week between its days fits the week's total equally well, and the fit settles on a weekday profile that is off by 11.9%, worse than the flat profile of a fit to the totals spread evenly (2.6%). Its RMSE is 52.9 MWh against the oracle's 35.3.
-- **Spreading a total evenly gets these means right and the spread wrong.** These clients' loads differ little between weekdays, so an even split is close to the truth: its RMSE matches the oracle's and its weekday profile is off by 2.5% to 2.6%. But a total spread over its days is much smoother than the days, so the model learns too small a spread: its 80% interval holds 43% to 47% of days, and its NLL is 6.3 to 7.8. In [the simulation](#daily-values-from-weekly-totals), where the days of a week differ, the even split gets the means wrong as well.
+- **Spreading a total evenly gets these means right and the spread wrong.** These clients' loads differ little between weekdays, so an even split is close to the truth: its RMSE matches the oracle's and its weekday profile is off by 2.5% to 2.6%. Spread evenly, the irregular readings even score a better CRPS than with `observed.total`, 18.4 MWh against 19.0. But a total spread over its days is much smoother than the days, so the model learns too small a spread: its 80% interval holds 43% to 47% of days, and its NLL is 6.3 to 7.8. In [the simulation](#daily-values-from-weekly-totals), where the days of a week differ, the even split gets the means wrong as well.
 
 ## Joint demand across locations
 
@@ -1245,7 +1267,26 @@ The static residual correlation is 0.23 to 0.27.
 - **The mixture models the pair best but holds the total's interval least of Ashlar's models.** Its joint NLL is far ahead, 0.133 against 0.471 with a wide spread across splits, and so is its CRPS of the total, 16.25 against 17.24, but its 80% interval holds 77.1% of hours. The README draws the normal, whose coverage is the number it prints.
 - **LightGBM's quantiles of the total hold 68.2% of hours.** Quantile regression on the total itself, the direct route to this one interval, is too narrow on held-out hours. Summing each group's bounds holds 78.6%, with an interval 13% wider than the joint normal's, since a sum of quantiles is not a quantile of the sum.
 
-The README's figure, [`examples/readme/joint_blocks.py`](../examples/readme/joint_blocks.py), refits split 0's `joint` model the same way and stacks its predicted density for two held-out hours in the logo's blocks; the numbers it prints are this table's.
+#### The riders at equal coverage
+
+From the script's `calibrated` stage, on the same three splits and test hours. A fifth of each split's training hours, 2,781, is set aside; every model trains on the rest as above, and each total's 80% interval is then calibrated on the hours set aside. Ashlar's `joint` model and independent heads use `calibrate` with the total as its target (`target=riders_total`, read from 4,000 joint draws). Every model, LightGBM's included, also gets conformalized quantile regression (CQR): the interval from its 10% and 90% quantiles of the total, widened on both sides by the conformal quantile of how far the hours set aside fall outside their own intervals. The static correlation, fitted on validation rows as above, has CQR only.
+
+| Model, calibration | Holds before | Holds after | Width before | Width after ↓ |
+|---|---:|---:|---:|---:|
+| `joint`, `calibrate` | 81.6 ± 0.4% | 80.7 ± 0.4% | 82.5 ± 3.5 | 80.4 ± 3.7 |
+| independent heads, `calibrate` | 78.6 ± 0.1% | 80.8 ± 1.1% | 75.6 ± 2.9 | 79.4 ± 4.5 |
+| `joint`, CQR | 81.6 ± 0.4% | 80.6 ± 0.4% | 82.5 ± 3.5 | 81.8 ± 3.7 |
+| independent heads, CQR | 78.6 ± 0.1% | 80.5 ± 0.7% | 75.6 ± 2.9 | **76.8 ± 3.2** |
+| independent + static correlation, CQR | 82.2 ± 0.2% | 80.5 ± 0.9% | 81.8 ± 2.6 | 80.9 ± 3.0 |
+| LightGBM quantiles of the total, CQR | 66.4 ± 0.4% | 79.9 ± 0.5% | 74.0 ± 0.4 | 85.5 ± 0.9 |
+| LightGBM quantiles per group, summed, CQR | 78.5 ± 0.5% | 80.0 ± 0.1% | 95.6 ± 2.7 | 96.7 ± 2.7 |
+
+- **Calibrated, every model holds 79.9% to 80.8%, and Ashlar's intervals are the narrower ones.** The joint interval after `calibrate` is 80.4 riders wide, 6% narrower than LightGBM's quantiles of the total after CQR (85.5), and narrower on each split: 80.8 against 86.0, 75.6 against 84.2, and 84.8 against 86.2. LightGBM's per-group quantiles, summed, need 96.7.
+- **Two heads fitted apart are as narrow once calibrated.** After `calibrate` they are 79.4 riders wide against the joint's 80.4, and after CQR 76.8 against 81.8. The dependence makes the joint interval hold before calibration, 81.6% against 78.6% here, with no hours set aside; it does not make the interval narrower after. The joint model keeps the better joint likelihood of the two log counts, 0.471 against 0.526 in the table above.
+- **CQR repairs LightGBM's quantiles of the total.** They hold 66.4% as fitted; CQR widens them by 5.0 to 6.3 riders on each side, and they then hold 79.9%.
+- **LightGBM is the cheaper.** Its two quantile models of the total fit in 13 to 21 CPU seconds here, against 80 to 108 for the joint model, and `calibrate` adds 18 to 34 seconds for the joint model and 8 to 11 for the independent heads.
+
+The README's figure, [`examples/readme/joint_blocks.py`](../examples/readme/joint_blocks.py), refits split 0's `joint` model the same way as the first table and stacks its predicted density for two held-out hours in the logo's blocks; the table it prints is this one's, after calibration, for `joint` and the independent heads with `calibrate` and the other three with CQR.
 
 ## Member uncertainty
 

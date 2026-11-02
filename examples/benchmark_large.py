@@ -750,6 +750,7 @@ LABELS = {
     "lightgbmlss_studentt": "LightGBMLSS, Student-t",
     "lightgbmlss_mixture": f"LightGBMLSS, mixture of {LSS_MIXTURE_COMPONENTS} Gaussians",
     "ngboost": "NGBoost, normal, 200,000 training rows",
+    "ngboost_leaf100": "NGBoost, normal, 200,000 training rows, `min_samples_leaf=100`",
     "realmlp": "RealMLP (pytabkit)",
     "tabm_pytabkit": "TabM (pytabkit)",
     "ftt": "FT-Transformer (pytabkit)",
@@ -773,9 +774,14 @@ METRIC_NAMES = {
 }
 
 
-# NGBoost's seed-0 CRPS on airline delay (90.7) disagrees with its NLL (4.76): held out of the report until the
-# diagnostic runs (variants diag-lr0.05, lr0.01, leaf100) show why.
-HELD = ("ngboost",)
+SHARED = "†"  # a time from seed 0's first runs, which shared the laptop with each tree on one thread
+
+# Models left out of the report; none now. NGBoost was held while a diagnostic ran: its default's CRPS on airline
+# delay, 90.7, comes from a few flights whose predicted scale explodes (up to 3.4e7 minutes); see the report's note.
+HELD = ()
+# A variant reported as a row of its own, beside the model's default: NGBoost with a minimum leaf, whose scales stay
+# bounded (largest 138 minutes on airline delay).
+SHOWN_VARIANTS = {("ngboost", "leaf100"): "ngboost_leaf100"}
 
 
 def report(out, variant_for=None, seeds=None, held=HELD):
@@ -784,6 +790,9 @@ def report(out, variant_for=None, seeds=None, held=HELD):
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     frame = pd.DataFrame(rows)
     frame["variant"] = frame["variant"].fillna("")
+    shown = [SHOWN_VARIANTS.get((model, variant)) for model, variant in zip(frame["model"], frame["variant"])]
+    frame["model"] = [name or model for name, model in zip(shown, frame["model"])]
+    frame.loc[[name is not None for name in shown], "variant"] = ""
     keep = frame.apply(lambda r: r["variant"] == variant_for.get(r["model"], "") and r["model"] not in held, axis=1)
     frame = frame[keep]
     if seeds is not None:
@@ -812,10 +821,13 @@ def report(out, variant_for=None, seeds=None, held=HELD):
                     cells.append(f"{values.iloc[0]:.4g}")
                 else:
                     cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
-            # Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2 and LightGBMLSS ran one
-            # job at a time, the trees on six threads, so the fastest seed is the fairest time.
-            seconds = group["seconds"].min()
-            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {seconds:.0f} |")
+            # Seed 0's first runs shared the laptop, each tree on one thread. Seeds 1 and 2, LightGBMLSS, and
+            # NGBoost ran one job at a time, the trees on six threads, so the fastest seed is the fairest time;
+            # a time from those shared seed-0 runs is marked.
+            fastest = group.loc[group["seconds"].idxmin()]
+            shared = int(fastest["seed"]) == 0 and not model.startswith(("lightgbmlss_", "ngboost"))
+            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) +
+                  f" | {fastest['seconds']:.0f}{SHARED if shared else ''} |")
 
 
 def done_runs(out):

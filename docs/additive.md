@@ -67,7 +67,7 @@ The additive backbone refuses what would mix its terms: a `bottleneck`, `soft_st
 
 On hourly bike rentals and abalone rings, three splits each, the additive Ashlar models were scored against R's `gamlss` with penalized splines and against Ashlar's default residual network with the same head. [docs/benchmarks.md](benchmarks.md#additive-models-against-rs-gamlss) has the tables.
 
-- **On bike rentals, the additive negative binomial matches `gamlss`'s `NBI`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the hour × working day pair. Each fit took 8 to 10 seconds, where `gamlss` took 2 to 45 minutes.
+- **On bike rentals, the additive negative binomial matches `gamlss`'s `NBI`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the hour × working day pair. Each fit took 8 to 10 seconds on every core of a laptop. `gamlss`, on one thread, took about 2 minutes without the pair and 4 to 6 with it; one split's fit with the pair ran 45 minutes and stopped without converging.
 - **On abalone, the head matters.** The additive `mixture` beats `gamlss`'s Box-Cox Cole-Green, CRPS 1.085 against 1.096. `gamlss`'s normal beats the additive `gaussian`, 1.115 against 1.156.
 - **What the readable shapes cost.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the additive model with the pair. On abalone, with a mixture head, they cost 0.011 nats.
 
