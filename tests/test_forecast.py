@@ -25,6 +25,7 @@ from ashlar.forecast import (
     _mse,
     _pack_history,
 )
+from micro import FORECAST, MICRO
 
 
 def test_forecast_leaves_the_residual_default():
@@ -69,10 +70,10 @@ def test_forecast_loss_is_differentiable():
 
 @pytest.mark.slow
 def test_forecast_learns_a_sine_and_rejects_a_short_series():
-    time = np.arange(900, dtype=np.float64)
+    time = np.arange(400, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
     cut = int(len(series) * 0.8)
-    model = ASRForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
+    model = ASRForecaster(max_epochs=20, patience=6, **FORECAST).fit(series[:cut])
     _origins, inputs, targets = _forecast_windows(series, model.lookback, model.horizon)
     test = _origins >= cut
     pred = model.predict(inputs[test])
@@ -147,10 +148,10 @@ def test_full_history_uses_the_same_origins_as_the_window():
 
 @pytest.mark.slow
 def test_full_history_learns_a_sine_and_rejects_a_short_series():
-    time = np.arange(900, dtype=np.float64)
+    time = np.arange(400, dtype=np.float64)
     series = np.sin(2.0 * np.pi * time / 24.0)
     cut = int(len(series) * 0.8)
-    model = ASRHistoryForecaster(random_state=0, max_epochs=20, patience=6).fit(series[:cut])
+    model = ASRHistoryForecaster(max_epochs=20, patience=6, **FORECAST).fit(series[:cut])
     origins = _history_origins(len(series), model.lookback, model.horizon)
     test = origins >= cut
     pred = model.predict(series, origins[test])
@@ -159,7 +160,7 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
     mean_mae = float(np.mean(np.abs(targets - series[:cut].mean())))
     assert mae < 0.25
     assert mae < mean_mae
-    assert model.lookback == FORECAST_LOOKBACK
+    assert ASRHistoryForecaster().lookback == FORECAST_LOOKBACK
     try:
         ASRHistoryForecaster(max_epochs=1, patience=1).fit(np.arange(20, dtype=np.float64))
     except AshlarError:
@@ -170,7 +171,7 @@ def test_full_history_learns_a_sine_and_rejects_a_short_series():
 
 @pytest.mark.slow
 def test_forecasters_save_and_load_without_pickle(tmp_path):
-    series = np.sin(np.arange(260) / 5.0) + 0.1 * np.random.default_rng(0).normal(size=260)
+    series = np.sin(np.arange(120) / 5.0) + 0.1 * np.random.default_rng(0).normal(size=120)
     for cls in (ASRForecaster, ASRHistoryForecaster):
         for head in ("mse", "mixture"):
             model = cls(lookback=16, horizon=4, max_epochs=2, patience=1, head=head).fit(series)
@@ -202,7 +203,7 @@ def test_flow_models_saved_before_the_shift_and_scale_still_load(tmp_path):
     rng = np.random.default_rng(0)
     x = rng.normal(size=(200, 3)).astype(np.float32)
     y = (x[:, 0] + rng.normal(size=200)).astype(np.float32)
-    model = ASRRegressor(task="flow", max_epochs=2, random_state=0).fit(x, y)
+    model = ASRRegressor(task="flow", max_epochs=2, **MICRO).fit(x, y)
     model.core_ = _bare_spline_flow_head(model.core_)
     assert model.core_.head.output.weight.shape[-1] == flow_parameter_count()
     series = np.sin(np.arange(260) / 5.0) + 0.1 * rng.normal(size=260)

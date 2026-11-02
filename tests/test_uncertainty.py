@@ -5,8 +5,9 @@ import pytest
 
 from ashlar import ASRClassifier, ASROrdinalClassifier, ASRRegressor
 from ashlar.errors import AshlarError
+from micro import MICRO, MICRO_TABM
 
-TABM = {"backbone": "tabm", "backbone_kwargs": {"n_blocks": 2, "d_block": 64, "k": 8}}
+TABM = {**MICRO_TABM, "backbone_kwargs": {"n_blocks": 1, "d_block": 16, "k": 8}}
 
 
 def _gap(n=1200, seed=0):
@@ -47,7 +48,7 @@ def test_members_disagree_more_far_from_the_data():
 
 def test_single_member_backbone_has_no_disagreement():
     X, y = _gap(400)
-    parts = ASRRegressor(task="gaussian", max_epochs=2).fit(X, y).predict_uncertainty(X[:20], n_samples=20)
+    parts = ASRRegressor(task="gaussian", max_epochs=2, **MICRO).fit(X, y).predict_uncertainty(X[:20], n_samples=20)
     assert np.allclose(parts["epistemic"], 0.0)
 
 

@@ -26,6 +26,7 @@ from ashlar.distributions import (
     head_distribution,
     randomized_pit,
 )
+from micro import MICRO
 
 KEY = jax.random.PRNGKey(0)
 
@@ -207,7 +208,7 @@ def test_estimator_methods_read_predict_dist(task):
 def test_classifier_predict_dist_is_categorical():
     x, _y = _table()
     labels = np.where(x[:, 0] > 0, "up", "down")
-    model = ASRModel(task="classification", max_epochs=3).fit(x, labels)
+    model = ASRModel(task="classification", max_epochs=3, **MICRO).fit(x, labels)
     dist = model.predict_dist(x[:10])
     assert isinstance(dist, Categorical)
     assert np.allclose(dist.probs, model.predict_proba(x[:10]), atol=1e-6)
