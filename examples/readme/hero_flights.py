@@ -584,8 +584,9 @@ def coverage(out: Path, models: Path) -> None:
     interval held 80% of held-out flights) cross-fitted on the scored flights, a random half calibrating the
     other and back. LightGBMLSS's parameters exist only for the scored flights, so the cross-fit is the one
     calibration all three share. Also Ashlar's own ``calibrate`` on the 20,000 other held-out flights, and
-    CatBoost's normal with its scale stretched by the same step on those flights. Coverage and width overall,
-    by scheduled hour of departure, and by fifth of each model's P(delay > 60). Writes ``coverage.json``.
+    CatBoost's normal with its scale multiplied by one factor chosen by the same step on those flights.
+    Coverage and width overall, by scheduled hour of departure, and by fifth of each model's P(delay > 60).
+    Writes ``coverage.json``.
     """
     from scipy.stats import norm
 
@@ -657,7 +658,7 @@ def coverage(out: Path, models: Path) -> None:
     groups = {**fifths, "own": fifths["ashlar"]}
     record["models"]["ashlar"]["calibrate"] = _held((yd >= calibrated[:, 0]) & (yd <= calibrated[:, 1]),
                                                     calibrated[:, 1] - calibrated[:, 0], hour, groups)
-    # CatBoost's normal with its scale stretched by the same step on the same 20,000 flights.
+    # CatBoost's normal with its scale multiplied by one factor, chosen by the same step on the same 20,000 flights.
     loc_c, scale_c = cat_predict(xc)
     level = _nominal(norm.cdf((yc - loc_c) / scale_c))
     factor = float(norm.ppf(0.5 * (1 + level)) / norm.ppf(0.9))
