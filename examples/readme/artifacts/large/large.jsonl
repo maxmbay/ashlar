@@ -115,3 +115,7 @@
 {"table": "higgs", "model": "lightgbm", "variant": "", "seed": 2, "seconds": 50.8, "trees": 3992, "accuracy": 0.7506, "log_loss": 0.49813978543721, "auc": 0.8338463009620263}
 {"table": "higgs", "model": "xgboost", "variant": "", "seed": 2, "seconds": 68.5, "trees": 3999, "accuracy": 0.752415, "log_loss": 0.4950205981731415, "auc": 0.8361507291675723}
 {"table": "higgs", "model": "catboost", "variant": "", "seed": 2, "seconds": 156.6, "trees": 4000, "accuracy": 0.7508725, "log_loss": 0.4985622653080378, "auc": 0.8338317988181072}
+{"table": "covertype", "model": "ashlar", "variant": "v3", "seed": 2, "seconds": 227.1, "epochs": 53, "accuracy": 0.9682538316566698, "log_loss": 0.09077641367912292, "auc": 0.9988379977858907}
+{"table": "covertype", "model": "lightgbm", "variant": "", "seed": 2, "seconds": 120.2, "trees": 3998, "accuracy": 0.963830537937919, "log_loss": 0.1129634453375262, "auc": 0.9984436332629766}
+{"table": "covertype", "model": "xgboost", "variant": "", "seed": 2, "seconds": 176.5, "trees": 4000, "accuracy": 0.9484694887395334, "log_loss": 0.14494119584560394, "auc": 0.9974538196325323}
+{"table": "covertype", "model": "catboost", "variant": "", "seed": 2, "seconds": 146.3, "trees": 4000, "accuracy": 0.9118009001488774, "log_loss": 0.24408449911030666, "auc": 0.9931384119667579}
