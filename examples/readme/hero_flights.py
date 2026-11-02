@@ -56,6 +56,7 @@ artifacts.
 
     python examples/readme/hero_flights.py compute   # about 40 minutes on a laptop CPU
     python examples/readme/hero_flights.py baseline  # a minute, after the benchmark's LightGBMLSS run
+    python examples/readme/hero_flights.py coverage  # a few minutes, after compute and baseline
     python examples/readme/hero_flights.py draw
 """
 
@@ -541,6 +542,143 @@ def baseline(out: Path) -> None:
         print(f"{name}: {(out / name).stat().st_size / 1024:.0f} KB", flush=True)
 
 
+# ---------------------------------------------------------------- coverage: the intervals at equal coverage
+
+PERIODS = ((0, 9, "before 9:00"), (9, 14, "9:00 to 14:00"), (14, 20, "14:00 to 20:00"), (20, 24, "20:00 on"))
+FIFTHS = 5
+
+
+def _nominal(pit, coverage: float = 0.8) -> float:
+    """``calibrate``'s step for a density head: the central level whose interval held ``coverage`` of the rows."""
+    from ashlar.calibrate import conformal_quantile
+
+    return min(conformal_quantile(np.abs(2.0 * np.asarray(pit) - 1.0), coverage), 1.0)
+
+
+def _fifths(p60):
+    """Each flight's fifth, 0 to 4, of a model's P(delay > 60): from the flights it calls calmest to the riskiest."""
+    return np.searchsorted(np.quantile(p60, np.linspace(0, 1, FIFTHS + 1)[1:-1]), p60, side="right")
+
+
+def _held(inside, width, hour, fifths) -> dict:
+    """An interval's coverage and mean width, overall, by scheduled hour and period, and by fifth of each risk."""
+
+    def group(mask):
+        return {"flights": int(mask.sum()), "coverage": float(inside[mask].mean()), "width": float(width[mask].mean())}
+
+    return {
+        "coverage80": float(inside.mean()),
+        "width80": float(width.mean()),
+        "by_hour": [group(hour == h) if np.any(hour == h) else None for h in range(24)],
+        "by_period": [group((hour >= lo) & (hour < hi)) for lo, hi, _ in PERIODS],
+        "by_fifth": {name: [group(f == i) for i in range(FIFTHS)] for name, f in fifths.items()},
+    }
+
+
+def coverage(out: Path, models: Path) -> None:
+    """The 80% intervals of Ashlar, LightGBMLSS, and CatBoost at equal coverage, and where each holds.
+
+    On the benchmark's 100,000 scored flights, from the fits ``compute`` saved and the parameters the
+    benchmark saved for LightGBMLSS; it fits nothing. Each model's raw central 80% interval, and the same
+    interval after ``calibrate``'s step for a density head (distributional conformal: the central level whose
+    interval held 80% of held-out flights) cross-fitted on the scored flights, a random half calibrating the
+    other and back. LightGBMLSS's parameters exist only for the scored flights, so the cross-fit is the one
+    calibration all three share. Also Ashlar's own ``calibrate`` on the 20,000 other held-out flights, and
+    CatBoost's normal with its scale stretched by the same step on those flights. Coverage and width overall,
+    by scheduled hour of departure, and by fifth of each model's P(delay > 60). Writes ``coverage.json``.
+    """
+    from scipy.stats import norm
+
+    task, x_train, x_test, y_train, y_test = bench.splits(TABLE, SEED)
+    rows = bench.dist_rows(len(y_test), SEED)
+    xd, yd = x_test.iloc[rows].reset_index(drop=True), y_test[rows].astype(np.float64)
+    rest = np.setdiff1d(np.arange(len(y_test)), rows)
+    calibration = np.sort(np.random.default_rng(SEED + 2).choice(rest, size=min(CALIBRATION_ROWS, len(rest)),
+                                                                 replace=False))
+    xc, yc = x_test.iloc[calibration].reset_index(drop=True), y_test[calibration].astype(np.float64)
+    dep = _column(x_train, "CRSDepTime")
+    fmt = _clock_format(x_train[dep].to_numpy(np.float64))
+    hour = (np.floor(_minutes(xd[dep].to_numpy(np.float64), fmt) / 60.0).astype(int)) % 24
+
+    ashlar, _ = fit_ashlar(x_train, y_train, models / "ashlar-mixture-seed0")
+    _, cat_predict = bench.fit_catboost_uncertainty(x_train, y_train, SEED, path=models / "catboost-uncertainty-seed0.cbm")
+    path = bench.PREDICTIONS / f"{TABLE}-{BASELINE}-seed{SEED}.npz"
+    with np.load(path, allow_pickle=False) as data:
+        saved = data["rows"]
+        lss = tuple(data[key].astype(np.float64) for key in ("weight", "loc", "scale"))
+    where = np.searchsorted(saved, rows)
+    if np.any(where >= len(saved)) or not np.array_equal(saved[np.minimum(where, len(saved) - 1)], rows):
+        raise SystemExit(f"{path.name} does not hold the benchmark's scored rows")
+    lss = tuple(part[where] for part in lss)
+    ours = mixture_parts(ashlar, xd)
+    cat_loc, cat_scale = cat_predict(xd)
+
+    def mixture(parts):
+        return (lambda value, i: mixture_cdf(*(part[i] for part in parts), value),
+                lambda level, i: bench.mixture_quantiles(*(part[i] for part in parts), levels=(level,))[:, 0])
+
+    def normal(loc, scale):
+        return (lambda value, i: norm.cdf((value - loc[i]) / scale[i]),
+                lambda level, i: loc[i] + scale[i] * norm.ppf(level))
+
+    heads = {"ashlar": mixture(ours), "lightgbmlss": mixture(lss), "catboost_uncertainty": normal(cat_loc, cat_scale)}
+    everyone = np.arange(len(yd))
+    p60 = {name: 1.0 - cdf(np.full(len(yd), THRESHOLD), everyone) for name, (cdf, _) in heads.items()}
+    fifths = {name: _fifths(p) for name, p in p60.items() if name != "catboost_uncertainty"}
+    order = np.random.default_rng(SEED + 3).permutation(len(yd))
+    halves = (np.sort(order[: len(yd) // 2]), np.sort(order[len(yd) // 2:]))
+    record = {"table": TABLE, "seed": SEED, "rows": int(len(yd)), "calibration_rows": int(len(yc)),
+              "periods": [label for _, _, label in PERIODS], "fifths": "fifths of each model's own P(delay > 60), "
+              "calmest first; by_fifth.ashlar and by_fifth.lightgbmlss use that model's fifths for every model",
+              "models": {}}
+    for name, (cdf, quantile) in heads.items():
+        groups = {**fifths, "own": _fifths(p60[name])}
+        low, high = quantile(0.1, everyone), quantile(0.9, everyone)
+        entry = {"raw": _held((yd >= low) & (yd <= high), high - low, hour, groups)}
+        inside, width, nominal = np.zeros(len(yd), bool), np.zeros(len(yd)), []
+        for fit_on, score_on in (halves, halves[::-1]):
+            level = _nominal(cdf(yd[fit_on], fit_on))
+            low, high = quantile(0.5 * (1 - level), score_on), quantile(0.5 * (1 + level), score_on)
+            inside[score_on], width[score_on] = (yd[score_on] >= low) & (yd[score_on] <= high), high - low
+            nominal.append(level)
+        entry["crossfit"] = {"nominal": nominal, **_held(inside, width, hour, groups)}
+        record["models"][name] = entry
+        print(name, {key: round(value["coverage80"], 4) for key, value in entry.items()},
+              {key: round(value["width80"], 2) for key, value in entry.items()}, flush=True)
+
+    # Ashlar's own calibrate on the 20,000 other held-out flights, as the one-flight card uses it.
+    ashlar.calibrate(xc, yc)
+    calibrated = ashlar.predict_interval(xd, coverage=0.8)
+    groups = {**fifths, "own": fifths["ashlar"]}
+    record["models"]["ashlar"]["calibrate"] = _held((yd >= calibrated[:, 0]) & (yd <= calibrated[:, 1]),
+                                                    calibrated[:, 1] - calibrated[:, 0], hour, groups)
+    # CatBoost's normal with its scale stretched by the same step on the same 20,000 flights.
+    loc_c, scale_c = cat_predict(xc)
+    level = _nominal(norm.cdf((yc - loc_c) / scale_c))
+    factor = float(norm.ppf(0.5 * (1 + level)) / norm.ppf(0.9))
+    scaled = cat_scale * factor
+    half = norm.ppf(0.9) * scaled
+    late = (yd > THRESHOLD).astype(np.float64)
+    p60_scaled = norm.sf((THRESHOLD - cat_loc) / scaled)
+    z = (yd - cat_loc) / scaled
+    crps = scaled * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1 / math.sqrt(math.pi))
+    record["models"]["catboost_uncertainty"]["scaled"] = {
+        "factor": factor, "crps": float(crps.mean()), "brier60": float(np.mean((p60_scaled - late) ** 2)),
+        "p60_bins": _p60_bins(p60_scaled, late),
+        **_held(np.abs(yd - cat_loc) <= half, 2 * half, hour, {**fifths, "own": _fifths(p60["catboost_uncertainty"])}),
+    }
+    print("catboost scaled", {key: round(value, 4) for key, value in record["models"]["catboost_uncertainty"]["scaled"].items()
+                              if isinstance(value, float)}, flush=True)
+    (out / "coverage.json").write_text(json.dumps(record, indent=1))
+    for name, entry in record["models"].items():
+        for kind, held in entry.items():
+            periods = ", ".join(f"{g['coverage']:.0%}" for g in held["by_period"])
+            own = ", ".join(f"{g['coverage']:.0%}" for g in held["by_fifth"]["own"])
+            print(f"{name:21s} {kind:9s} {held['coverage80']:.1%} at {held['width80']:5.1f} | by period {periods} | "
+                  f"by own fifth {own}", flush=True)
+    print(f"coverage.json: {(out / 'coverage.json').stat().st_size / 1024:.0f} KB", flush=True)
+
+
 # ---------------------------------------------------------------- draw
 
 SOFT = 10.0  # minutes: the delay axis is asinh(delay / 10), linear near zero and logarithmic past half an hour
@@ -733,7 +871,7 @@ def draw(folder: Path = ARTIFACTS) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("stage", choices=("compute", "baseline", "draw"))
+    parser.add_argument("stage", choices=("compute", "baseline", "coverage", "draw"))
     parser.add_argument("--artifacts", default=str(ARTIFACTS), help="the artifact folder compute writes and draw reads")
     parser.add_argument("--models", default=str(bench.CACHE / "readme" / NAME), help="where the fits are saved")
     parser.add_argument("--smoke", action="store_true", help="a quick check of the pipeline on few epochs, never for the figure")
@@ -744,6 +882,8 @@ def main() -> None:
         compute(Path(args.artifacts), Path(args.models), epochs=2 if args.smoke else None)
     elif args.stage == "baseline":
         baseline(Path(args.artifacts))
+    elif args.stage == "coverage":
+        coverage(Path(args.artifacts), Path(args.models))
     else:
         draw(Path(args.artifacts))
 
