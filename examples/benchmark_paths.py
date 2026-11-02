@@ -50,6 +50,21 @@ of the last 28)``. The ashlar models' paths are read raw from the draws and
 after ``calibrate(..., target=[total, peak_sales])`` on the calibration
 origins.
 
+Stage ``recalibrate`` asks which calibration carries over to the summer.
+It fits ``joint``, ``independent``, and ``joint_flow`` again, reads the PIT
+of every origin from 28 February on once (each day, the total, and the peak,
+as ``calibrate`` stores them, from 1,000 draws), and scores the same
+forecasts under each calibration in ``STRATEGIES``: the fit stage's spring
+origins, alone or Mondrian by the calendar of the 12 days ahead (a public
+holiday, else a school holiday, else neither) or by store type; the last 28
+origins observed at the first forecast; at each origin, the last 28 origins
+observed by then, alone or by calendar (rolling); and every origin observed
+by then, weighted with a half-life of 14 days. A calibration's intervals,
+quantiles, and exceedance probabilities are read as ``predict_interval``,
+``predict_quantiles``, and ``predict_exceedance`` read them, from 1,000
+draws of each path; the weighted one puts the forecast row's own weight at
+infinity (Barber, Candès, Ramdas, and Tibshirani, 2023).
+
 Data: the fev benchmark's ``rossmann/1D`` (``autogluon/fev_datasets`` on
 Hugging Face), saved as ``$ASHLAR_BENCH/rossmann-1D.parquet``
 (``/tmp/ashlar-bench`` by default).
@@ -57,6 +72,7 @@ Hugging Face), saved as ``$ASHLAR_BENCH/rossmann-1D.parquet``
     python examples/benchmark_paths.py fit seeds=0,1,2
     python examples/benchmark_paths.py chronos seeds=0,1,2   # needs chronos-forecasting
     python examples/benchmark_paths.py deepar seeds=0,1,2    # needs gluonts[torch]
+    python examples/benchmark_paths.py recalibrate seeds=0,1,2
     python examples/benchmark_paths.py report seeds=0,1,2
 """
 
@@ -74,6 +90,7 @@ import numpy as np
 import pandas as pd
 
 from ashlar import ASRRegressor
+from ashlar.calibrate import MIN_GROUP_ROWS
 from ashlar.distributions import Independent
 from ashlar.horizon import horizon_frame, peak
 
@@ -425,6 +442,378 @@ def run_deepar(stores: int, seed: int, epochs):
     print("deepar", stores, seed, json.dumps(result), flush=True)
 
 
+# Stage ``recalibrate``: which calibration rows, and which groups of them, carry over to the summer's origins.
+# A window of recent origins, one a day.
+WINDOW = 28
+# The weighted calibration's half-life, in days of origin.
+HALF_LIFE = 14.0
+# Levels whose pinball losses average to the CRPS of a path function after calibration.
+GRID = np.arange(1, 100) / 100.0
+CALIBRATED_DRAWS = 1000
+RECALIBRATED = ("joint", "independent", "joint_flow")
+STRATEGIES = {
+    "raw": "no calibration",
+    "spring": "28 February to 19 May, every third origin: the fit stage's calibration",
+    "spring_calendar": "the same rows, Mondrian by the calendar of the 12 days ahead",
+    "spring_store_type": "the same rows, Mondrian by store type",
+    "latest": "the last 28 origins whose 12 days are observed at the first forecast, 22 April to 19 May",
+    "rolling": "at each origin, the last 28 origins whose 12 days are observed by then",
+    "rolling_calendar": "rolling, Mondrian by the calendar of the 12 days ahead",
+    "weighted": "at each origin, every origin from 28 February whose 12 days are observed, with a half-life of 14 days",
+}
+PATHS = ("total", "peak")
+
+
+def calendar_labels(X) -> np.ndarray:
+    """Each row's calendar over its 12 days ahead: a public holiday, else a school holiday, else neither."""
+    public = np.zeros(len(X), dtype=bool)
+    school = np.zeros(len(X), dtype=bool)
+    for step in range(1, HORIZON + 1):
+        public |= ~X[f"state_holiday_step{step}"].astype(str).isin(["0", "0.0", "nan"]).to_numpy()
+        school |= np.nan_to_num(X[f"school_holiday_step{step}"].to_numpy(np.float64)) > 0
+    return np.where(public, "public", np.where(school, "school", "neither")).astype(object)
+
+
+def _table_levels(table, coverage: float) -> tuple[float, float]:
+    """``interval_levels`` of a table ``(sorted PIT values, weights or None)``; nominal without one.
+
+    Weighted, the conformal quantile puts the forecast row's own weight, 1,
+    at infinity (Barber, Candès, Ramdas, and Tibshirani, 2023), which with
+    equal weights is the ``ceil((n + 1) c)``-th smallest score.
+    """
+    from ashlar.calibrate import interval_levels
+
+    if table is None:
+        return 0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage)
+    values, weights = table
+    if weights is None:
+        return interval_levels({"kind": "pit", "values": values}, coverage)
+    scores = np.abs(2.0 * values - 1.0)
+    order = np.argsort(scores, kind="stable")
+    mass = np.cumsum(weights[order]) / (weights.sum() + 1.0)
+    reached = np.flatnonzero(mass >= coverage)
+    nominal = 1.0 if reached.size == 0 else min(float(scores[order][reached[0]]), 1.0)
+    return 0.5 * (1.0 - nominal), 0.5 * (1.0 + nominal)
+
+
+def _table_quantiles(table, levels) -> np.ndarray:
+    """``recalibrated_levels`` of a table: the PIT values' quantile at each level, weighted when it has weights."""
+    levels = np.asarray(levels, dtype=np.float64)
+    if table is None:
+        return levels
+    values, weights = table
+    if weights is None:
+        return np.quantile(values, levels)
+    # Plotting positions that reduce to numpy's linear quantile when the weights are equal.
+    cumulative = np.cumsum(weights)
+    positions = (cumulative - weights) / max(cumulative[-1] - weights[-1], 1e-12)
+    return np.interp(levels, positions, values)
+
+
+def _table_cdf(table, probability) -> np.ndarray:
+    """``recalibrated_cdf`` of a table: the share of calibration weight at or below the model's own ``F(t)``."""
+    from ashlar.calibrate import recalibrated_cdf
+
+    probability = np.asarray(probability, dtype=np.float64)
+    if table is None:
+        return probability
+    values, weights = table
+    if weights is None:
+        return recalibrated_cdf({"kind": "pit", "values": values}, probability)
+    unique, inverse = np.unique(values, return_inverse=True)
+    mass = np.bincount(inverse, weights=weights)
+    xs = np.concatenate([[0.0], unique, [1.0]])
+    ys = np.concatenate([[0.0], np.cumsum(mass) / (weights.sum() + 1.0), [1.0]])
+    keep = np.concatenate([np.diff(xs) > 0.0, [True]])
+    return np.interp(np.clip(probability, 0.0, 1.0), xs[keep], ys[keep])
+
+
+def _order_statistic(ordered: np.ndarray, levels: np.ndarray, rows: np.ndarray, upper: bool = True) -> np.ndarray:
+    """The draw at each level, as ``draw_quantiles`` (``upper``) or the lower end of ``draw_interval``.
+
+    ``ordered`` is ``(n, rows)``, sorted on the first axis; ``levels`` is
+    ``(levels,)``; the result is ``(levels, len(rows))``.
+    """
+    n = ordered.shape[0]
+    scaled = np.asarray(levels, dtype=np.float64) * (n + 1)
+    index = np.clip(np.ceil(scaled) if upper else np.floor(scaled), 1, n).astype(np.int64) - 1
+    return ordered[index][:, rows]
+
+
+def _pinball(quantiles: np.ndarray, truth: np.ndarray, levels: np.ndarray) -> np.ndarray:
+    """Twice the mean pinball loss over ``levels`` of ``quantiles`` ``(levels, rows)``, per row."""
+    error = truth[None, :] - quantiles
+    levels = levels[:, None]
+    return np.mean(2.0 * np.maximum(levels * error, (levels - 1.0) * error), axis=0)
+
+
+def _score_rows(out: dict, rows: np.ndarray, tables: dict, block: dict, cap: float) -> None:
+    """Fill ``out`` for ``rows`` of a block (indices into the block) read with ``tables`` (``None``: raw)."""
+    for step in range(HORIZON):
+        table = None if tables is None else tables["columns"][step]
+        ordered = block["daily"][..., step]
+        truth = block["truth"][rows, step]
+        low, high = _table_levels(table, 0.8)
+        ends = np.expm1(np.minimum(np.concatenate([
+            _order_statistic(ordered, np.array([low]), rows, upper=False),
+            _order_statistic(ordered, np.array([high]), rows),
+        ]), cap))
+        quantiles = np.expm1(np.minimum(_order_statistic(ordered, _table_quantiles(table, LEVELS), rows), cap))
+        out["daily_cover"][rows, step] = (ends[0] <= truth) & (truth <= ends[1])
+        out["daily_width"][rows, step] = ends[1] - ends[0]
+        out["daily_loss"][rows, step] = _pinball(quantiles, truth, LEVELS)
+    for name in PATHS:
+        table = None if tables is None else tables[name]
+        ordered = block[name]
+        observed = block[f"{name}_truth"][rows]
+        low, high = _table_levels(table, 0.8)
+        lower = _order_statistic(ordered, np.array([low]), rows, upper=False)[0]
+        upper = _order_statistic(ordered, np.array([high]), rows)[0]
+        out[f"{name}_cover"][rows] = (lower <= observed) & (observed <= upper)
+        out[f"{name}_width"][rows] = upper - lower
+        out[f"{name}_probability"][rows] = 1.0 - _table_cdf(table, block[f"{name}_below"][rows])
+        out[f"{name}_crps"][rows] = _pinball(_order_statistic(ordered, _table_quantiles(table, GRID), rows), observed, GRID)
+
+
+def _tables(scores: dict, rows: np.ndarray, weights=None) -> dict:
+    """The PIT table of every column and path function from the calibration ``rows``, sorted, with their weights."""
+
+    def one(pit):
+        values = np.clip(np.asarray(pit, dtype=np.float64)[rows], 0.0, 1.0)
+        if weights is None:
+            return np.sort(values), None
+        order = np.argsort(values, kind="stable")
+        return values[order], np.asarray(weights, dtype=np.float64)[order]
+
+    return {
+        "columns": [one(scores["columns"][:, step]) for step in range(HORIZON)],
+        "total": one(scores["total"]),
+        "peak": one(scores["peak"]),
+        "rows": int(rows.size),
+    }
+
+
+def _calibration_rows(strategy: str, origin: np.ndarray, at, spring: np.ndarray):
+    """The pool rows that calibrate the forecasts made at origin ``at``, and their weights (``None``: equal)."""
+    day = np.timedelta64(1, "D")
+    seen = np.datetime64(at) - HORIZON * day
+    if strategy.startswith("spring"):
+        return np.flatnonzero(spring), None
+    if strategy == "latest":
+        last = np.datetime64(CAL_END)
+        return np.flatnonzero((origin <= last) & (origin > last - WINDOW * day)), None
+    if strategy.startswith("rolling"):
+        return np.flatnonzero((origin <= seen) & (origin > seen - WINDOW * day)), None
+    if strategy == "weighted":
+        rows = np.flatnonzero(origin <= seen)
+        age = (seen - origin[rows]) / day
+        return rows, np.power(0.5, age / HALF_LIFE)
+    raise ValueError(strategy)
+
+
+def _grouping(strategy: str, calendar: np.ndarray, store_type: np.ndarray):
+    if strategy.endswith("_calendar"):
+        return calendar
+    if strategy.endswith("_store_type"):
+        return store_type
+    return None
+
+
+def _events(Y_log: np.ndarray, lags_log: np.ndarray) -> dict:
+    """Each row's observed total and peak in sales, their thresholds, and whether each passed it."""
+    truth = np.expm1(Y_log)
+    recent = np.expm1(lags_log)
+    out = {
+        "total_truth": truth.sum(axis=1),
+        "peak_truth": truth.max(axis=1),
+        "total_threshold": 1.1 * np.nansum(recent[:, :HORIZON], axis=1),
+        "peak_threshold": np.nanmax(recent, axis=1),
+    }
+    for name in PATHS:
+        out[f"{name}_event"] = (out[f"{name}_truth"] > out[f"{name}_threshold"]).astype(float)
+    return out
+
+
+def _summary(out: dict, events: dict, weeks: np.ndarray) -> dict:
+    """Mean scores over the test rows, and the 80% intervals' coverage by week of origin."""
+    result = {
+        "daily": {
+            "coverage": float(out["daily_cover"].mean()),
+            "width": float(out["daily_width"].mean()),
+            "quantile_loss": float(out["daily_loss"].mean()),
+            "median_loss": float(np.median(out["daily_loss"])),
+        },
+        "by_week": {"daily": [float(out["daily_cover"][weeks == week].mean()) for week in np.unique(weeks)]},
+    }
+    for name in PATHS:
+        probability, event = out[f"{name}_probability"], events[f"{name}_event"]
+        result[name] = {
+            "coverage": float(out[f"{name}_cover"].mean()),
+            "width": float(out[f"{name}_width"].mean()),
+            "crps": float(out[f"{name}_crps"].mean()),
+            "brier": float(np.mean(np.square(probability - event))),
+            "ece": calibration_error(probability, event),
+            "mean_probability": float(probability.mean()),
+            "event_rate": float(event.mean()),
+        }
+        result["by_week"][name] = [float(out[f"{name}_cover"][weeks == week].mean()) for week in np.unique(weeks)]
+    return result
+
+
+def run_recalibrate(stores: int, seed: int, models, epochs):
+    """Fit each model once, then score the summer's forecasts under every calibration in ``STRATEGIES``.
+
+    Every row from 28 February on gets its PIT under each column, the total,
+    and the peak once (``calibrate``'s own scores, 1,000 draws a row); a
+    calibration is the table of some of those rows, read for each forecast
+    with ``ashlar.calibrate``'s steps on 1,000 draws of its path, as
+    ``predict_interval`` and ``predict_exceedance`` read them.
+    """
+    ROOT.mkdir(parents=True, exist_ok=True)
+    data = long_table(stores, seed)
+    common = dict(target="sales", lookback=LOOKBACK, horizon=HORIZON, series="store", time="day", known=KNOWN, static=STATIC)
+    for name in models:
+        path = ROOT / f"recalibrate-{name}-{stores}-{seed}.json"
+        if path.exists():
+            continue
+        train, calibration, _test = frames(data, covariates=True)
+        pool = horizon_frame(data, start=CAL_START, **common)
+        cap = cap_of(train)
+        total, peak_sales = path_targets(cap)
+        settings = dict(MODELS[name], random_state=seed)
+        if epochs is not None:
+            settings["max_epochs"] = epochs
+        started = time.perf_counter()
+        model = ASRRegressor(**settings).fit(train.X, train.Y)
+        fitted = time.perf_counter()
+        raw, _functions = model._calibration_scores(pool.X, pool.Y, CALIBRATED_DRAWS, seed, [total, peak_sales])
+        scores = {"columns": raw["columns"], "total": raw["targets"]["total"][1], "peak": raw["targets"]["peak_sales"][1]}
+        scored = time.perf_counter()
+        origin = pd.to_datetime(pool.index["origin"]).to_numpy().astype("datetime64[D]")
+        spring_days = pd.to_datetime(calibration.index["origin"]).to_numpy().astype("datetime64[D]")
+        spring = np.isin(origin, spring_days)
+        calendar = calendar_labels(pool.X)
+        store_type = pool.X["store_type"].astype(str).to_numpy(dtype=object)
+        events = _events(pool.Y, _lags(pool))
+        test = np.flatnonzero(origin >= np.datetime64(TEST_START))
+        days = np.unique(origin[test])
+        outs = {
+            strategy: {
+                "daily_cover": np.zeros((test.size, HORIZON), dtype=bool),
+                "daily_width": np.zeros((test.size, HORIZON)),
+                "daily_loss": np.zeros((test.size, HORIZON)),
+                **{f"{path_name}_{kind}": np.zeros(test.size, dtype=bool if kind == "cover" else np.float64)
+                   for path_name in PATHS for kind in ("cover", "width", "probability", "crps")},
+            }
+            for strategy in STRATEGIES
+        }
+        base = {strategy: np.zeros((test.size, 2)) for strategy in ("spring", "rolling")}
+        calibration_rows = {strategy: [] for strategy in STRATEGIES}
+        position = {row: index for index, row in enumerate(test)}
+        drawn = np.asarray(model.sample(pool.X.iloc[test], n=CALIBRATED_DRAWS, seed=seed), dtype=np.float32)
+        for at in days:
+            rows = np.flatnonzero(origin == at)
+            draws = drawn[:, [position[row] for row in rows]]
+            sales = np.expm1(np.minimum(draws.astype(np.float64), cap))
+            block = {
+                "daily": np.sort(draws, axis=0),
+                "truth": np.expm1(pool.Y[rows]),
+                "total": np.sort(sales.sum(axis=-1), axis=0),
+                "peak": np.sort(sales.max(axis=-1), axis=0),
+            }
+            for path_name in PATHS:
+                block[f"{path_name}_truth"] = events[f"{path_name}_truth"][rows]
+                block[f"{path_name}_below"] = np.mean(block[path_name] <= events[f"{path_name}_threshold"][rows][None], axis=0)
+            where = np.asarray([position[row] for row in rows])
+            for strategy in STRATEGIES:
+                part = {key: value[where] for key, value in outs[strategy].items()}
+                local = np.arange(rows.size)
+                if strategy == "raw":
+                    _score_rows(part, local, None, block, cap)
+                else:
+                    chosen, weights = _calibration_rows(strategy, origin, at, spring)
+                    calibration_rows[strategy].append(int(chosen.size))
+                    pooled = _tables(scores, chosen, weights)
+                    labels = _grouping(strategy, calendar, store_type)
+                    if labels is None:
+                        _score_rows(part, local, pooled, block, cap)
+                    else:
+                        for label in np.unique(labels[rows]):
+                            members = chosen[labels[chosen] == label]
+                            table = _tables(scores, members) if members.size >= MIN_GROUP_ROWS else pooled
+                            _score_rows(part, np.flatnonzero(labels[rows] == label), table, block, cap)
+                for key, value in part.items():
+                    outs[strategy][key][where] = value
+            for strategy in base:
+                chosen, _weights = _calibration_rows(strategy, origin, at, spring)
+                for index, path_name in enumerate(PATHS):
+                    base[strategy][where, index] = events[f"{path_name}_event"][chosen].mean()
+        test_events = {key: value[test] for key, value in events.items()}
+        weeks = ((origin[test] - origin[test].min()) / np.timedelta64(7, "D")).astype(int)
+        result = {
+            "fit_seconds": fitted - started,
+            "score_seconds": scored - fitted,
+            "seconds": time.perf_counter() - started,
+            "cap": cap,
+            "pool_rows": int(len(pool.X)),
+            "test_rows": int(test.size),
+            "calendar_share": {
+                label: {"spring": float(np.mean(calendar[spring] == label)), "test": float(np.mean(calendar[test] == label))}
+                for label in ("public", "school", "neither")
+            },
+            "calibration_rows": {strategy: float(np.mean(counts)) for strategy, counts in calibration_rows.items() if counts},
+            "strategies": {strategy: _summary(out, test_events, weeks) for strategy, out in outs.items()},
+            "base_rate": {
+                strategy: {
+                    path_name: {
+                        "brier": float(np.mean(np.square(values[:, index] - test_events[f"{path_name}_event"]))),
+                        "ece": calibration_error(values[:, index], test_events[f"{path_name}_event"]),
+                    }
+                    for index, path_name in enumerate(PATHS)
+                }
+                for strategy, values in base.items()
+            },
+        }
+        path.write_text(json.dumps(result))
+        print("recalibrate", name, stores, seed, json.dumps(result), flush=True)
+
+
+def report_recalibrate(stores: int, seeds) -> None:
+    """The scores of the summer's forecasts under each calibration, mean over seeds, one table per model."""
+    for name in RECALIBRATED:
+        runs = _runs(f"recalibrate-{name}", stores, seeds)
+        if not runs:
+            continue
+        print(f"\n{name}: calibration of the 31 May to 19 July origins, {len(runs)} seeds\n")
+        print("| Calibration | Rows | Daily 80% | Daily loss | Total 80% | Total CRPS | Total Brier | Peak 80% | Peak width | Peak CRPS | Peak Brier | Peak ECE |")
+        print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for strategy in STRATEGIES:
+            cells = [run["strategies"][strategy] for run in runs]
+
+            def mean(part, key, cells=cells):
+                return float(np.mean([cell[part][key] for cell in cells]))
+
+            count = np.mean([run["calibration_rows"].get(strategy, 0.0) for run in runs])
+            print(
+                f"| {strategy} | {count:,.0f} | {mean('daily', 'coverage'):.1%} | {mean('daily', 'quantile_loss'):,.1f} | "
+                f"{mean('total', 'coverage'):.1%} | {mean('total', 'crps'):,.0f} | {mean('total', 'brier'):.4f} | "
+                f"{mean('peak', 'coverage'):.1%} | {mean('peak', 'width'):,.0f} | {mean('peak', 'crps'):,.0f} | "
+                f"{mean('peak', 'brier'):.4f} | {mean('peak', 'ece'):.3f} |"
+            )
+        for strategy in ("spring", "rolling"):
+            brier = np.mean([run["base_rate"][strategy]["peak"]["brier"] for run in runs])
+            total = np.mean([run["base_rate"][strategy]["total"]["brier"] for run in runs])
+            print(f"| base rate, {strategy} rows | | | | | | {total:.4f} | | | | {brier:.4f} | |")
+        print("\nPeak 80% coverage by week of origin:")
+        for strategy in STRATEGIES:
+            weeks = np.mean([run["strategies"][strategy]["by_week"]["peak"] for run in runs], axis=0)
+            print(f"  {strategy:<18}" + " ".join(f"{value:6.1%}" for value in weeks))
+        shares = runs[0]["calendar_share"]
+        print("\nCalendar of the 12 days ahead, share of rows (seed " + str(seeds[0]) + "): " + ", ".join(
+            f"{label} {share['spring']:.0%} in spring, {share['test']:.0%} in summer" for label, share in shares.items()
+        ))
+
+
 def _runs(name: str, stores: int, seeds) -> list[dict]:
     files = [ROOT / f"{name}-{stores}-{seed}.json" for seed in seeds]
     return [json.loads(file.read_text()) for file in files if file.exists()]
@@ -502,8 +891,13 @@ def main(argv):
         elif stage == "deepar":
             for seed in seeds:
                 run_deepar(stores, seed, epochs)
+        elif stage == "recalibrate":
+            chosen = [name for name in models if name in RECALIBRATED] if "models" in options else list(RECALIBRATED)
+            for seed in seeds:
+                run_recalibrate(stores, seed, chosen, epochs)
         elif stage == "report":
             report(stores, seeds)
+            report_recalibrate(stores, seeds)
         else:
             raise SystemExit(f"unknown stage {stage!r}")
 
