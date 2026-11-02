@@ -1,0 +1,527 @@
+[
+ {
+  "seed": 0,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": false,
+  "rows": 200000,
+  "nll": 0.15207607249538774,
+  "cpu": 331.20072999999996,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.1661,
+    "policies violating": 0.826,
+    "largest move against": 0.028919946402311325,
+    "mean against": 0.2178
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.25775,
+    "policies violating": 0.7645,
+    "largest move against": 0.0025088833644986153,
+    "mean against": 0.49075
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": true,
+  "rows": 200000,
+  "nll": 0.152886462095651,
+  "cpu": 335.264591,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.25725,
+    "policies violating": 0.841,
+    "largest move against": 0.0020726961083710194,
+    "mean against": 0.5038333333333334
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": false,
+  "rows": 20054,
+  "nll": 1.5036412751382113,
+  "cpu": 26.387662999999975,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.84,
+    "policies violating": 1.0,
+    "largest move against": 0.04252234846353531,
+    "mean against": 0.3454285714285714
+   },
+   "VehPower": {
+    "direction": -1.0,
+    "steps violating": 0.8649166666666667,
+    "policies violating": 1.0,
+    "largest move against": 0.005247524473816156,
+    "mean against": 0.033666666666666664
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": true,
+  "rows": 20054,
+  "nll": 1.5141714599402527,
+  "cpu": 42.66278299999999,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.59725,
+    "policies violating": 1.0,
+    "largest move against": 0.013283146545290947,
+    "mean against": 0.3705
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "severity",
+  "task": "mixture",
+  "monotone": false,
+  "rows": 20054,
+  "nll": 0.6631639486502529,
+  "cpu": 58.268931000000066,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.7807142857142857,
+    "policies violating": 1.0,
+    "largest move against": 0.053323548287153244,
+    "mean against": 0.3117142857142857
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.7066666666666667,
+    "policies violating": 1.0,
+    "largest move against": 0.02580651082098484,
+    "mean against": 0.31116666666666665
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": false,
+  "rows": 20054,
+  "nll": 1.1066557201871112,
+  "cpu": 56.227206000000024,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.5587857142857143,
+    "policies violating": 1.0,
+    "largest move against": 0.06756342947483063,
+    "mean against": 0.21007142857142858
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.3660833333333333,
+    "policies violating": 1.0,
+    "largest move against": 0.010353030636906624,
+    "mean against": 0.13125
+   }
+  }
+ },
+ {
+  "seed": 0,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": true,
+  "rows": 20054,
+  "nll": 1.1149349204357903,
+  "cpu": 76.99818800000003,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.20083333333333334,
+    "policies violating": 0.732,
+    "largest move against": 0.004795128013938665,
+    "mean against": 0.03375
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": false,
+  "rows": 200000,
+  "nll": 0.15504113835504804,
+  "cpu": 286.17667900000004,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.1591,
+    "policies violating": 0.7045,
+    "largest move against": 0.02620845101773739,
+    "mean against": 0.2081
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.007166666666666667,
+    "policies violating": 0.023,
+    "largest move against": 0.00014277470472734421,
+    "mean against": 0.12625
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": true,
+  "rows": 200000,
+  "nll": 0.15656803855855758,
+  "cpu": 243.95035100000018,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.0005833333333333334,
+    "policies violating": 0.0025,
+    "largest move against": 6.322994886431843e-05,
+    "mean against": 0.0885
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": false,
+  "rows": 19906,
+  "nll": 1.4812362435473105,
+  "cpu": 29.634124000000156,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.6480714285714285,
+    "policies violating": 1.0,
+    "largest move against": 0.04602444916963577,
+    "mean against": 0.3165
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.46316666666666667,
+    "policies violating": 1.0,
+    "largest move against": 0.008163741789758205,
+    "mean against": 0.17483333333333334
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": true,
+  "rows": 19906,
+  "nll": 1.4964677284236179,
+  "cpu": 38.652951999999914,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.46875,
+    "policies violating": 0.9995,
+    "largest move against": 0.008755045011639595,
+    "mean against": 0.08575
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "severity",
+  "task": "mixture",
+  "monotone": false,
+  "rows": 19906,
+  "nll": 0.6840124285841637,
+  "cpu": 34.045061999999916,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.9567857142857142,
+    "policies violating": 1.0,
+    "largest move against": 0.0516279973089695,
+    "mean against": 0.25892857142857145
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.35675,
+    "policies violating": 0.857,
+    "largest move against": 0.005774665158241987,
+    "mean against": 0.031166666666666665
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": false,
+  "rows": 19906,
+  "nll": 1.1331582698333638,
+  "cpu": 53.81142999999997,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.6282857142857143,
+    "policies violating": 1.0,
+    "largest move against": 0.07412222772836685,
+    "mean against": 0.2857142857142857
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.30241666666666667,
+    "policies violating": 0.8205,
+    "largest move against": 0.005069655366241932,
+    "mean against": 0.208
+   }
+  }
+ },
+ {
+  "seed": 1,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": true,
+  "rows": 19906,
+  "nll": 1.1458736961443494,
+  "cpu": 41.06269199999997,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": -1.0,
+    "steps violating": 0.9581666666666667,
+    "policies violating": 1.0,
+    "largest move against": 0.010900577530264854,
+    "mean against": 0.14416666666666667
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": false,
+  "rows": 200000,
+  "nll": 0.15052429456519503,
+  "cpu": 261.52415799999994,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.1256,
+    "policies violating": 0.6215,
+    "largest move against": 0.01836097426712513,
+    "mean against": 0.1755
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.09683333333333333,
+    "policies violating": 0.2975,
+    "largest move against": 0.0009620761848054826,
+    "mean against": 0.2599166666666667
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "frequency",
+  "task": "negative_binomial",
+  "monotone": true,
+  "rows": 200000,
+  "nll": 0.15198727685766786,
+  "cpu": 322.80612699999983,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.2135,
+    "policies violating": 0.548,
+    "largest move against": 0.002405788516625762,
+    "mean against": 0.36225
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": false,
+  "rows": 20074,
+  "nll": 1.5147025180119997,
+  "cpu": 28.57313699999986,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.6907142857142857,
+    "policies violating": 1.0,
+    "largest move against": 0.033695288002491,
+    "mean against": 0.32671428571428573
+   },
+   "VehPower": {
+    "direction": -1.0,
+    "steps violating": 0.861,
+    "policies violating": 1.0,
+    "largest move against": 0.017559770494699478,
+    "mean against": 0.4509166666666667
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "severity",
+  "task": "gaussian",
+  "monotone": true,
+  "rows": 20074,
+  "nll": 1.5258369311873918,
+  "cpu": 37.56226199999992,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": -1.0,
+    "steps violating": 0.915,
+    "policies violating": 1.0,
+    "largest move against": 0.024479202926158905,
+    "mean against": 0.6374166666666666
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "severity",
+  "task": "mixture",
+  "monotone": false,
+  "rows": 20074,
+  "nll": 0.6743113801984817,
+  "cpu": 53.19444599999997,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.7145,
+    "policies violating": 1.0,
+    "largest move against": 0.06831107288599014,
+    "mean against": 0.2973571428571429
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.7305833333333334,
+    "policies violating": 1.0,
+    "largest move against": 0.033016763627529144,
+    "mean against": 0.25766666666666665
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": false,
+  "rows": 20074,
+  "nll": 1.196793901210448,
+  "cpu": 35.26209199999994,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.6982857142857143,
+    "policies violating": 1.0,
+    "largest move against": 0.039610426872968674,
+    "mean against": 0.19021428571428572
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.507,
+    "policies violating": 1.0,
+    "largest move against": 0.012877506203949451,
+    "mean against": 0.41141666666666665
+   }
+  }
+ },
+ {
+  "seed": 2,
+  "outcome": "severity",
+  "task": "quantile_spline",
+  "monotone": true,
+  "rows": 20074,
+  "nll": 1.149543111427119,
+  "cpu": 68.08091699999977,
+  "violations": {
+   "BonusMalus": {
+    "direction": 1.0,
+    "steps violating": 0.0,
+    "policies violating": 0.0,
+    "largest move against": 0.0,
+    "mean against": 0.0
+   },
+   "VehPower": {
+    "direction": 1.0,
+    "steps violating": 0.3353333333333333,
+    "policies violating": 0.906,
+    "largest move against": 0.007517306134104729,
+    "mean against": 0.31958333333333333
+   }
+  }
+ }
+]
