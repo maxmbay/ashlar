@@ -1,0 +1,10 @@
+at f946a68 (claude/project-thread-dhh107)
+45,474 training rows, 892 seen stores, 223 unseen
+fitted in 68 s, tau 0.278
+unseen stores' raw 80% interval holds 75.2% before and 70.7% after five rows
+new stores whose 80% interval for the offset holds their level, by rows read: 1: 72%, 2: 69%, 3: 71%, 5: 69%, 10: 68%, 20: 65%, 35: 66%
+CRPS by bucket, this fit against the saved run: {"1-5": {"this_fit": 0.0945, "saved": 0.0945, "coverage": 0.7203}, "6-20": {"this_fit": 0.075, "saved": 0.075, "coverage": 0.7563}, "21-100": {"this_fit": 0.06014, "saved": 0.06014, "coverage": 0.8091}, "101-300": {"this_fit": 0.05752, "saved": 0.05752, "coverage": 0.7894}, "all_seen": {"this_fit": 0.07339, "saved": 0.07339, "coverage": 0.767}, "unseen": {"this_fit": 0.19024, "saved": 0.19024, "coverage": 0.7453}, "unseen_context": {"this_fit": 0.0889, "saved": 0.0889, "coverage": 0.7006}}
+wrote examples/readme/artifacts/store-pooling/buckets.json (24 KB)
+wrote examples/readme/artifacts/store-pooling/check.json (1 KB)
+wrote examples/readme/artifacts/store-pooling/stores.json (45 KB)
+wrote examples/readme/artifacts/store-pooling/unseen.npz (153 KB)
