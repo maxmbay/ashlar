@@ -1,15 +1,15 @@
 """One fit, one flight, every answer: what the quick start's calls return for one held-out flight.
 
 Draws ``docs/images/readme/one-flight.png`` from the hero's artifacts
-(``examples/readme/artifacts/hero-flights/``, written by ``hero_flights.py compute``):
-``card.json`` holds every call's value for twelve candidate flights, and ``pool.npz``
-holds their mixtures. The flight is picked by a fixed rule: the candidate with the
+(``examples/readme/artifacts/hero-flights/``, written by ``hero_flights.py compute`` and
+``baseline``): ``card.json`` holds every call's value for twelve candidate flights,
+``pool.npz`` holds their mixtures, and ``lightgbmlss.npz`` LightGBMLSS's. The flight is picked by a fixed rule: the candidate with the
 largest actual delay that its calibrated 80% interval still holds.
 
 The top panel is that flight's predictive density on the hero's delay axis, with
 the calibrated 80% interval solid, the point mass at zero (leaving on the minute) as a
-stem, CatBoost ``RMSEWithUncertainty``'s 80% interval as a clay bar, and the delay
-that happened. Under it, each call of the quick start on that one row, in order, with
+stem, the 80% interval of LightGBMLSS's mixture of three normals (the best tree
+distribution on this table) as a clay bar, and the delay that happened. Under it, each call of the quick start on that one row, in order, with
 its answer placed on the same axis; LightGBM's point sits beside ``predict``.
 
     python examples/readme/one_flight.py draw
@@ -60,8 +60,10 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
     lo, hi = (float(v) for v in card["predict_interval"][j])
     draws = [float(v) for v in card["sample"][j]]
     log_prob = float(card["log_prob"][j])
-    cat_loc, cat_scale = float(card["catboost_loc"][j]), float(card["catboost_scale"][j])
-    cat_lo, cat_hi = cat_loc - h.bench.Z80 * cat_scale, cat_loc + h.bench.Z80 * cat_scale
+    other, _ = h.load_baseline(folder)
+    if int(other["row"][i]) != int(card["rows"][j]):
+        raise SystemExit("lightgbmlss.npz and card.json disagree on the card flights")
+    lss_lo, lss_hi = float(other["q10"][i]), float(other["q90"][i])
     lgbm = float(card["lightgbm_point"][j])
     explained = card["explain"]
     values = np.asarray(explained["values"][j])
@@ -111,9 +113,9 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
         ax.plot([ux, ux], [height_at(x) + 0.08, label_y - 0.08], color=k.TEAL_DARK, lw=0.8, ls=(0, (1, 2)), zorder=5)
         k.value(ax, ux, label_y, label, k.TEAL_DARK, ha="center", va="bottom", size=12.5)
     y_bar = -0.42
-    ax.plot([h.warp(cat_lo), h.warp(cat_hi)], [y_bar, y_bar], color=k.CLAY, lw=3.0, solid_capstyle="butt", zorder=5)
-    ax.text(h.warp(cat_lo), y_bar - 0.2, f"CatBoost RMSEWithUncertainty's 80% interval, {out(cat_lo, 0)} to "
-            f"{out(cat_hi, 0)} minutes".replace("-", "−"), fontproperties=k.F.small, color=k.CLAY, ha="left", va="top")
+    ax.plot([h.warp(lss_lo), h.warp(lss_hi)], [y_bar, y_bar], color=k.CLAY, lw=3.0, solid_capstyle="butt", zorder=5)
+    ax.text(h.warp(lss_lo), y_bar - 0.2, f"LightGBMLSS's 80% interval, {out(lss_lo, 0)} to "
+            f"{out(lss_hi, 0)} minutes".replace("-", "−"), fontproperties=k.F.small, color=k.CLAY, ha="left", va="top")
     ax.scatter([h.warp(actual)], [0], s=64, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=10, clip_on=False)
     note_y = max(height_at(x) for x in np.linspace(actual, X_HI, 50)) + 0.55
     ax.plot([h.warp(actual)] * 2, [0.12, note_y - 0.1], color=k.INK, lw=0.8, ls=(0, (1, 2)), zorder=9)
@@ -219,7 +221,7 @@ def draw(folder: Path = h.ARTIFACTS) -> None:
 
     h.legend(fig, k, [("patch", solid, "calibrated 80% interval"), ("pale", k.TEAL_PALE, "tails"),
                       ("needle", k.TEAL_DARK, "the chance of leaving on the minute"),
-                      ("bar", k.CLAY, "CatBoost's 80%"), ("dot", k.INK, "what happened")], line=2)
+                      ("bar", k.CLAY, "LightGBMLSS's 80%"), ("dot", k.INK, "what happened")], line=2)
     names = explained["feature_names"]
     dep = summary["columns"]["departure"]
     base = explained["numeric_baseline"].get(dep)

@@ -39,21 +39,21 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## How it was run
 
-**Versions.** LightGBM 4.7.0, XGBoost 3.4.1, CatBoost 1.2.10, PyTabKit 1.7.3, JAX 0.12.
+**Versions.** LightGBM 4.7.0, XGBoost 3.4.1, CatBoost 1.2.10, PyTabKit 1.7.3, JAX 0.12. LightGBMLSS 0.6.1 with torch 2.9.1, in an environment of its own whose pins are in the comment above `run_lightgbmlss` in [`examples/benchmark_large.py`](../examples/benchmark_large.py).
 
-**Hardware.** An Apple M3 Pro laptop with 12 cores and 18 GB, CPU only. Several runs shared the machine. Ashlar (JAX) used every core it could get; the trees ran on one thread each (six on the large tables' later splits, whose seconds are not reported); PyTabKit models ran on four threads. Read the seconds as an order of magnitude.
+**Hardware.** An Apple M3 Pro laptop with 12 cores and 18 GB, CPU only. Several runs shared the machine. Ashlar (JAX) used every core it could get; the trees ran on one thread each, and on six on the large tables' later splits; LightGBMLSS ran on six; PyTabKit models ran on four threads. Read the seconds as an order of magnitude.
 
-**Large tables.** Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. Random 80/20 splits with seeds 0, 1, and 2, the later ones still running: the Splits column says how many each model has finished, and a cell over several is their mean ± the standard deviation across them. The seconds are the first split's. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row.
+**Large tables.** Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. Random 80/20 splits with seeds 0, 1, and 2, the later ones still running: the Splits column says how many each model has finished, and a cell over several is their mean ± the standard deviation across them. The seconds are each model's fastest split's. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row.
 
 **Small tables.** Each table is split 80/20 at random, three times, with seeds 0, 1, and 2. A cell is the mean over the three test sets ± the standard deviation across them. The temperature forecast is split on the clock instead, the last 20% of the series, so its three runs differ only in the seed. XGBoost and LightGBM "default" is the library's constructor defaults; "early-stopped" is a learning rate of 0.05 and up to 4,000 trees, stopped after 100 rounds without improvement on a 20% validation slice of the training rows. A category the training rows never saw is missing to the trees, as it is index 0 to Ashlar.
 
 **Distributional scores** are on the original scale of the target.
 
-- *CRPS*, the continuous ranked probability score, is the expected absolute error of a draw minus half the expected distance between two draws. It scores the whole distribution, in the target's units, and stays finite on targets with a spike. Ashlar's is from 200 (large tables) or 400 (small tables) draws per row; a normal's is exact.
+- *CRPS*, the continuous ranked probability score, is the expected absolute error of a draw minus half the expected distance between two draws. It scores the whole distribution, in the target's units, and stays finite on targets with a spike. Ashlar's is from 200 (large tables) or 400 (small tables) draws per row; a normal's, a Student-t's, and a mixture of normals' are exact.
 - *Pinball* is the quantile loss averaged over the 0.1, 0.5, and 0.9 levels. For a density head the levels are taken from the same draws.
 - *80% coverage* is the share of held-out values between the 0.1 and 0.9 levels, and *80% width* is the average distance between them.
-- *NLL* is the negative log density per row. On targets with a spike, such as taxi tips that are exactly zero or California values capped at 5, a head can drive it down by making the spike narrow. Read CRPS there.
-- The trees have no density of their own. "Mean + constant normal" is the early-stopped mean with a normal whose scale is the residual standard deviation on the validation slice. "Three quantile models" fits one early-stopped model per level with the quantile loss. CatBoost's `RMSEWithUncertainty` fits a mean and a variance per row and is scored as that normal.
+- *NLL* is the negative log density per row. On targets with a spike, such as taxi tips that are exactly zero, flights that leave on the scheduled minute, or California values capped at 5, a head can drive it down by making the spike narrow. Read CRPS there.
+- The trees have no density of their own. "Mean + constant normal" is the early-stopped mean with a normal whose scale is the residual standard deviation on the validation slice. "Three quantile models" fits one early-stopped model per level with the quantile loss. CatBoost's `RMSEWithUncertainty` fits a mean and a variance per row and is scored as that normal. LightGBMLSS grows a LightGBM tree per parameter of a Gaussian, a Student-t, or a mixture of three Gaussians each round, on the gradient and Hessian of the likelihood. It is early-stopped like the trees, on six threads, with the target standardized by the fitting rows, each family started from its unconditional fit (`initialize=True`), and LightGBM's `max_delta_step=0.5`, without which the mixture diverges within a few rounds. LightGBMLSS adds seeded Gumbel noise to the mixture's weights when it predicts; the scores use the plain softmax of its weight scores, which scores better (on airline delay, CRPS 9.14 against 10.09 with the noise). On macOS, torch has to be imported before LightGBM, as the script does, or the two OpenMP runtimes crash it.
 
 **What is not here.** No hyperparameter search on any side. Flight tables with a date column were dropped: under a random split a model can learn which days had bad weather and meet those same days again in the test set.
 
@@ -79,7 +79,7 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are seed 0's: Ashlar's include every core of the laptop, and each tree used one thread.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. Seed 0's runs shared the laptop, each tree on one thread. Seeds 1 and 2, and LightGBMLSS, ran one job at a time: Ashlar on every core, the trees and LightGBMLSS on six threads. A model with only seed 0 so far reads slow.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
@@ -91,17 +91,21 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | XGBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 59 |
 | CatBoost | 1 | 3.047 | 2.553 | 1.747 | 2.534 | 79% | 7.804 | 351 |
 | CatBoost, `RMSEWithUncertainty` | 1 | 3.047 | 2.554 | 1.742 | 2.531 | 80% | 7.781 | 552 |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 3.101 | 2.382 | 1.652 | 2.055 | 75% | 6.961 | 745 |
 
 ### Airline delay, departure delay in minutes, 2,000,000 of 10,000,000 rows
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 29.04 | 13.89 | — | — | — | — | 751 |
-| Ashlar, `task="mixture"` | 1 | 29.11 | 13.94 | 9.167 | 2.66 | 80% | 32.8 | 1438 |
-| LightGBM | 1 | 29.06 | 13.91 | 12.2 | 4.813 | 94% | 74.87 | 12 |
-| XGBoost | 1 | 29.11 | 13.92 | 12.21 | 4.813 | 94% | 74.93 | 25 |
-| CatBoost | 1 | 29.05 | 13.9 | 12.17 | 4.812 | 94% | 74.91 | 880 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 29.06 | 13.92 | 11.46 | 4.722 | 94% | 66.82 | 626 |
+| Ashlar, default | 2 | 29.14 ± 0.11 | 13.87 ± 0.016 | — | — | — | — | 245 |
+| Ashlar, `task="mixture"` | 2 | 29.21 ± 0.099 | 13.91 ± 0.027 | 9.216 ± 0.049 | 2.924 ± 0.26 | 80% | 32.42 ± 0.38 | 254 |
+| LightGBM | 2 | 29.16 ± 0.1 | 13.91 ± 0.0047 | 12.2 ± 0.0056 | 4.811 ± 0.002 | 94% | 74.25 ± 0.62 | 4 |
+| XGBoost | 2 | 29.19 ± 0.087 | 13.93 ± 0.011 | 12.21 ± 0.00044 | 4.811 ± 0.002 | 94% | 74.32 ± 0.61 | 5 |
+| CatBoost | 2 | 29.14 ± 0.097 | 13.89 ± 0.015 | 12.17 ± 0.0047 | 4.81 ± 0.0024 | 94% | 74.23 ± 0.68 | 250 |
+| CatBoost, `RMSEWithUncertainty` | 2 | 29.16 ± 0.1 | 13.91 ± 0.0059 | 11.46 ± 0.0037 | 4.715 ± 0.0071 | 94% | 66.19 ± 0.63 | 177 |
+| LightGBMLSS, Gaussian | 1 | 29.14 | 13.91 | 11.49 | 4.753 | 94% | 66.34 | 16 |
+| LightGBMLSS, Student-t | 1 | 30.57 | 11.22 | 9.686 | 3.727 | 76% | 18.99 | 163 |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 29.16 | 12.79 | 9.144 | 3.076 | 79% | 28.44 | 1201 |
 
 ### NYC green taxi, tip in $, 581,835 rows
 
@@ -110,8 +114,8 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190 |
 | Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924 |
 | Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520 |
-| LightGBM | 3 | 1.799 ± 0.033 | 0.6503 ± 0.016 | 0.6755 ± 0.013 | 1.992 ± 0.0098 | 95% | 4.644 ± 0.2 | 52 |
-| XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 177 |
+| LightGBM | 3 | 1.799 ± 0.033 | 0.6503 ± 0.016 | 0.6755 ± 0.013 | 1.992 ± 0.0098 | 95% | 4.644 ± 0.2 | 18 |
+| XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 48 |
 | CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546 |
 | CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345 |
 | RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044 |
@@ -121,30 +125,31 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 | Model | Splits | RMSE | MAE | CRPS | NLL | 80% coverage | 80% width | Seconds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 8.698 | 5.903 | — | — | — | — | 323 |
-| Ashlar, `task="mixture"` | 1 | 8.699 | 5.835 | 4.051 | 3.081 | 77% | 16.81 | 282 |
-| LightGBM | 1 | 8.754 | 6.09 | 4.621 | 3.588 | 85% | 22.33 | 309 |
-| XGBoost | 1 | 8.71 | 6.085 | 4.609 | 3.583 | 85% | 22.22 | 736 |
-| CatBoost | 1 | 8.776 | 6.123 | 4.637 | 3.591 | 85% | 22.4 | 271 |
-| CatBoost, `RMSEWithUncertainty` | 1 | 8.883 | 6.197 | 4.407 | 3.416 | 83% | 19.01 | 220 |
+| Ashlar, default | 2 | 8.656 ± 0.043 | 5.875 ± 0.028 | — | — | — | — | 179 |
+| Ashlar, `task="mixture"` | 2 | 8.666 ± 0.033 | 5.929 ± 0.094 | 4.041 ± 0.0096 | 3.08 ± 0.0011 | 79% | 17.86 ± 1 | 182 |
+| LightGBM | 2 | 8.723 ± 0.031 | 6.085 ± 0.0051 | 4.615 ± 0.007 | 3.585 ± 0.0033 | 85% | 22.23 ± 0.1 | 36 |
+| XGBoost | 2 | 8.686 ± 0.024 | 6.085 ± 0.00029 | 4.605 ± 0.0034 | 3.581 ± 0.0026 | 85% | 22.13 ± 0.097 | 63 |
+| CatBoost | 2 | 8.746 ± 0.03 | 6.118 ± 0.0051 | 4.63 ± 0.0067 | 3.587 ± 0.0032 | 85% | 22.3 ± 0.1 | 49 |
+| CatBoost, `RMSEWithUncertainty` | 2 | 8.846 ± 0.037 | 6.189 ± 0.0082 | 4.399 ± 0.008 | 3.41 ± 0.0061 | 83% | 18.99 ± 0.017 | 42 |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 8.861 | 5.996 | 4.186 | 3.188 | 76% | 16.72 | 185 |
 
 ### Higgs, signal against background, 2,000,000 of 5,100,000 rows
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 2 | 0.7629 ± 0.00047 | 0.8469 ± 0.00044 | 0.4817 ± 0.00064 | 507 |
-| LightGBM | 2 | 0.7503 ± 0.0011 | 0.8333 ± 0.00088 | 0.4992 ± 0.00099 | 261 |
-| XGBoost | 2 | 0.7525 ± 0.00087 | 0.8353 ± 0.0006 | 0.4963 ± 0.00071 | 391 |
-| CatBoost | 2 | 0.7514 ± 0.0011 | 0.8337 ± 0.00087 | 0.4991 ± 0.00093 | 855 |
+| Ashlar, default | 2 | 0.7629 ± 0.00047 | 0.8469 ± 0.00044 | 0.4817 ± 0.00064 | 323 |
+| LightGBM | 2 | 0.7503 ± 0.0011 | 0.8333 ± 0.00088 | 0.4992 ± 0.00099 | 53 |
+| XGBoost | 2 | 0.7525 ± 0.00087 | 0.8353 ± 0.0006 | 0.4963 ± 0.00071 | 72 |
+| CatBoost | 2 | 0.7514 ± 0.0011 | 0.8337 ± 0.00087 | 0.4991 ± 0.00093 | 162 |
 
 ### Covertype, 7 forest types, 581,012 rows
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 2 | 0.9674 ± 0.00034 | 0.9988 ± 1.1e-05 | 0.09408 ± 0.00034 | 415 |
-| LightGBM | 2 | 0.9632 ± 0.00047 | 0.9984 ± 8e-05 | 0.1142 ± 0.0023 | 361 |
-| XGBoost | 2 | 0.9485 ± 0.00077 | 0.9974 ± 0.00011 | 0.1464 ± 0.0024 | 930 |
-| CatBoost | 2 | 0.9114 ± 0.0013 | 0.993 ± 0.00017 | 0.2458 ± 0.0016 | 692 |
+| Ashlar, default | 2 | 0.9674 ± 0.00034 | 0.9988 ± 1.1e-05 | 0.09408 ± 0.00034 | 227 |
+| LightGBM | 2 | 0.9632 ± 0.00047 | 0.9984 ± 8e-05 | 0.1142 ± 0.0023 | 124 |
+| XGBoost | 2 | 0.9485 ± 0.00077 | 0.9974 ± 0.00011 | 0.1464 ± 0.0024 | 186 |
+| CatBoost | 2 | 0.9114 ± 0.0013 | 0.993 ± 0.00017 | 0.2458 ± 0.0016 | 150 |
 
 ### Airlines, delayed or not, 539,383 rows
 
@@ -166,29 +171,30 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 ### The README's airline figure
 
-The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. Scores are on the benchmark's 100,000 scored test flights.
+The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
 
 | Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
 |---|---:|---:|---:|---:|---:|
 | Ashlar, `task="mixture"` | 9.169 | 2.660 | 79.8% | 32.8 | 0.0388 |
+| LightGBMLSS, mixture of 3 Gaussians | 9.144 | 3.076 | 78.7% | 28.4 | 0.0391 |
 | CatBoost, `RMSEWithUncertainty` | 11.46 | 4.722 | 93.9% | 66.8 | 0.0392 |
 | LightGBM, normal of one width | 12.20 | 4.813 | 94.3% | 74.9 | 0.0389 |
 
-The mixture's 0.1 and 0.9 quantiles from `predict_quantiles`, rather than from 200 draws, hold 80.6% at 33.1 minutes wide; after `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
+The CRPS is a tie. The NLL is not a comparison here: it turns on how narrow each model makes its spike at zero, and Ashlar's is 2.66 on this split and 3.19 on seed 1 at nearly the same CRPS (9.17 and 9.27). Ashlar's coverage and width are from 200 draws per flight; its 0.1 and 0.9 quantiles from `predict_quantiles`, exact like LightGBMLSS's, hold 80.6% at 33.1 minutes wide. After `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
 
-- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, the mixture's is within 0.6 points of the observed rate in every bin of more than 1,000 flights; CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
+- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, Ashlar's is within 0.6 points of the observed rate in every bin of more than 1,000 flights. LightGBMLSS's spreads further and overshoots at the top: it says 13.6% where 10.4% happen and 23.7% where 15.4% do. CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
 
-  | Predicted | Ashlar flights | Ashlar said | Happened | CatBoost flights | CatBoost said | Happened |
+  | Predicted | Ashlar flights | Ashlar said | Happened | LightGBMLSS flights | LightGBMLSS said | Happened |
   |---|---:|---:|---:|---:|---:|---:|
-  | 0 to 2% | 20,246 | 1.4% | 1.3% | 52,172 | 0.5% | 2.0% |
-  | 2% to 5% | 46,208 | 3.3% | 2.9% | 19,524 | 3.3% | 4.0% |
-  | 5% to 10% | 27,051 | 6.9% | 6.3% | 15,888 | 7.2% | 6.3% |
-  | 10% to 20% | 6,303 | 12.7% | 12.3% | 10,451 | 13.7% | 9.4% |
-  | 20% to 30% | 190 | 22.2% | 25.8% | 1,832 | 23.4% | 16.9% |
-  | 30% and over | 2 | 31.1% | 0% | 133 | 32.9% | 18.8% |
+  | 0 to 2% | 20,246 | 1.4% | 1.3% | 41,776 | 0.9% | 1.8% |
+  | 2% to 5% | 46,208 | 3.3% | 2.9% | 30,985 | 3.3% | 3.7% |
+  | 5% to 10% | 27,051 | 6.9% | 6.3% | 17,226 | 7.0% | 6.3% |
+  | 10% to 20% | 6,303 | 12.7% | 12.3% | 8,029 | 13.6% | 10.4% |
+  | 20% to 30% | 190 | 22.2% | 25.8% | 1,579 | 23.7% | 15.4% |
+  | 30% and over | 2 | 31.1% | 0% | 405 | 35.9% | 22.5% |
 
-- **Leaving on the minute.** 18.6% of the scored flights left at their scheduled minute. Every flight's mixture has one component at zero with a scale of about 0.005 minutes, a point mass. On the 1,500 scored flights drawn at random for the figure (seed 0), its weight averages 18.4% where 18.5% of them left on the minute; by quartile of the weight, 7.7%, 11.4%, 16.6%, and 37.7% predicted against 7.2%, 14.1%, 13.9%, and 38.9% observed. CatBoost's normal gives a delay between −0.5 and 0.5 minutes 1.6% on average.
-- **Leaving early.** 0.1% of the scored flights left more than 15 minutes early. 95% of CatBoost's 80% intervals on the same 1,500 flights start earlier than that (the median at 24 minutes early), and none of the mixture's do (the median 0.1 quantile is 4.8 minutes early).
+- **Leaving on the minute.** 18.6% of the scored flights left at their scheduled minute, and both mixtures learn the spike. On the 1,500 scored flights drawn at random for the figure (seed 0), of which 18.5% left on the minute, Ashlar's mixture has a component at zero with a scale of about 0.005 minutes, a point mass, on every flight. Its weight averages 18.4%; by quartile of the weight, 7.7%, 11.4%, 16.6%, and 37.7% against 7.2%, 14.1%, 13.9%, and 38.9% observed. LightGBMLSS puts a normal narrower than half a minute at zero on 309 of the 1,500, with 40% of the weight on average, and 41.7% of those flights left on the minute; for the rest, it gives a delay that rounds to zero 8.0% where 12.5% did. Counting the continuous part's mass within half a minute of zero too, Ashlar's chance of a delay that rounds to zero averages 23.0% and LightGBMLSS's 15.1%. As forecasts of leaving on the minute, the two score the same Brier, 0.134 (0.132 for Ashlar's point mass alone, 0.151 for the base rate). CatBoost's normal gives a delay between −0.5 and 0.5 minutes 1.6% on average.
+- **Leaving early.** 0.1% of the scored flights left more than 15 minutes early. On the same 1,500 flights, 95% of CatBoost's 80% intervals start earlier than that (the median at 24 minutes early), none of Ashlar's do (its median 0.1 quantile is 4.8 minutes early), and 4 of LightGBMLSS's do (its median 0.1 quantile is 5.4 minutes early).
 
 ## Beside other neural packages
 
