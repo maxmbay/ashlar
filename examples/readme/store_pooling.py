@@ -364,7 +364,6 @@ def draw():
     splits = buckets.get("splits") or max(cell["splits"] for cell in ours.values())
     tau = float(stores["tau"])
     rows = np.asarray(stores["rows"], dtype=np.float64)
-    raw = np.asarray(stores["raw"], dtype=np.float64)
     pooled = np.asarray(stores["pooled"], dtype=np.float64)
     sd = np.asarray(stores["offset_sd"], dtype=np.float64)
     halo = [path_effects.withStroke(linewidth=4.5, foreground=k.CARD)]
