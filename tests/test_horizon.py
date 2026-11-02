@@ -12,6 +12,7 @@ from ashlar import ASRRegressor
 from ashlar.distributions import LowRankMultivariateNormal
 from ashlar.errors import AshlarError
 from ashlar.horizon import horizon_frame, peak, stockout
+from micro import MICRO
 
 
 def _panel(series=3, steps=40, seed=0):
@@ -106,9 +107,7 @@ def test_a_joint_head_forecasts_the_path_and_calibrates_its_peak():
     frame = horizon_frame(data, target="sales", lookback=7, horizon=4, series="store", time="day", known=["promo"])
     origin = frame.index["origin"].to_numpy()
     train, calibration, test = origin < 35, (origin >= 35) & (origin < 45), origin >= 45
-    model = ASRRegressor(
-        task="multivariate_gaussian", max_epochs=2, backbone_kwargs={"n_blocks": 1, "d_block": 16}, random_state=0
-    )
+    model = ASRRegressor(task="multivariate_gaussian", max_epochs=2, **MICRO)
     model.fit(frame.X[train], frame.Y[train])
     lasts = stockout(60.0)
     model.calibrate(frame.X[calibration], frame.Y[calibration], target=[peak, lasts])
