@@ -35,9 +35,9 @@ python examples/benchmark_uncertainty.py --stage report
 
 **Versions.** LightGBM 4.7.0, XGBoost 3.4.1, CatBoost 1.2.10, PyTabKit 1.7.3, JAX 0.12.
 
-**Hardware.** An Apple M3 Pro laptop with 12 cores and 18 GB, CPU only. Several runs shared the machine. Ashlar (JAX) used every core it could get; the trees ran on one thread each; PyTabKit models ran on four threads. Read the seconds as an order of magnitude.
+**Hardware.** An Apple M3 Pro laptop with 12 cores and 18 GB, CPU only. Several runs shared the machine. Ashlar (JAX) used every core it could get; the trees ran on one thread each (six on the large tables' later splits, whose seconds are not reported); PyTabKit models ran on four threads. Read the seconds as an order of magnitude.
 
-**Large tables.** Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. One random 80/20 split per table (seed 0) so far; more seeds are running. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row.
+**Large tables.** Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. Random 80/20 splits with seeds 0, 1, and 2, the later ones still running: the Splits column says how many each model has finished, and a cell over several is their mean ± the standard deviation across them. The seconds are the first split's. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row.
 
 **Small tables.** Each table is split 80/20 at random, three times, with seeds 0, 1, and 2. A cell is the mean over the three test sets ± the standard deviation across them. The temperature forecast is split on the clock instead, the last 20% of the series, so its three runs differ only in the seed. XGBoost and LightGBM "default" is the library's constructor defaults; "early-stopped" is a learning rate of 0.05 and up to 4,000 trees, stopped after 100 rounds without improvement on a 20% validation slice of the training rows. A category the training rows never saw is missing to the trees, as it is index 0 to Ashlar.
 
@@ -73,7 +73,7 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-One split each (seed 0). Ashlar's seconds include every core of the laptop; each tree used one thread.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are seed 0's: Ashlar's include every core of the laptop, and each tree used one thread.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
@@ -104,8 +104,8 @@ One split each (seed 0). Ashlar's seconds include every core of the laptop; each
 | Ashlar, default | 1 | 1.977 | 0.872 | — | — | — | — | 190 |
 | Ashlar, `tabm_piecewise()` | 1 | 1.979 | 0.8747 | — | — | — | — | 924 |
 | Ashlar, `task="mixture"` | 1 | 1.977 | 0.8641 | 0.5935 | -1.973 | 82% | 2.814 | 520 |
-| LightGBM | 1 | 1.752 | 0.6307 | 0.6583 | 1.978 | 95% | 4.464 | 52 |
-| XGBoost | 1 | 1.869 | 0.6452 | 0.6877 | 2.055 | 95% | 4.726 | 177 |
+| LightGBM | 3 | 1.799 ± 0.033 | 0.6503 ± 0.016 | 0.6755 ± 0.013 | 1.992 ± 0.0098 | 95% | 4.644 ± 0.2 | 52 |
+| XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 177 |
 | CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546 |
 | CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345 |
 | RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044 |
@@ -126,19 +126,19 @@ One split each (seed 0). Ashlar's seconds include every core of the laptop; each
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.7625 | 0.8464 | 0.4823 | 507 |
-| LightGBM | 1 | 0.7493 | 0.8324 | 0.5002 | 261 |
-| XGBoost | 1 | 0.7516 | 0.8347 | 0.497 | 391 |
-| CatBoost | 1 | 0.7503 | 0.8328 | 0.5 | 855 |
+| Ashlar, default | 2 | 0.7629 ± 0.00047 | 0.8469 ± 0.00044 | 0.4817 ± 0.00064 | 507 |
+| LightGBM | 2 | 0.7503 ± 0.0011 | 0.8333 ± 0.00088 | 0.4992 ± 0.00099 | 261 |
+| XGBoost | 2 | 0.7525 ± 0.00087 | 0.8353 ± 0.0006 | 0.4963 ± 0.00071 | 391 |
+| CatBoost | 2 | 0.7514 ± 0.0011 | 0.8337 ± 0.00087 | 0.4991 ± 0.00093 | 855 |
 
 ### Covertype, 7 forest types, 581,012 rows
 
 | Model | Splits | Accuracy | AUC | Log loss | Seconds |
 |---|---:|---:|---:|---:|---:|
-| Ashlar, default | 1 | 0.967 | 0.9988 | 0.09441 | 415 |
-| LightGBM | 1 | 0.9628 | 0.9983 | 0.1165 | 361 |
-| XGBoost | 1 | 0.9477 | 0.9973 | 0.1488 | 930 |
-| CatBoost | 1 | 0.9102 | 0.9929 | 0.2474 | 692 |
+| Ashlar, default | 2 | 0.9674 ± 0.00034 | 0.9988 ± 1.1e-05 | 0.09408 ± 0.00034 | 415 |
+| LightGBM | 2 | 0.9632 ± 0.00047 | 0.9984 ± 8e-05 | 0.1142 ± 0.0023 | 361 |
+| XGBoost | 2 | 0.9485 ± 0.00077 | 0.9974 ± 0.00011 | 0.1464 ± 0.0024 | 930 |
+| CatBoost | 2 | 0.9114 ± 0.0013 | 0.993 ± 0.00017 | 0.2458 ± 0.0016 | 692 |
 
 ### Airlines, delayed or not, 539,383 rows
 
@@ -157,6 +157,32 @@ One split each (seed 0). Ashlar's seconds include every core of the laptop; each
 | LightGBM | 1 | 0.8444 | 0.7544 | 0.3858 | 132 |
 | XGBoost | 1 | 0.8442 | 0.7557 | 0.3852 | 188 |
 | CatBoost | 1 | 0.8435 | 0.7502 | 0.3879 | 726 |
+
+### The README's airline figure
+
+The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. Scores are on the benchmark's 100,000 scored test flights.
+
+| Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
+|---|---:|---:|---:|---:|---:|
+| Ashlar, `task="mixture"` | 9.169 | 2.660 | 79.8% | 32.8 | 0.0388 |
+| CatBoost, `RMSEWithUncertainty` | 11.46 | 4.722 | 93.9% | 66.8 | 0.0392 |
+| LightGBM, normal of one width | 12.20 | 4.813 | 94.3% | 74.9 | 0.0389 |
+
+The mixture's 0.1 and 0.9 quantiles from `predict_quantiles`, rather than from 200 draws, hold 80.6% at 33.1 minutes wide; after `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
+
+- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, the mixture's is within 0.6 points of the observed rate in every bin of more than 1,000 flights; CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
+
+  | Predicted | Ashlar flights | Ashlar said | Happened | CatBoost flights | CatBoost said | Happened |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 0 to 2% | 20,246 | 1.4% | 1.3% | 52,172 | 0.5% | 2.0% |
+  | 2% to 5% | 46,208 | 3.3% | 2.9% | 19,524 | 3.3% | 4.0% |
+  | 5% to 10% | 27,051 | 6.9% | 6.3% | 15,888 | 7.2% | 6.3% |
+  | 10% to 20% | 6,303 | 12.7% | 12.3% | 10,451 | 13.7% | 9.4% |
+  | 20% to 30% | 190 | 22.2% | 25.8% | 1,832 | 23.4% | 16.9% |
+  | 30% and over | 2 | 31.1% | 0% | 133 | 32.9% | 18.8% |
+
+- **Leaving on the minute.** 18.6% of the scored flights left at their scheduled minute. Every flight's mixture has one component at zero with a scale of about 0.005 minutes, a point mass. On the 1,500 scored flights drawn at random for the figure (seed 0), its weight averages 18.4% where 18.5% of them left on the minute; by quartile of the weight, 7.7%, 11.4%, 16.6%, and 37.7% predicted against 7.2%, 14.1%, 13.9%, and 38.9% observed. CatBoost's normal gives a delay between −0.5 and 0.5 minutes 1.6% on average.
+- **Leaving early.** 0.1% of the scored flights left more than 15 minutes early. 95% of CatBoost's 80% intervals on the same 1,500 flights start earlier than that (the median at 24 minutes early), and none of the mixture's do (the median 0.1 quantile is 4.8 minutes early).
 
 ## Beside other neural packages
 
@@ -784,6 +810,18 @@ From [`examples/benchmark_chain.py`](../examples/benchmark_chain.py). French mot
 
 The chain beats the independent heads by 0.147 nats per policy, fifteen times the issue's bar of 0.01, and its total is far better calibrated: the independent hurdle cannot know that a cost is zero exactly when the count is, so drawn apart they give a policy a positive total 0.24% of the time against 3.66%. The chain ties the actuary's model built by hand, a count model and a log-normal cost fitted on the policies with claims, with the cost set to zero where there was none: its joint NLL is 0.0001 nats better, inside the spread across splits, and it learns the same structure from the column kinds alone. Both put too little mass between 1,000 and 5,000 euros and too much above. The mean total is 0.96 to 0.98 of the observed on split 0 and about 0.61 on splits 1 and 2, for both models alike; freMTPL2's costs have a very long tail, and a handful of test claims in the millions decide the sum.
 
+### Against the GBM actuary
+
+From the `gbm` stage of [`examples/benchmark_chain.py`](../examples/benchmark_chain.py): the same three splits, the same 50,000 test policies, and 200 draws per policy, of what a gradient-boosting user would build. LightGBM with the Poisson objective on the claim count, and LightGBM with the gamma objective on the cost per claim of the policies with claims, composed by hand: a gamma with the fitted mean and one shape fitted by likelihood on validation rows (the cost model is also tried weighted by the count, with the average of `n` claims then a gamma of `n` times the shape, and kept where it wins). And LightGBM Tweedie on the total itself, its power (1.3, 1.5, or 1.7) and its dispersion fitted on validation rows, read as the compound Poisson-gamma distribution it implies. Each LightGBM model trains at learning rate 0.05 with up to 4,000 trees, early-stopped after 100 rounds on a random 20% of the training rows, and is the best of four leaf settings by validation likelihood. These ran in a four-core Linux container, so their CPU seconds, grid included, do not compare with the laptop's above.
+
+| Model | Joint NLL ↓ | Count NLL | Cost NLL given the count | P(T > 0) | P(T > 1,000) | P(T > 5,000) | Mean T / observed | CRPS of T ↓ | PIT distance × 100 ↓ | CPU seconds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `chain`, from the table above | **0.4672 ± 0.0033** | 0.1553 | 0.3120 | 3.52% | 1.72% | 0.25% | 0.73 ± 0.17 | **92.5** | 0.48 ± 0.08 | 940 |
+| LightGBM Poisson × gamma | 0.4781 ± 0.0037 | 0.1553 | 0.3228 | 3.73% | 2.08% | 0.35% | 0.85 ± 0.25 | 92.7 | **0.37 ± 0.04** | 660 |
+| LightGBM Tweedie | | | | 3.49% | 1.87% | 0.34% | 0.80 ± 0.24 | 93.4 | 0.52 ± 0.07 | 334 |
+
+On the total, the GBM actuary ties the chain: CRPS 92.7 against 92.5, with a standard deviation of 22 across splits, and its total is a little better calibrated, with a PIT distance of 0.37 against 0.48. It puts more mass above 1,000 euros, closer to what happened (2.08% against 1.72%, observed 2.53%), and more above 5,000, further from it (0.35% against 0.25%, observed 0.15%). The chain keeps the better joint likelihood, by 0.011 nats per policy: the counts tie at 0.1553, and the hurdle's cost given the count beats a gamma by 0.011. Tweedie, one model of the total, ties as well (CRPS 93.4), with no count or cost of its own to score. So the chain is level on the total with both the actuary's model by hand and the GBM actuary, and gets there as one model with an exact joint likelihood, where they compose two models by hand.
+
 ## Monotone constraints on freMTPL2
 
 From [`examples/benchmark_monotone.py`](../examples/benchmark_monotone.py). French motor insurance (freMTPL2): the claim count of a 200,000-policy sample of each training split, and the log cost per claim of every training policy with a claim, three random 80/20 splits, mean ± standard deviation. Each of 2,000 test policies has its bonus-malus (or vehicle power) set to 12 levels from the 2nd to the 98th percentile, and `P(y > t)` is read at a ladder of thresholds (a count above 0, 1, and 2; the log cost at its 5th to 95th percentiles). A step violates dominance where some threshold's probability moves against the feature's overall direction by more than 0.001; the direction is the sign of the mean's average change. Largest move: the mean over policies of the largest such move. Mean against: the share of steps where the mean itself moves against the direction.
@@ -806,6 +844,29 @@ From [`examples/benchmark_monotone.py`](../examples/benchmark_monotone.py). Fren
 | | | | | VehPower | 49.8% | 87.9% | 0.0077 | 16.6% | |
 
 The constraint leaves no violation in bonus-malus on any split and costs little: 0.0013 nats per policy on the count, 0.012 per claim on the gaussian cost. The spline's constrained mean is lower only because one split's unconstrained fit was poor (1.197 against 1.150); on the other two the constraint cost 0.008 and 0.013. Vehicle power, left unconstrained, keeps violating, as it should. The log costs are lumpy, with many claims at a few fixed amounts, which is why the mixture's likelihood is far ahead of the smooth heads; it cannot be constrained, since a feature moving its weights can cross.
+
+### Against gradient boosting
+
+From the `gbm` and `calibrated` stages of [`examples/benchmark_monotone.py`](../examples/benchmark_monotone.py), on the same three splits, samples, test policies, and ladders: what a gradient-boosting user would build. On the claim count, LightGBM with the Poisson objective, with and without `monotone_constraints` rising in bonus-malus; a Poisson's every exceedance rises with its mean, so the constrained one keeps dominance by construction. On the log cost per claim, quantile regression at seven levels: 5%, 10%, 25%, 50%, 75%, 90%, and 95%. LightGBM 4.7 refuses `monotone_constraints` with its quantile objective, so it runs without them, one model per level; XGBoost 3.4 takes them, in one multi-quantile model (`objective="reg:quantileerror"`), fitted with and without the constraint. For the dominance test, a boosted model's distribution is read from its seven quantiles, sorted where they cross and linear between them. Beside them: `quantile_spline`, refitted here so that its quantiles can be scored, and fitted again on 80% of the training claims and calibrated on the other 20% (`calibrate`); the `mixture` head, which cannot be constrained; and the training claims' own quantile at each level, the same for every claim. Pinball is the mean over the seven levels on the test claims. A test claim crosses where some level's quantile is below the one under it, and a probe policy crosses if that happens anywhere in its bonus-malus sweep. The dominance columns are bonus-malus's, as in the table above, which has the uncalibrated spline's. The boosted models are tuned as in [the chain's](#against-the-gbm-actuary), XGBoost over four pairs of depth and smallest leaf weight. These ran in a four-core Linux container, so their CPU seconds do not compare with the table above.
+
+| Outcome | Model | `BonusMalus` rising | NLL ↓ | Pinball ↓ | Test claims crossing | Probe policies crossing | Steps violating | Policies violating | CPU s |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| claim count | LightGBM Poisson | no | **0.1527 ± 0.0018** | | | | 17.4% | 80.8% | 52 |
+| claim count | LightGBM Poisson | yes | 0.1533 ± 0.0017 | | | | **0** | **0** | 48 |
+| log cost | LightGBM quantiles | no | | 0.2321 ± 0.0019 | 2.5% | 12.2% | 48.6% | 99.7% | 35 |
+| log cost | XGBoost quantiles | no | | 0.2319 ± 0.0017 | 0 | 0 | 40.7% | 100% | 112 |
+| log cost | XGBoost quantiles | yes | | 0.2320 ± 0.0018 | 0 | 0 | **0** | **0** | 122 |
+| log cost | `quantile_spline` | no | 1.1414 ± 0.0172 | 0.2892 ± 0.0039 | 0 | 0 | | | 104 |
+| log cost | `quantile_spline` | yes | 1.1348 ± 0.0161 | 0.2901 ± 0.0055 | 0 | 0 | | | 102 |
+| log cost | `quantile_spline`, calibrated | no | | 0.2366 ± 0.0028 | 0 | 0 | 51.8% | 89.3% | 63 |
+| log cost | `quantile_spline`, calibrated | yes | | 0.2375 ± 0.0026 | 0 | 0 | **0** | **0** | 57 |
+| log cost | `mixture` | no | 0.6761 ± 0.0053 | **0.2317 ± 0.0016** | | | | | 114 |
+| log cost | one quantile per level for every claim | | | 0.2391 ± 0.0025 | | | | | 0 |
+
+- **XGBoost keeps the guarantee at the seven levels it fitted, and it models this cost better.** Constrained, none of its quantiles falls as bonus-malus rises, at a pinball loss of 0.2320, the same as without the constraint (0.2319). Its quantiles crossed on no test claim and no probe policy, with or without the constraint, though nothing in it rules a crossing out. The constrained `quantile_spline`'s loss is 25% higher, 0.2901. LightGBM's seven separate models cannot be constrained, and they cross on 2.5% of the test claims and somewhere in the sweep for 12.2% of the probe policies.
+- **The spline loses on three fixed claim amounts.** 37% of the claims cost €1,204, €1,128.12, or €1,172 per claim, and a smooth quantile function fitted by likelihood bends around those spikes: before calibration, 19% to 20% of the test claims fall below its 5% quantile and 14% to 15% above its 95%. `calibrate`, on a held-out fifth of the training claims, puts both near 5% and takes the constrained spline's loss to 0.2375, with no violation, since one increasing map moves every policy's distribution the same way. That is still 2.3% behind XGBoost, and only 0.0016 ahead of giving every claim the same seven quantiles (0.2391): the features move this cost little, and the best model is 3% better than none. The `mixture` head, whose components can sit on the spikes, ties XGBoost at 0.2317, but it cannot be constrained.
+- **`monotone=` covers more than the levels.** XGBoost's constraint holds at the seven levels it was given; between and beyond them the distribution is whatever one interpolates, and it has no density. The constrained spline's holds at every level and every threshold, and for its density, from one fit, and `calibrate` keeps it. On this cost that guarantee costs 2.3% of pinball loss after calibration, which XGBoost does not pay.
+- **On the count the two tie.** The constrained Poisson's NLL is 0.1533 against 0.1538 for the constrained `negative_binomial` above, inside the spread across splits. The constraint costs LightGBM 0.0006 nats per policy and the negative binomial 0.0013.
 
 ## Labels that say what was observed
 
@@ -1151,6 +1212,28 @@ Does a training score that judges the eight loads as one outcome, rather than ea
 - **Added to the log density, the scores tie it.** The flow on the log density plus the energy score has the best joint NLL, 67.24 against 67.34, but beats the log-density flow at only 14 of 25 origins, and at 9 on the total's CRPS and 8 on the Brier score before calibration. Before calibration its total holds 72.9%, no closer to 80% than the log-density flow's 74.8%. The variogram score beats the log-density flow at 7, 11, and 8 of 25 origins on the three scores. On the joint normal, adding the energy score changes coverage by 1.5 points and loses on the total's CRPS (3,163 against 2,995).
 - **Calibration does what the training scores do not.** After `calibrate`, every model's total is inside its 80% interval in 78.6% to 80.4% of hours, whatever it trained on, and the best Brier score after calibration is still the flow trained on its log density (0.0466), tied with the blend (0.0468).
 - **The scores make the flow slow to train**: its fits take 71 to 83 seconds per origin, against 14 seconds on the log density, since every step draws 16 samples per row and a draw takes one pass per column. The joint normal's take 14 seconds against 12.
+
+### Casual and registered riders
+
+A second pair of outcomes, for the README's isometric figure. From [`examples/benchmark_joint_riders.py`](../examples/benchmark_joint_riders.py). Capital Bikeshare's hourly rentals, 17,379 hours of 2011 and 2012, record riders without a subscription (casual) and subscribers (registered), with the calendar and the weather as features. Every Ashlar model fits `log1p([casual, registered])`: the four models of the first table above, with `joint` the normal's full 2 × 2 covariance learned per row, and `task="multivariate_mixture"`, five joint normals. Beside them, what a gradient-boosting user would build for the total, the bikes out in the hour: LightGBM quantile regression at 0.1 and 0.9 fitted to the total itself, and the same for each group, with the total's interval read as the sum of the groups' bounds. Each LightGBM model trains at learning rate 0.05 with up to 4,000 trees, early-stopped after 100 rounds, and every model early-stops on the same random 20% of its training rows. The total's scores are read from 4,000 joint draws per hour, mapped back to counts. Three random 80/20 splits, 3,476 test hours each, mean ± standard deviation. It ran in a four-core Linux container.
+
+| Model | Joint NLL of the two log counts ↓ | Total inside its 80% interval | Width, riders | CRPS of the total, riders ↓ |
+|---|---:|---:|---:|---:|
+| `joint` | 0.471 ± 0.029 | 81.2% | 79 | 17.24 ± 0.40 |
+| joint marginals, independent | 0.522 ± 0.038 | 78.0% | 73 | 17.20 ± 0.43 |
+| independent heads | 0.526 ± 0.027 | 78.4% | 72 | 17.16 ± 0.25 |
+| independent + static correlation | 0.489 ± 0.023 | 81.3% | 77 | 17.17 ± 0.25 |
+| `multivariate_mixture` | **0.133 ± 0.203** | 77.1% | 67 | **16.25 ± 0.37** |
+| LightGBM quantiles of the total | | 68.2% | 73 | |
+| LightGBM quantiles per group, summed | | 78.6% | 90 | |
+
+The static residual correlation is 0.23 to 0.27.
+
+- **The loads' story again.** The two kinds of rider share shocks the features do not record, so with the dependence dropped the same marginals give an 80% interval for the total that holds 78.0% of hours, and with it 81.2%. One correlation fitted after the fact holds as often, 81.3%, with an interval 3% narrower: the gain is from modelling the dependence at all, and the joint head gets it in one fit. The CRPS of the total ties across the four normal models, 17.16 to 17.24.
+- **The mixture models the pair best but holds the total's interval least of Ashlar's models.** Its joint NLL is far ahead, 0.133 against 0.471 with a wide spread across splits, and so is its CRPS of the total, 16.25 against 17.24, but its 80% interval holds 77.1% of hours. The README draws the normal, whose coverage is the number it prints.
+- **LightGBM's quantiles of the total hold 68.2% of hours.** Quantile regression on the total itself, the direct route to this one interval, is too narrow on held-out hours. Summing each group's bounds holds 78.6%, with an interval 13% wider than the joint normal's, since a sum of quantiles is not a quantile of the sum.
+
+The README's figure, [`examples/readme/joint_blocks.py`](../examples/readme/joint_blocks.py), refits split 0's `joint` model the same way and stacks its predicted density for two held-out hours in the logo's blocks; the numbers it prints are this table's.
 
 ## Member uncertainty
 
