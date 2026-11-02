@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from ashlar import ASRModel, ASROutcomeTree
 from ashlar.errors import AshlarError
 from ashlar.tree import OutcomeTree, empirical_edge_prior, tree_objective
+from micro import MICRO
 
 SPEC = {"swing": {"contact": ["in_play", "foul"], "miss": None}, "take": ["called_strike", "ball"]}
 
@@ -126,9 +127,9 @@ def test_tree_save_load_round_trip(tmp_path):
 
 def test_tree_config_errors():
     with pytest.raises(AshlarError):
-        ASRModel(task="tree").fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
+        ASRModel(task="tree", **MICRO).fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
     with pytest.raises(AshlarError):
-        ASRModel(task="classification", tree=SPEC).fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
+        ASRModel(task="classification", tree=SPEC, **MICRO).fit(pd.DataFrame({"a": [0.0, 1.0]}), ["x", "y"])
     X, y = _data(50)
     y[0] = "not_a_node"
     with pytest.raises(AshlarError):

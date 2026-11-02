@@ -10,6 +10,7 @@ import pytest
 from ashlar import ASRRegressor, observed
 from ashlar.chain import Chain, ChainHead, chain_columns, column_distribution, resolve_columns
 from ashlar.errors import AshlarError, ShapeError
+from micro import MICRO
 
 INF = np.inf
 COLUMNS = ["poisson", "hurdle", "categorical", "gaussian"]
@@ -115,7 +116,7 @@ def test_draws_follow_the_conditionals():
 
 def test_chain_fits_predicts_and_saves(tmp_path):
     x, y = _table(600)
-    model = ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=3, random_state=0).fit(x, y)
+    model = ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=3, **MICRO).fit(x, y)
     assert model.chain_columns_[2].classes == 2
     assert np.allclose(model.target_mean_[:3], 0.0) and np.allclose(model.target_std_[:3], 1.0)
     assert model.target_std_[3] != 1.0
@@ -135,34 +136,34 @@ def test_chain_fits_predicts_and_saves(tmp_path):
 def test_chain_refuses_what_it_cannot_score():
     x, y = _table(200)
     with pytest.raises(AshlarError, match="columns"):
-        ASRRegressor(task="chain").fit(x, y)
+        ASRRegressor(task="chain", **MICRO).fit(x, y)
     with pytest.raises(AshlarError, match="log-likelihood"):
-        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, objective="energy").fit(x, y)
+        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, objective="energy", **MICRO).fit(x, y)
     with pytest.raises((AshlarError, ShapeError)):
-        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS[:3]}, max_epochs=1).fit(x, y)
+        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS[:3]}, max_epochs=1, **MICRO).fit(x, y)
     bad = y.copy()
     bad[::2, 0] = 0.5
     with pytest.raises(AshlarError, match="whole numbers"):
-        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=1).fit(x, bad)
+        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=1, **MICRO).fit(x, bad)
     # A coarse cell before the last column is refused unless its column is categorical.
     label = observed.stack(
         [observed.censored(y[:, 0], np.ones(len(y), bool)), observed.exact(y[:, 1]), observed.exact(y[:, 2]), observed.exact(y[:, 3])]
     )
     with pytest.raises(AshlarError, match="before the last column"):
-        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=1).fit(x, label)
+        ASRRegressor(task="chain", head_kwargs={"columns": COLUMNS}, max_epochs=1, **MICRO).fit(x, label)
 
 
 @pytest.mark.slow
 def test_chain_learns_that_the_amount_follows_the_count():
     x, y = _table(4000, seed=1)
     pair = y[:, :2]
-    model = ASRRegressor(task="chain", head_kwargs={"columns": ["poisson", "hurdle"]}, random_state=0).fit(x[:3000], pair[:3000])
+    model = ASRRegressor(task="chain", head_kwargs={"columns": ["poisson", "hurdle"]}, **MICRO).fit(x[:3000], pair[:3000])
     draws = model.sample(x[3000:], n=200, seed=0)
     # An amount is zero exactly when there was no claim.
     agree = np.mean((draws[..., 0] == 0) == (draws[..., 1] == 0))
     assert agree > 0.97
-    independent = ASRRegressor(task="poisson", random_state=0).fit(x[:3000], pair[:3000, 0])
-    amount = ASRRegressor(task="hurdle", random_state=0).fit(x[:3000], pair[:3000, 1])
+    independent = ASRRegressor(task="poisson", **MICRO).fit(x[:3000], pair[:3000, 0])
+    amount = ASRRegressor(task="hurdle", **MICRO).fit(x[:3000], pair[:3000, 1])
     separate = independent.log_prob(x[3000:], pair[3000:, 0]) + amount.log_prob(x[3000:], pair[3000:, 1])
     assert model.log_prob(x[3000:], pair[3000:]).mean() > separate.mean() + 0.1
 
@@ -182,7 +183,7 @@ def test_chain_trains_on_unknown_classes_and_a_censored_last_column():
             observed.censored(np.minimum(time, limit), ~seen),
         ]
     )
-    model = ASRRegressor(task="chain", head_kwargs={"columns": ["categorical", "gaussian"]}, random_state=0).fit(x, label)
+    model = ASRRegressor(task="chain", head_kwargs={"columns": ["categorical", "gaussian"]}, **MICRO).fit(x, label)
     draws = model.sample(x, n=100, seed=1)
     # The share of each cause is learned from every row, censored ones included.
     assert abs(draws[..., 0].mean() - cause.mean()) < 0.05

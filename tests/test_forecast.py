@@ -25,6 +25,7 @@ from ashlar.forecast import (
     _mse,
     _pack_history,
 )
+from micro import MICRO
 
 
 def test_forecast_leaves_the_residual_default():
@@ -202,7 +203,7 @@ def test_flow_models_saved_before_the_shift_and_scale_still_load(tmp_path):
     rng = np.random.default_rng(0)
     x = rng.normal(size=(200, 3)).astype(np.float32)
     y = (x[:, 0] + rng.normal(size=200)).astype(np.float32)
-    model = ASRRegressor(task="flow", max_epochs=2, random_state=0).fit(x, y)
+    model = ASRRegressor(task="flow", max_epochs=2, **MICRO).fit(x, y)
     model.core_ = _bare_spline_flow_head(model.core_)
     assert model.core_.head.output.weight.shape[-1] == flow_parameter_count()
     series = np.sin(np.arange(260) / 5.0) + 0.1 * rng.normal(size=260)

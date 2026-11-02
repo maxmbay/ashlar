@@ -9,6 +9,7 @@ from scipy import stats
 from ashlar import ASRForecaster, ASRModel, ASRRegressor
 from ashlar.distributional import decode, initial_bias, log_density, output_width, point_values, sample_values
 from ashlar.errors import AshlarError
+from micro import MICRO
 
 
 def _raw(head, zero_inflated=False, log_mean=0.0, rows=3):
@@ -62,7 +63,7 @@ def _counts(n=1500, seed=0):
 )
 def test_estimator_fits_predicts_and_round_trips(task, kwargs, tmp_path):
     X, y = _counts()
-    model = ASRRegressor(task=task, head_kwargs=kwargs, max_epochs=6).fit(X, y)
+    model = ASRRegressor(task=task, head_kwargs=kwargs, max_epochs=6, **MICRO).fit(X, y)
     assert model.standardize_target == (task == "student_t")
     point = model.predict(X)
     if task != "student_t":  # a Student-t point is its location, below the mean of skewed counts
@@ -84,7 +85,7 @@ def test_negative_binomial_beats_poisson_on_overdispersed_counts():
     X, y = _counts(3000)
     scores = {}
     for task in ("poisson", "negative_binomial"):
-        model = ASRRegressor(task=task, max_epochs=10).fit(X[:2000], y[:2000])
+        model = ASRRegressor(task=task, max_epochs=10, **MICRO).fit(X[:2000], y[:2000])
         scores[task] = float(np.mean(model.log_prob(X[2000:], y[2000:])))
     assert scores["negative_binomial"] > scores["poisson"]
 
@@ -92,13 +93,13 @@ def test_negative_binomial_beats_poisson_on_overdispersed_counts():
 def test_count_heads_reject_what_they_cannot_model():
     X, y = _counts(200)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="poisson", max_epochs=1).fit(X, y + 0.5)
+        ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(X, y + 0.5)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="poisson", max_epochs=1).fit(X, -y - 1)
+        ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(X, -y - 1)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="poisson", standardize_target=True, max_epochs=1).fit(X, y)
+        ASRRegressor(task="poisson", standardize_target=True, max_epochs=1, **MICRO).fit(X, y)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="gaussian", head_kwargs={"zero_inflated": True}, max_epochs=1).fit(X, y)
+        ASRRegressor(task="gaussian", head_kwargs={"zero_inflated": True}, max_epochs=1, **MICRO).fit(X, y)
     with pytest.raises(AshlarError):
         ASRForecaster(head="poisson")
 
@@ -116,7 +117,7 @@ def test_forecaster_takes_the_student_t_head(tmp_path):
 @pytest.mark.slow
 def test_count_heads_calibrate_with_whole_number_intervals():
     X, y = _counts(3500)
-    model = ASRRegressor(task="negative_binomial", max_epochs=8).fit(X[:1500], y[:1500])
+    model = ASRRegressor(task="negative_binomial", max_epochs=8, **MICRO).fit(X[:1500], y[:1500])
     model.calibrate(X[1500:2500], y[1500:2500], n_samples=400)
     interval = model.predict_interval(X[2500:], 0.8, n_samples=400)
     assert np.all(interval == np.round(interval))

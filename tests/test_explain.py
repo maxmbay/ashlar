@@ -8,6 +8,7 @@ import pytest
 from ashlar import ASRRegressor
 from ashlar.errors import AshlarError
 from ashlar.explain import explain, target_function
+from micro import MICRO
 
 
 def _location_scale(n=3000, seed=0):
@@ -29,7 +30,7 @@ def _rows(X, n):
 
 def test_forward_dist_matches_predict_dist_and_has_input_gradients():
     X, y = _location_scale(n=800)
-    model = ASRRegressor(task="mixture", max_epochs=3, random_state=0).fit(X, y)
+    model = ASRRegressor(task="mixture", max_epochs=3, **MICRO).fit(X, y)
     rows = _rows(X, 6)
     batch = model.encode(rows)
     dist = model.forward_dist(batch.numeric_raw, batch.categorical_onehot, batch.category_index, batch.set_tokens, batch.set_mask)
@@ -51,7 +52,7 @@ def test_forward_dist_matches_predict_dist_and_has_input_gradients():
 
 def test_explain_shapes_and_completeness():
     X, y = _location_scale(n=800)
-    model = ASRRegressor(task="gaussian", max_epochs=3, random_state=0).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=3, **MICRO).fit(X, y)
     result = model.explain(_rows(X, 20), "quantile", level=0.9, steps=16)
     assert result.values.shape == (20, 4)
     assert result.feature_names == ["loc", "scale", "noise", "city"]
@@ -66,7 +67,7 @@ def test_explain_shapes_and_completeness():
 @pytest.mark.slow
 def test_missing_cells_get_zero_attribution():
     X, y = _location_scale(n=800)
-    model = ASRRegressor(task="gaussian", max_epochs=3, random_state=0).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=3, **MICRO).fit(X, y)
     rows = _rows(X, 10)
     rows["loc"] = rows["loc"].copy()
     rows["loc"][:5] = np.nan
@@ -83,10 +84,10 @@ def test_targets_and_errors():
     with pytest.raises(AshlarError):
         target_function("quantile", level=1.5)
     X, y = _location_scale(n=600)
-    point = ASRRegressor(task="regression", max_epochs=2).fit(X, y)
+    point = ASRRegressor(task="regression", max_epochs=2, **MICRO).fit(X, y)
     with pytest.raises(AshlarError):
         point.explain(_rows(X, 5))
-    joint = ASRRegressor(task="multivariate_gaussian", max_epochs=2).fit(X, np.stack([y, -y], axis=1))
+    joint = ASRRegressor(task="multivariate_gaussian", max_epochs=2, **MICRO).fit(X, np.stack([y, -y], axis=1))
     with pytest.raises(AshlarError, match="one number per row"):
         explain(joint, _rows(X, 5), "mean")
     projected = explain(joint, _rows(X, 5), lambda d: d.project(jnp.array([1.0, 1.0])).mean(), steps=2)
@@ -99,7 +100,7 @@ def test_cyclical_columns_fold_back():
     hour = rng.integers(0, 24, 800).astype(np.float32)
     X = {"hour": hour, "x": rng.normal(size=800).astype(np.float32)}
     y = np.sin(2 * np.pi * hour / 24) + 0.1 * rng.normal(size=800)
-    model = ASRRegressor(task="gaussian", max_epochs=3, cyclical={"hour": 24}).fit(X, y)
+    model = ASRRegressor(task="gaussian", max_epochs=3, cyclical={"hour": 24}, **MICRO).fit(X, y)
     result = model.explain(_rows(X, 8), "median", steps=4)
     assert result.feature_names == ["hour", "x"]
     assert result.values.shape == (8, 2)
@@ -108,7 +109,7 @@ def test_cyclical_columns_fold_back():
 @pytest.mark.slow
 def test_explain_separates_location_from_spread():
     X, y = _location_scale()
-    model = ASRRegressor(task="mixture", max_epochs=30, random_state=0).fit(X, y)
+    model = ASRRegressor(task="mixture", max_epochs=30, **MICRO).fit(X, y)
     rows = _rows(X, 300)
     median = model.explain(rows, "median").importance()
     width = model.explain(rows, "interval_width", coverage=0.8).importance()
