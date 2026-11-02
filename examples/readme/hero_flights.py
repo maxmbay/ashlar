@@ -600,8 +600,12 @@ def coverage(out: Path, models: Path) -> None:
     fmt = _clock_format(x_train[dep].to_numpy(np.float64))
     hour = (np.floor(_minutes(xd[dep].to_numpy(np.float64), fmt) / 60.0).astype(int)) % 24
 
+    saved_fits = (models / "ashlar-mixture-seed0" / "metadata.json", models / "catboost-uncertainty-seed0.cbm")
+    missing = [str(path) for path in saved_fits if not path.exists()]
+    if missing:
+        raise SystemExit(f"run compute first: the figure's fits are missing ({', '.join(missing)})")
     ashlar, _ = fit_ashlar(x_train, y_train, models / "ashlar-mixture-seed0")
-    _, cat_predict = bench.fit_catboost_uncertainty(x_train, y_train, SEED, path=models / "catboost-uncertainty-seed0.cbm")
+    _, cat_predict = bench.fit_catboost_uncertainty(x_train, y_train, SEED, path=saved_fits[1])
     path = bench.PREDICTIONS / f"{TABLE}-{BASELINE}-seed{SEED}.npz"
     with np.load(path, allow_pickle=False) as data:
         saved = data["rows"]
