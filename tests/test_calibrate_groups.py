@@ -17,6 +17,7 @@ from ashlar.calibrate import (
     region_threshold,
 )
 from ashlar.errors import AshlarError, ShapeError
+from micro import MICRO
 
 
 def _three_spreads(n, seed):
@@ -72,7 +73,7 @@ def test_a_calibration_per_group_holds_within_each_group():
     x, y, group = _three_spreads(1500, 0)
     x_cal, y_cal, group_cal = _three_spreads(900, 1)
     x_new, y_new, group_new = _three_spreads(3000, 2)
-    model = ASRRegressor(task="gaussian", max_epochs=5, random_state=0).fit(x, y)
+    model = ASRRegressor(task="gaussian", max_epochs=5, **MICRO).fit(x, y)
     model.calibrate(x_cal, y_cal)
     pooled = _within(model.predict_interval(x_new, 0.8), y_new, group_new)
     # One calibration of every row holds 80% on average: far more in the quiet group, far less in the loud one.
@@ -104,7 +105,7 @@ def test_groups_from_a_column_fall_back_to_every_row_and_save():
     group_cal = np.where(np.arange(len(group_cal)) < 30, 3, group_cal)
     group_new = np.where(np.arange(len(group_new)) < 30, 3, group_new)
     frame = lambda x, g: {"a": x[:, 0], "b": x[:, 1], "c": x[:, 2], "site": g.astype(np.float64)}
-    model = ASRRegressor(task="gaussian", max_epochs=5, random_state=0).fit(frame(x, group), y)
+    model = ASRRegressor(task="gaussian", max_epochs=5, **MICRO).fit(frame(x, group), y)
     model.calibrate(frame(x_cal, group_cal), y_cal, groups="site")
     assert sorted(model.calibration_["groups"]) == ["0", "1", "2"]
     assert model.calibration_["by"] == {"column": "site"} and model.calibration_["min_rows"] == MIN_GROUP_ROWS
@@ -137,7 +138,7 @@ def test_member_bins_calibrate_each_level_of_disagreement():
     x_cal, y_cal, _ = _three_spreads(1000, 1)
     x_new, y_new, _ = _three_spreads(2000, 2)
     model = ASRRegressor(
-        task="gaussian", backbone="tabm", backbone_kwargs={"n_blocks": 1, "d_block": 32, "k": 8}, max_epochs=5, random_state=0
+        task="gaussian", backbone="tabm", backbone_kwargs={"n_blocks": 1, "d_block": 16, "k": 8}, max_epochs=5, random_state=0
     ).fit(x, y)
     model.calibrate(x_cal, y_cal, localize="members")
     assert len(model.calibration_["by"]["members"]) == 4 and sorted(model.calibration_["groups"]) == ["0", "1", "2", "3", "4"]
@@ -155,18 +156,18 @@ def test_a_joint_region_covers_after_calibration(task, kwargs):
     x, y = _shared_shock(2000, 0)
     x_cal, y_cal = _shared_shock(1500, 1)
     x_new, y_new = _shared_shock(3000, 2)
-    model = ASRRegressor(task=task, max_epochs=15, random_state=0, **kwargs).fit(x, y)
+    model = ASRRegressor(task=task, max_epochs=15, learning_rate=1e-2, **kwargs, **MICRO).fit(x, y)
     density = np.asarray(model.log_prob(x_new, y_new))
-    raw = model.predict_region(x_new, 0.8, n_samples=500)
-    model.calibrate(x_cal, y_cal, n_samples=500)
+    raw = model.predict_region(x_new, 0.8, n_samples=200)
+    model.calibrate(x_cal, y_cal, n_samples=200)
     assert len(model.calibration_["region"]["values"]) == 1500
-    calibrated = model.predict_region(x_new, 0.8, n_samples=500)
+    calibrated = model.predict_region(x_new, 0.8, n_samples=200)
     assert abs(np.mean(density >= calibrated) - 0.8) < 0.03
-    assert np.allclose(model.predict_region(x_new, 0.8, n_samples=500, calibrated=False), raw)
+    assert np.allclose(model.predict_region(x_new, 0.8, n_samples=200, calibrated=False), raw)
     # A calibration by group calibrates each group's region and each group's total.
     group = np.arange(len(y_cal)) % 2
-    model.calibrate(x_cal, y_cal, n_samples=500, groups=group, min_group_rows=200)
-    assert model.predict_region(x_new[:20], 0.8, n_samples=500, groups=np.arange(20) % 2).shape == (20,)
+    model.calibrate(x_cal, y_cal, n_samples=200, groups=group, min_group_rows=200)
+    assert model.predict_region(x_new[:20], 0.8, n_samples=200, groups=np.arange(20) % 2).shape == (20,)
     assert model.predict_interval(x_new[:20], 0.8, target="sum", groups=np.arange(20) % 2).shape == (20, 2)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="gaussian", max_epochs=1).fit(x, y[:, 0]).predict_region(x_new)
+        ASRRegressor(task="gaussian", max_epochs=1, **MICRO).fit(x, y[:, 0]).predict_region(x_new)

@@ -19,6 +19,7 @@ from ashlar.distributions import (
     joint_mixture_distribution,
 )
 from ashlar.errors import AshlarError, ShapeError
+from micro import MICRO
 
 
 def peak(y):
@@ -122,7 +123,7 @@ def test_targets_are_named_and_checked():
 
 def test_a_joint_model_calibrates_its_sum_and_saves_it(tmp_path):
     x, y = _shared_shock(400, 0)
-    model = ASRRegressor(task="multivariate_gaussian", max_epochs=2, random_state=0).fit(x[:300], y[:300])
+    model = ASRRegressor(task="multivariate_gaussian", max_epochs=2, **MICRO).fit(x[:300], y[:300])
     with pytest.raises(AshlarError):
         model.predict_interval(x[300:], target="sum", calibrated=True)
     model.calibrate(x[300:], y[300:])
@@ -140,7 +141,7 @@ def test_a_joint_model_calibrates_its_sum_and_saves_it(tmp_path):
 @pytest.mark.slow
 def test_a_joint_model_reads_every_target_and_refuses_what_it_was_not_calibrated_on(tmp_path):
     x, y = _shared_shock(400, 0)
-    model = ASRRegressor(task="multivariate_gaussian", max_epochs=2, random_state=0).fit(x[:300], y[:300])
+    model = ASRRegressor(task="multivariate_gaussian", max_epochs=2, **MICRO).fit(x[:300], y[:300])
     model.calibrate(x[300:], y[300:], target=[peak, [1.0, -1.0, 0.0]])
     assert set(model.calibration_["targets"]) == {SUM, "peak", weights_name([1, -1, 0])}
     assert len(model.calibration_["columns"]) == 3
@@ -162,7 +163,7 @@ def test_a_joint_model_reads_every_target_and_refuses_what_it_was_not_calibrated
     with pytest.raises(AshlarError):
         model.calibrate(x[300:], y[300:], target=lambda values: values.sum(axis=-1))
     with pytest.raises(AshlarError):
-        ASRRegressor(task="gaussian", max_epochs=1).fit(x, y[:, 0]).calibrate(x, y[:, 0], target="sum")
+        ASRRegressor(task="gaussian", max_epochs=1, **MICRO).fit(x, y[:, 0]).calibrate(x, y[:, 0], target="sum")
     with pytest.raises(ShapeError):
         model.calibrate(x[300:], y[300:, :2])
 
@@ -192,15 +193,15 @@ def test_calibrated_coverage_of_the_sum_a_function_and_each_column(task, kwargs)
     x, y = _shared_shock(2000, 0)
     x_cal, y_cal = _shared_shock(2000, 1)
     x_new, y_new = _shared_shock(3000, 2)
-    model = ASRRegressor(task=task, max_epochs=15, random_state=0, **kwargs).fit(x, y)
-    model.calibrate(x_cal, y_cal, target=peak, n_samples=500)
+    model = ASRRegressor(task=task, max_epochs=15, learning_rate=1e-2, **kwargs, **MICRO).fit(x, y)
+    model.calibrate(x_cal, y_cal, target=peak, n_samples=200)
     for target, values in ((None, y_new), ("sum", y_new.sum(axis=1)), (peak, peak(y_new))):
-        interval = model.predict_interval(x_new, 0.8, target=target, n_samples=500)
+        interval = model.predict_interval(x_new, 0.8, target=target, n_samples=200)
         assert np.all(np.abs(_covered(interval, values) - 0.8) < 0.03), (target, _covered(interval, values))
     if task == "multivariate_gaussian":
         raw = model.predict_interval(x_new, 0.8, target="sum", calibrated=False)
         assert _covered(raw, y_new.sum(axis=1)) < 0.74
     # The calibrated chance the total exceeds its 80th percentile matches how often it does.
     capacity = np.quantile(y_new.sum(axis=1), 0.8)
-    probability = model.predict_exceedance(x_new, capacity, target="sum", n_samples=500)
+    probability = model.predict_exceedance(x_new, capacity, target="sum", n_samples=200)
     assert abs(probability.mean() - 0.2) < 0.025
