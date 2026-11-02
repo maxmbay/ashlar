@@ -1,0 +1,2 @@
+at 2dd6705 (claude/project-thread-j36znx)
+{"table": "taxi_tip", "model": "lightgbmlss_mixture", "variant": "", "seed": 0, "seconds": 1062.7, "trees": 2349, "rmse": 1.9025892460153075, "mae": 0.6011412381793554, "crps": 0.4378042295838903, "nll": -1.4489130191771518, "pinball": 0.19841357437671706, "coverage80": 0.74714, "width80": 1.3719308619972028, "crps_gumbel_weights": 0.4611760598541594, "nll_gumbel_weights": -1.3826319724414882}
