@@ -38,9 +38,31 @@ Scores on the test policies (20% of them, three random splits):
 The issue's stop rule (#38): stop if the chain gains less than about 0.01
 nats per policy and its total is no better calibrated.
 
+The ``gbm`` stage adds what a gradient-boosting user would build, on the
+same splits and scored the same way:
+
+- ``LightGBM Poisson × gamma``: the actuary's model with LightGBM, a
+  Poisson objective on ``N`` and a gamma objective on ``S`` of the policies
+  with claims, composed by hand. The cost is a gamma with the fitted mean and
+  one shape estimated by maximum likelihood on the validation claims; with
+  ``N`` claims the average is a gamma of shape ``N`` times that (the usual
+  claim-count weights), or of the one shape, whichever the validation claims
+  prefer. Joint NLL and draws are exact under that composition.
+- ``LightGBM Tweedie``: one model of the total ``T`` with the Tweedie
+  objective, the usual gradient-boosted pure premium. It gives a mean; its
+  Tweedie distribution, a compound Poisson-gamma with the dispersion fitted
+  on the validation rows, gives the rest. It models ``T`` alone, so it has
+  no joint NLL.
+
+Each LightGBM model trains at learning rate 0.05 with up to 4,000 trees,
+early-stopped after 100 rounds on a random 20% of the training split, and
+takes the best of a small grid of leaf counts and leaf sizes (and Tweedie
+powers) by validation log-likelihood.
+
 Run with::
 
     JAX_PLATFORMS=cpu python examples/benchmark_chain.py run      # downloads about 10 MB
+    JAX_PLATFORMS=cpu python examples/benchmark_chain.py gbm      # minutes, adds the LightGBM rows
     JAX_PLATFORMS=cpu python examples/benchmark_chain.py report
 
 ``seeds=0`` runs fewer splits and ``rows=100000`` a subsample.
@@ -69,6 +91,11 @@ SEEDS = (0, 1, 2)
 DRAWS = 200
 DRAW_ROWS = 50_000
 MODELS = ("chain", "independent heads", "frequency and severity")
+GBM_MODELS = ("LightGBM Poisson × gamma", "LightGBM Tweedie")
+GBM_THREADS = int(os.environ.get("GBM_THREADS", "4"))
+# (leaves, smallest leaf) tried for every LightGBM model; the Tweedie also tries each power.
+GBM_GRID = ((7, 1000), (15, 100), (31, 20), (63, 400))
+TWEEDIE_POWERS = (1.3, 1.5, 1.7)
 THRESHOLDS = (1000.0, 5000.0)
 NUMERIC = ["DrivAge", "BonusMalus", "VehPower", "VehAge", "LogDensity", "Exposure"]
 CATEGORICAL = ["VehBrand", "VehGas", "Area", "Region"]
@@ -223,6 +250,261 @@ def _scores(name: str, model, test: pd.DataFrame, seed: int) -> dict:
     return scores
 
 
+# ---------------------------------------------------------------- LightGBM, what a GBM user would build
+
+
+def gbm_frame(frame: pd.DataFrame, categories: dict) -> pd.DataFrame:
+    """LightGBM's view of the features: the numbers as they are, the categorical columns as pandas categories."""
+    x = frame[NUMERIC + CATEGORICAL].reset_index(drop=True).copy()
+    for name in CATEGORICAL:
+        x[name] = pd.Categorical(x[name], categories=categories[name])
+    return x
+
+
+def _lightgbm(objective, fit, val, seed, leaves, smallest, weights=(None, None), **extra):
+    """Early-stopped LightGBM at learning rate 0.05, up to 4,000 trees, 100 rounds of patience."""
+    import warnings
+
+    import lightgbm
+
+    warnings.filterwarnings("ignore", message=".*eval_set.*deprecated", category=Warning)
+
+    model = lightgbm.LGBMRegressor(
+        objective=objective, n_estimators=4000, learning_rate=0.05, num_leaves=leaves, min_child_samples=smallest,
+        random_state=seed, n_jobs=GBM_THREADS, verbose=-1, **extra,
+    )
+    model.fit(
+        fit[0], fit[1], sample_weight=weights[0], eval_set=[val],
+        eval_sample_weight=None if weights[1] is None else [weights[1]],
+        callbacks=[lightgbm.early_stopping(100, verbose=False)],
+    )
+    return model
+
+
+def poisson_log_pmf(n, rate):
+    from scipy.special import gammaln
+
+    return n * np.log(rate) - rate - gammaln(n + 1.0)
+
+
+def gamma_log_pdf(s, mean, shape):
+    from scipy.special import gammaln
+
+    return shape * np.log(shape / mean) + (shape - 1.0) * np.log(s) - shape * s / mean - gammaln(shape)
+
+
+def _best_scalar(loss) -> float:
+    from scipy.optimize import minimize_scalar
+
+    return float(np.exp(minimize_scalar(loss, bounds=(-12.0, 12.0), method="bounded").x))
+
+
+def tweedie_parts(mean, power, dispersion):
+    """A Tweedie of mean ``mean`` is a Poisson number of gammas: ``(rate, shape, scale)``."""
+    rate = np.power(mean, 2.0 - power) / (dispersion * (2.0 - power))
+    shape = (2.0 - power) / (power - 1.0)
+    scale = dispersion * (power - 1.0) * np.power(mean, power - 1.0)
+    return rate, shape, scale
+
+
+def tweedie_log_pdf(t, mean, power, dispersion, terms: int = 60):
+    """Log probability of ``T = 0``, and log density per euro of ``T > 0``, under the compound Poisson-gamma."""
+    from scipy.special import gammaln, logsumexp
+
+    rate, shape, scale = tweedie_parts(np.asarray(mean, dtype=float), power, dispersion)
+    out = -rate.copy()
+    positive = np.asarray(t) > 0
+    if positive.any():
+        n = np.arange(1, terms + 1, dtype=float)[:, None]
+        value, r, theta = np.asarray(t)[positive], rate[positive], scale[positive]
+        log_terms = (
+            poisson_log_pmf(n, r) + (n * shape - 1.0) * np.log(value) - value / theta
+            - n * shape * np.log(theta) - gammaln(n * shape)
+        )
+        out[positive] = logsumexp(log_terms, axis=0)
+    return out
+
+
+class GBMActuary:
+    """LightGBM Poisson on the claim count and LightGBM gamma on the cost per claim, composed by hand."""
+
+    def __init__(self, train: pd.DataFrame, seed: int):
+        self.categories = {name: sorted(train[name].unique()) for name in CATEGORICAL}
+        x = gbm_frame(train, self.categories)
+        n, s = train["N"].to_numpy(), train["S"].to_numpy()
+        inner = np.random.default_rng(seed).random(len(train)) < 0.2
+        self.choices = {}
+        best = None
+        for leaves, smallest in GBM_GRID:
+            model = _lightgbm("poisson", (x[~inner], n[~inner]), (x[inner], n[inner]), seed, leaves, smallest)
+            score = float(np.mean(poisson_log_pmf(n[inner], model.predict(x[inner]))))
+            if best is None or score > best[0]:
+                best = (score, model, (leaves, smallest))
+        self.count, self.choices["count"] = best[1], best[2]
+        claimed = n > 0
+        fit, val = claimed & ~inner, claimed & inner
+        best = None
+        for weighted in (True, False):
+            w = n if weighted else np.ones_like(n)
+            for leaves, smallest in GBM_GRID:
+                model = _lightgbm(
+                    "gamma", (x[fit], s[fit]), (x[val], s[val]), seed, leaves, smallest, weights=(w[fit], w[val])
+                )
+                mean = model.predict(x[val])
+                shape = _best_scalar(lambda log_k: -np.sum(gamma_log_pdf(s[val], mean, w[val] * np.exp(log_k))))
+                score = float(np.mean(gamma_log_pdf(s[val], mean, w[val] * shape)))
+                if best is None or score > best[0]:
+                    best = (score, model, shape, weighted, (leaves, smallest))
+        _score, self.cost, self.shape, self.weighted, self.choices["cost"] = best
+        self.choices["cost weighted by the count"] = self.weighted
+        self.choices["gamma shape"] = self.shape
+
+    def rate(self, frame):
+        return self.count.predict(gbm_frame(frame, self.categories))
+
+    def cost_mean(self, frame):
+        return self.cost.predict(gbm_frame(frame, self.categories))
+
+    def cost_shape(self, n):
+        """The gamma shape of the average cost of ``n`` claims."""
+        return self.shape * (np.maximum(n, 1.0) if self.weighted else np.ones_like(n, dtype=float))
+
+    def log_likelihood(self, frame, n, s):
+        log_n = poisson_log_pmf(n, self.rate(frame))
+        log_s = np.zeros_like(log_n)
+        claimed = n > 0
+        if claimed.any():
+            mean = self.cost_mean(frame)[claimed]
+            log_s[claimed] = gamma_log_pdf(s[claimed], mean, self.cost_shape(n[claimed]))
+        return log_n, log_s
+
+    def draws(self, frame, draws: int, rng) -> np.ndarray:
+        rate, mean = self.rate(frame), self.cost_mean(frame)
+        n = rng.poisson(rate[None, :], size=(draws, len(rate))).astype(float)
+        shape = self.cost_shape(n)
+        s = rng.gamma(shape, mean[None, :] / shape)
+        return np.where(n > 0, n * s, 0.0)
+
+    def exceedance(self, frame, thresholds, counts: int = 8) -> np.ndarray:
+        """``(rows, thresholds)``: exact ``P(T > t)``, summed over 1 to ``counts`` claims."""
+        from scipy.special import gammaincc
+        from scipy.stats import poisson
+
+        rate, mean = self.rate(frame), self.cost_mean(frame)
+        out = np.zeros((len(rate), len(thresholds)))
+        for k in range(1, counts + 1):
+            shape = float(self.cost_shape(np.array([k]))[0])
+            mass = poisson.pmf(k, rate)[:, None]
+            out += mass * gammaincc(shape, np.asarray(thresholds)[None, :] / k / (mean[:, None] / shape))
+        return out
+
+
+class GBMTweedie:
+    """LightGBM Tweedie on the total ``T``, and its compound Poisson-gamma with the dispersion fitted on validation rows."""
+
+    def __init__(self, train: pd.DataFrame, seed: int):
+        self.categories = {name: sorted(train[name].unique()) for name in CATEGORICAL}
+        x = gbm_frame(train, self.categories)
+        t = (train["N"] * train["S"]).to_numpy()
+        inner = np.random.default_rng(seed).random(len(train)) < 0.2
+        best = None
+        for power in TWEEDIE_POWERS:
+            for leaves, smallest in GBM_GRID:
+                model = _lightgbm(
+                    "tweedie", (x[~inner], t[~inner]), (x[inner], t[inner]), seed, leaves, smallest,
+                    tweedie_variance_power=power,
+                )
+                mean = model.predict(x[inner])
+                dispersion = _best_scalar(lambda log_phi: -np.sum(tweedie_log_pdf(t[inner], mean, power, np.exp(log_phi))))
+                score = float(np.mean(tweedie_log_pdf(t[inner], mean, power, dispersion)))
+                if best is None or score > best[0]:
+                    best = (score, model, power, dispersion, (leaves, smallest))
+        _score, self.model, self.power, self.dispersion, grid = best
+        self.choices = {"total": grid, "power": self.power, "dispersion": self.dispersion}
+
+    def mean(self, frame):
+        return self.model.predict(gbm_frame(frame, self.categories))
+
+    def draws(self, frame, draws: int, rng) -> np.ndarray:
+        rate, shape, scale = tweedie_parts(self.mean(frame), self.power, self.dispersion)
+        n = rng.poisson(rate[None, :], size=(draws, len(rate))).astype(float)
+        total = rng.gamma(np.maximum(n, 1.0) * shape, np.broadcast_to(scale[None, :], n.shape))
+        return np.where(n > 0, total, 0.0)
+
+    def exceedance(self, frame, thresholds, counts: int = 60) -> np.ndarray:
+        """``(rows, thresholds)``: exact ``P(T > t)``, summed over the claim counts that carry any mass."""
+        from scipy.special import gammaincc
+        from scipy.stats import poisson
+
+        rate, shape, scale = tweedie_parts(self.mean(frame), self.power, self.dispersion)
+        counts = int(min(counts, max(1, poisson.isf(1e-12, rate.max()) + 1)))
+        out = np.zeros((len(rate), len(thresholds)))
+        for k in range(1, counts + 1):
+            out += poisson.pmf(k, rate)[:, None] * gammaincc(k * shape, np.asarray(thresholds)[None, :] / scale[:, None])
+        return out
+
+
+def _gbm_scores(name: str, model, test: pd.DataFrame, seed: int) -> dict:
+    """The scores of ``_scores``, on the same test policies and draw rows."""
+    n, s = test["N"].to_numpy(), test["S"].to_numpy()
+    rng = np.random.default_rng(seed)
+    rows = rng.choice(len(test), size=min(DRAW_ROWS, len(test)), replace=False)
+    picked = test.iloc[rows].reset_index(drop=True)
+    total = (n * s)[rows]
+    draws = model.draws(picked, DRAWS, np.random.default_rng([seed, 1]))
+    if isinstance(model, GBMActuary):
+        log_n, log_s = model.log_likelihood(test, n, s)
+        expected = model.rate(picked) * model.cost_mean(picked)
+    else:
+        log_n = log_s = None
+        expected = model.mean(picked)
+    scores = {
+        "nll": None if log_n is None else float(-np.mean(log_n + log_s)),
+        "nll_count": None if log_n is None else float(-np.mean(log_n)),
+        "nll_cost": None if log_s is None else float(-np.mean(log_s)),
+        "claim_predicted": float(np.mean(draws > 0)),
+        "claim_observed": float(np.mean(total > 0)),
+        "mean_ratio": float(np.mean(draws) / np.mean(total)),
+        "mean_ratio_exact": float(np.mean(expected) / np.mean(total)),
+        "crps": _crps(draws, total),
+        "pit_distance": 100.0 * _pit_distance(draws, total, seed),
+        "choices": model.choices,
+    }
+    for threshold in THRESHOLDS:
+        scores[f"above_{int(threshold)}_predicted"] = float(np.mean(draws > threshold))
+        scores[f"above_{int(threshold)}_observed"] = float(np.mean(total > threshold))
+    return scores
+
+
+def split(frame: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The benchmark's 80/20 split for ``seed``."""
+    order = np.random.default_rng(seed).permutation(len(frame))
+    cut = int(0.8 * len(frame))
+    return frame.iloc[order[:cut]], frame.iloc[order[cut:]]
+
+
+def gbm() -> None:
+    """Fit and score the LightGBM models on the benchmark's splits; adds them to the results file."""
+    arguments = _arguments()
+    seeds = SEEDS if "seeds" not in arguments else tuple(int(seed) for seed in arguments["seeds"].split(","))
+    frame = policies()
+    if "rows" in arguments:
+        frame = frame.sample(n=int(arguments["rows"]), random_state=0).reset_index(drop=True)
+    for seed in seeds:
+        train, test = split(frame, seed)
+        for name, build in zip(GBM_MODELS, (GBMActuary, GBMTweedie)):
+            start = time.process_time()
+            model = build(train, seed)
+            seconds = time.process_time() - start
+            scores = _gbm_scores(name, model, test, seed)
+            scores["cpu"] = seconds
+            print(seed, name, json.dumps(scores), flush=True)
+            results = json.loads(RESULTS.read_text()) if RESULTS.exists() else {}
+            results.setdefault(str(seed), {})[name] = scores
+            RESULTS.parent.mkdir(parents=True, exist_ok=True)
+            RESULTS.write_text(json.dumps(results, indent=1))
+
+
 def run() -> None:
     arguments = _arguments()
     seeds = SEEDS if "seeds" not in arguments else tuple(int(seed) for seed in arguments["seeds"].split(","))
@@ -230,19 +512,16 @@ def run() -> None:
     if "rows" in arguments:
         frame = frame.sample(n=int(arguments["rows"]), random_state=0).reset_index(drop=True)
     print(f"{len(frame):,} policies, {np.mean(frame['N'] > 0):.2%} with a claim", flush=True)
-    results = json.loads(RESULTS.read_text()) if RESULTS.exists() else {}
     for seed in seeds:
-        rng = np.random.default_rng(seed)
-        order = rng.permutation(len(frame))
-        cut = int(0.8 * len(frame))
-        train, test = frame.iloc[order[:cut]], frame.iloc[order[cut:]]
+        train, test = split(frame, seed)
         models, seconds = _fit_models(train, seed)
-        split = {}
+        scores = {}
         for name in MODELS:
-            split[name] = _scores(name, models[name], test, seed)
-            split[name]["cpu"] = seconds[name]
-            print(seed, name, json.dumps(split[name]), flush=True)
-        results[str(seed)] = split
+            scores[name] = _scores(name, models[name], test, seed)
+            scores[name]["cpu"] = seconds[name]
+            print(seed, name, json.dumps(scores[name]), flush=True)
+        results = json.loads(RESULTS.read_text()) if RESULTS.exists() else {}
+        results.setdefault(str(seed), {}).update(scores)
         RESULTS.parent.mkdir(parents=True, exist_ok=True)
         RESULTS.write_text(json.dumps(results, indent=1))
 
@@ -265,8 +544,10 @@ def report() -> None:
         "P(T > 1,000) | P(T > 5,000) | Mean T / observed | CRPS of T ↓ | PIT distance × 100 ↓ | CPU seconds |"
     )
     print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-    for name in MODELS:
-        rows = [split[name] for split in splits]
+    for name in MODELS + GBM_MODELS:
+        rows = [split[name] for split in splits if name in split]
+        if not rows:
+            continue
         print(
             f"| {name} | {_cell(rows, 'nll', '{:.4f}')} | {_cell(rows, 'nll_count', '{:.4f}')} | "
             f"{_cell(rows, 'nll_cost', '{:.4f}')} | {_cell(rows, 'claim_predicted', '{:.2f}', 100.0)}% | "
@@ -274,15 +555,20 @@ def report() -> None:
             f"{_cell(rows, 'mean_ratio', '{:.3f}')} | {_cell(rows, 'crps', '{:.1f}')} | "
             f"{_cell(rows, 'pit_distance', '{:.2f}')} | {np.mean([row['cpu'] for row in rows]):.0f} |"
         )
-    observed = splits[0]["chain"]
+    observed = next(iter(splits[0].values()))
     print(
         f"\nObserved: P(T > 0) {100 * observed['claim_observed']:.2f}%, P(T > 1,000) "
         f"{100 * observed['above_1000_observed']:.2f}%, P(T > 5,000) {100 * observed['above_5000_observed']:.2f}% "
         "(split 0)."
     )
+    for name in GBM_MODELS:
+        for seed, scores in results.items():
+            if name in scores:
+                print(f"{name}, split {seed}: exact mean T / observed {scores[name]['mean_ratio_exact']:.3f}; "
+                      f"choices {scores[name]['choices']}")
 
 
-STAGES = {"run": run, "report": report}
+STAGES = {"run": run, "gbm": gbm, "report": report}
 
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "report"
