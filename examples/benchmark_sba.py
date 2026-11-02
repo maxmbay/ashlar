@@ -255,10 +255,11 @@ def scores(pred, true):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument("--rows", type=int, default=100_000)
+    parser.add_argument("--rows", type=int, default=0, help="training loans; 0 uses every loan not in the test set")
     parser.add_argument("--test", type=int, default=50_000)
     parser.add_argument("--first-fy", type=int, default=2010)
     parser.add_argument("--last-fy", type=int, default=2015)
+    parser.add_argument("--test-first-fy", type=int, default=2010)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--models", default="finished,running_as_paid,hazard,aft,ashlar,ashlar_pooled")
@@ -268,10 +269,17 @@ def main():
 
     frame = load(args.data, args.first_fy, args.last_fy)
     rng = np.random.default_rng(args.seed)
-    order = rng.permutation(len(frame))
-    train = frame.iloc[order[: args.rows]].reset_index(drop=True)
-    rest = frame.iloc[order[args.rows :]]
-    test = rest[~rest["ended_by_snapshot"]].iloc[: args.test].reset_index(drop=True)
+    # Test loans first: running at the snapshot and approved from --test-first-fy on,
+    # so the test set stays the same as the training years widen. Training takes
+    # every other loan (or --rows of them when --rows > 0).
+    pool = np.flatnonzero(~frame["ended_by_snapshot"].to_numpy() & (frame["ApprovalFY"].to_numpy() >= args.test_first_fy))
+    test_index = rng.permutation(pool)[: args.test]
+    rest = np.setdiff1d(np.arange(len(frame)), test_index)
+    rest = rng.permutation(rest)
+    if args.rows > 0:
+        rest = rest[: args.rows]
+    train = frame.iloc[rest].reset_index(drop=True)
+    test = frame.iloc[test_index].reset_index(drop=True)
     X_train, X_test = features(train), features(test)
     t0 = test["snapshot_months"].to_numpy()
     true = truth(test)
