@@ -260,6 +260,7 @@ def main():
     parser.add_argument("--first-fy", type=int, default=2010)
     parser.add_argument("--last-fy", type=int, default=2015)
     parser.add_argument("--test-first-fy", type=int, default=2010)
+    parser.add_argument("--snapshot", default="2015-09-30", help="date the books are frozen; pair it with --last-fy")
     parser.add_argument("--folds", type=int, default=0, help="split the running loans into this many test folds (overrides --test)")
     parser.add_argument("--fold", type=int, default=0, help="which fold is the test set; --seed fixes the split")
     parser.add_argument("--epochs", type=int, default=200)
@@ -268,6 +269,10 @@ def main():
     parser.add_argument("--out", type=Path, default=Path("sba-pilot.json"))
     args = parser.parse_args()
     wanted = set(args.models.split(","))
+    global SNAPSHOT
+    SNAPSHOT = pd.Timestamp(args.snapshot)
+    if SNAPSHOT + pd.DateOffset(years=max(HORIZONS)) > AS_OF:
+        raise SystemExit(f"--snapshot {args.snapshot} leaves under {max(HORIZONS)} years before the data ends ({AS_OF.date()})")
 
     frame = load(args.data, args.first_fy, args.last_fy)
     rng = np.random.default_rng(args.seed)
