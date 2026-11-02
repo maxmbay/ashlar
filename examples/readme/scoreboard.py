@@ -198,7 +198,7 @@ def draw() -> None:
     single = any(len(item["seeds"]) == 1 for item in every)  # a dot drawn as a tie by TIE
     fig = k.card(
         "Ashlar compared with the best tree-based model on eight tables",
-        "Eight OpenML tables of half a million to two million rows, default settings for every model, "
+        "Eight OpenML tables of half a million to two million rows, no tuning for any model, "
         f"{splits_text(every)}. Each dot shows how Ashlar's score differs from the best tree-based model's "
         "on that table; left of zero means Ashlar is better.",
         height=9.3,
