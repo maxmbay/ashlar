@@ -19,6 +19,8 @@ python examples/benchmark_uncertainty.py --stage report
 - [Point accuracy on small tables](#point-accuracy)
 - [Distributions on smaller tables](#distributions-on-smaller-tables)
 - [Learned embeddings](#learned-embeddings)
+- [Entity effects](#entity-effects)
+- [Additive models against R's gamlss](#additive-models-against-rs-gamlss)
 - [Forecast heads](#forecast-heads)
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
@@ -350,6 +352,93 @@ The `flow` rows here and under [Forecast heads](#forecast-heads) were rerun on t
 | Ashlar, one-hot, longer | 0.580 ± 0.017 | 14 |
 | LightGBM, early-stopped | 0.520 ± 0.003 | 0.4 |
 | XGBoost, early-stopped | 0.580 ± 0.002 | 1.0 |
+
+## Entity effects
+
+From [`examples/benchmark_effects.py`](../examples/benchmark_effects.py), the protocol of [#41](https://github.com/maxmbay/ashlar/issues/41). Every store is an entity. In each of three random splits, a fifth of the stores are held out whole, and each gives 5 rows of context and 30 rows to score. Every other store trains on a log-uniform 1 to 300 of its rows and scores 30 others, so its test rows fall in a bucket by how many rows it trained on. The score is the CRPS of log sales, lower is better: from 400 draws for Ashlar, and in closed form for the normal predictions of GPBoost and the mixed model. Coverage is the share of rows inside the raw 80% interval. The tables give means over the three splits. The gaps discussed below are several times the spread between splits.
+
+The methods, all with a normal head on log sales:
+
+- **embedding**: the store as an ordinary learned embedding, Ashlar's default for a categorical column.
+- **dropped**: no store column.
+- **pooled**: `random_effects={"store": "intercept"}`.
+- **pooled + embedding**: `random_effects={"store": ["intercept", "embedding"]}`.
+- **nested**: the same, with the store nested in its type (Rossmann) or city (FreshRetailNet), which has an offset and embedding of its own.
+- **in context**: no store column. Each row instead carries up to 32 other rows of its store, through the existing set encoder, as two set features: their binned outcomes, and their binned outcomes by promotion (Rossmann) or activity (FreshRetailNet). The set's size is a feature too. A training row's set leaves the row out and has a random size. A seen store's test row reads the store's training rows. An unseen store's row reads its 5 context rows, or nothing.
+- **GPBoost**: tree boosting with a grouped random intercept, early-stopped.
+- **mixed model**: a statsmodels linear mixed model with a random intercept, linear in every feature but the store and product.
+
+"Unseen, 5 rows" reads each unseen store's 5 context rows. The pooled models use `with_context`, GPBoost and the mixed model the conjugate update with their fitted variances, and the in-context model the rows as its set. `tau` is the fitted spread of the store offsets.
+
+### Rossmann, log daily sales, 1,115 stores, 844,338 open days
+
+| Method | 1-5 rows | 6-20 | 21-100 | 101-300 | Unseen | Unseen, 5 rows | Coverage, unseen | Coverage, 1-5 | `tau` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| embedding | 0.1198 | 0.0815 | 0.0646 | 0.0620 | 0.2213 | | 35.7% | 46.9% | |
+| dropped | 0.2318 | 0.1913 | 0.1298 | 0.0846 | 0.2589 | | 42.0% | 47.4% | |
+| pooled | 0.1013 | 0.0870 | 0.0820 | 0.0740 | 0.1905 | 0.0926 | 78.0% | 75.7% | 0.285 |
+| pooled + embedding | **0.0963** | **0.0751** | **0.0614** | **0.0567** | **0.1890** | **0.0906** | 75.4% | 72.4% | 0.274 |
+| nested | 0.0964 | 0.0757 | **0.0614** | 0.0573 | 0.1895 | 0.0913 | 76.0% | 73.0% | 0.278 |
+| in context | 0.1165 | 0.0915 | 0.0820 | 0.0753 | 0.1951 | 0.1045 | 78.9% | 75.1% | |
+| GPBoost | 0.1246 | 0.1044 | 0.0961 | 0.0886 | 0.2032 | 0.1106 | 80.8% | 79.3% | 0.315 |
+| mixed model | 0.1313 | 0.1176 | 0.1125 | 0.1139 | 0.2055 | 0.1224 | 81.8% | 83.9% | 0.307 |
+
+### FreshRetailNet-50K, log1p daily sales of store and product pairs, 898 stores, 4,500,000 rows
+
+| Method | 1-5 rows | 6-20 | 21-100 | 101-300 | Unseen | Unseen, 5 rows | Coverage, unseen | Coverage, 1-5 | `tau` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| embedding | 0.1651 | 0.1502 | 0.1418 | 0.1378 | 0.1516 | | 75.6% | 65.3% | |
+| dropped | 0.1454 | 0.1447 | 0.1443 | 0.1407 | 0.1455 | | 78.6% | 78.6% | |
+| pooled | 0.1428 | 0.1398 | 0.1359 | 0.1321 | 0.1442 | **0.1418** | 79.8% | 78.8% | 0.093 |
+| pooled + embedding | **0.1424** | **0.1386** | **0.1347** | **0.1303** | **0.1441** | **0.1418** | 79.0% | 78.1% | 0.086 |
+| nested | **0.1424** | 0.1391 | 0.1349 | 0.1307 | **0.1441** | **0.1418** | 79.2% | 78.4% | 0.086 |
+| in context | 0.1480 | 0.1455 | 0.1452 | 0.1414 | 0.1477 | 0.1471 | 77.1% | 77.0% | |
+| GPBoost | 0.1525 | 0.1495 | 0.1439 | 0.1393 | 0.1513 | 0.1496 | 67.1% | 64.4% | 0.084 |
+| mixed model | 0.1744 | 0.1704 | 0.1710 | 0.1685 | 0.1749 | 0.1743 | 82.1% | 82.2% | 0.062 |
+
+- **Stores with few rows gain the most.** On Rossmann stores with 1 to 5 training rows, offsets plus embeddings score 0.0963. That compares with 0.1198 for the ordinary embedding, 0.2318 with no store column, 0.1246 for GPBoost, and 0.1313 for the mixed model. On FreshRetailNet the store matters less, since products differ far more than stores (`tau` 0.09 against 0.27 to 0.29). Pooling still beats both the embedding and leaving the store out there.
+- **An unseen store gets an honest interval.** The ordinary embedding reads a category it never trained as a confident store. Its 80% interval holds 36% of an unseen Rossmann store's rows. Pooling's interval widens by the spread between stores and holds 75% to 78%.
+- **The embedding adds to the offset.** With the interaction, offsets plus embeddings beat offsets alone in every bucket of seen stores on both tables: by 5% at 1 to 5 rows and 23% at 101 to 300 on Rossmann. Nesting the store in its type or city added nothing on either table, within 0.001.
+- **Five rows of a new store halve its CRPS.** With `with_context`, an unseen Rossmann store goes from 0.1890 to 0.0906.
+- **Ashlar's pooled models beat GPBoost and the mixed model on CRPS in every column on both tables.** Their intervals are nearer 80% on Rossmann, 79% to 84%, but on seen stores their CRPS is 29% to 101% worse than offsets plus embeddings.
+- **Finishing the posteriors.** Before `fit` set each store's offsets exactly after training, the variational posteriors scored 0.1061 (offsets plus embeddings) and 0.1108 (offsets) at 1 to 5 rows on Rossmann. Finishing takes them to 0.0963 and 0.1013 and moves every larger bucket by under 0.002. The posteriors are now as narrow as the model says, so the raw 80% interval of those stores holds 72% of their rows instead of 75%. Calibrate on held-out rows when coverage matters.
+- **Reading the store in context loses to the exact update.** This is the amortized, neural-process view of a mixed model. It loses to offsets plus embeddings on CRPS in every column on both tables. On FreshRetailNet it loses even to leaving the store out. On Rossmann it beats the ordinary embedding at 1 to 5 rows and on unseen stores, and GPBoost everywhere, and its unseen interval is the best calibrated of Ashlar's, at 78.9%. A set encoder over binned tokens is a cruder reader of the rows than a dedicated numeric one could be. Even so, it would have to beat `with_context`, which is exact for the offset, so the variant was not built into the library.
+
+## Additive models against R's gamlss
+
+From [`examples/benchmark_additive.py`](../examples/benchmark_additive.py), the protocol of [#42](https://github.com/maxmbay/ashlar/issues/42). Every parameter of an additive model of a distribution is a sum of one shape per column. R's `gamlss` 5.4.22 fits each shape as a penalized B-spline (`pb`) by backfitting. `backbone="additive"` fits each as a small network, trained by gradient descent with the head. Two tables, with three random 80/20 splits each:
+
+- **Hourly bike rentals**, 17,379 hours, a count. Every model is a negative binomial whose mean and dispersion are each additive in every column: Ashlar's `negative_binomial` head and `gamlss`'s `NBI`. Each additive model is also fitted with the one pair that matters, the hour by the working day.
+- **Abalone rings**, 4,177 abalone, treated as continuous. Ashlar's `gaussian` is set against `gamlss`'s `NO`, each with an additive mean and log scale. Ashlar's `mixture` is set against `gamlss`'s `BCCGo`, a Box-Cox Cole-Green with an additive median and scale and a constant skewness.
+
+The residual-network rows are Ashlar's default backbone with the same head. Scores are on the test rows: the negative log-likelihood (log mass for the counts, log density for the rings), the CRPS, and the raw central 80% interval. R computes the CRPS of `gamlss` from its own CDFs on the same grid as Python. For the `NBI` and `NO` fits, Python recomputed it from R's fitted parameters and agreed within 5e-12 per row. ± is one standard error over the splits. Seconds are the mean per fit on one laptop. Some `gamlss` fits shared it with other jobs, so their times run high.
+
+### Hourly bike rentals, negative binomial
+
+| Model | NLL | CRPS | 80% coverage | 80% width | Seconds per fit |
+|---|---:|---:|---:|---:|---:|
+| Ashlar, additive | 5.089 ± 0.010 | 42.25 ± 0.68 | 82.5% | 223.1 | 8 |
+| `gamlss` `NBI`, additive | 5.078 ± 0.012 | 42.15 ± 0.48 | 82.1% | 222.7 | 122 |
+| Ashlar, additive + hour × working day | 4.755 ± 0.014 | 23.46 ± 0.31 | 83.4% | 110.8 | 10 |
+| `gamlss` `NBI`, additive + hour × working day | 4.763 ± 0.020 | 23.40 ± 0.28 | 82.6% | 108.8 | 1,093 |
+| Ashlar, residual network | 4.497 ± 0.012 | 16.48 ± 0.34 | 80.1% | 69.5 | 19 |
+
+### Abalone rings
+
+| Model | NLL | CRPS | 80% coverage | 80% width | Seconds per fit |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `gaussian`, additive | 2.193 ± 0.059 | 1.156 ± 0.019 | 84.6% | 5.48 | 2 |
+| `gamlss` `NO`, additive | 2.135 ± 0.030 | 1.115 ± 0.025 | 83.0% | 5.06 | 173 |
+| Ashlar `mixture`, additive | 1.949 ± 0.021 | 1.085 ± 0.019 | 79.0% | 4.67 | 2 |
+| `gamlss` `BCCGo`, additive, constant skewness | 1.982 ± 0.021 | 1.096 ± 0.019 | 79.6% | 4.59 | 104 |
+| Ashlar `gaussian`, residual network | 2.049 ± 0.015 | 1.095 ± 0.017 | 83.8% | 5.07 | 3 |
+| Ashlar `mixture`, residual network | 1.938 ± 0.019 | 1.071 ± 0.019 | 80.2% | 4.80 | 3 |
+
+- **On bike rentals the additive models match `gamlss`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the pair, each within a standard error. Ashlar's likelihood is 0.011 nats behind without the pair and 0.008 ahead with it.
+- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds. `gamlss` took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit.
+- **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
+- **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
+- **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
 
 ## Forecast heads
 

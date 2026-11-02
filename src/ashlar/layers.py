@@ -1,4 +1,4 @@
-"""TabM batch-ensemble layers and a residual MLP.
+"""TabM batch-ensemble layers, a residual MLP, the field backbones, and the additive backbone.
 
 The TabM path follows the equations in ``tabm`` 0.0.3 (commit
 ``28e47ae301c92ec37787dde1ce923a0793f405b4``):
@@ -22,11 +22,13 @@ forward pass reproduces a published benchmark score.
 
 from __future__ import annotations
 
+import functools
 import math
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from equinox import Module, field, nn
 
 from ashlar.errors import ShapeError
@@ -783,3 +785,131 @@ class SetEncoder(Module):
         pooled = jnp.mean(tokens, axis=1)
         hidden = jax.nn.relu(pooled @ self.up.T + self.up_bias)
         return (pooled + hidden @ self.down.T + self.down_bias)[:, None, :]
+
+
+@functools.lru_cache(maxsize=64)
+def _term_gather(chunks: tuple[int, ...], terms: tuple[tuple[int, ...], ...]) -> np.ndarray:
+    """``(terms, width)``: the input column behind each slot of each term, ``sum(chunks)`` for an empty slot."""
+    starts = np.concatenate([[0], np.cumsum(chunks)[:-1]]).astype(int)
+    d_in = int(sum(chunks))
+    columns = [
+        np.concatenate([np.arange(starts[index], starts[index] + chunks[index]) for index in term]) for term in terms
+    ]
+    gather = np.full((len(terms), max(len(column) for column in columns)), d_in, dtype=np.int32)
+    for row, column in enumerate(columns):
+        gather[row, : len(column)] = column
+    return gather
+
+
+class AdditiveBackbone(Module):
+    """One small network per term, side by side. Output ``(batch, member, terms * d_term)``.
+
+    A term reads its own input fields, one column or the two of a pair, and
+    nothing else, and the terms' outputs are concatenated. A head that is
+    linear in them, as every built-in distribution head is, therefore gives
+    each of its outputs (a location, a raw scale, a zero logit) a sum of one
+    function per term: a generalized additive model for location, scale, and
+    shape, each function a network. ``feature_chunks`` are the widths of the
+    input fields in the order the core concatenates them, and ``terms`` lists
+    the fields each term reads, one term per field by default; a field no term
+    reads is ignored. Each term is ``n_blocks`` layers of width ``d_block``
+    and an output of width ``d_term``, and each of the ``k`` members has its
+    own networks.
+    """
+
+    first: jax.Array
+    first_bias: jax.Array
+    blocks: tuple[tuple[jax.Array, jax.Array], ...]
+    last: jax.Array
+    last_bias: jax.Array
+    chunks: tuple[int, ...] = field(static=True)
+    terms: tuple[tuple[int, ...], ...] = field(static=True)
+    k: int = field(static=True)
+    d_out: int = field(static=True)
+    d_term: int = field(static=True)
+    dropout_rate: float = field(static=True)
+    activation: str = field(static=True)
+
+    def __init__(
+        self,
+        d_in: int,
+        *,
+        key,
+        feature_chunks: list[int] | None = None,
+        terms=None,
+        n_blocks: int = 2,
+        d_block: int = 64,
+        d_term: int = 8,
+        k: int = 1,
+        dropout: float = 0.0,
+        activation: str = "silu",
+    ):
+        chunks = tuple([1] * int(d_in) if feature_chunks is None else (int(width) for width in feature_chunks))
+        if sum(chunks) != int(d_in) or any(width < 1 for width in chunks):
+            raise ShapeError(f"feature chunks must be positive widths summing to the encoded width {d_in}; received {chunks}.")
+        if terms is None:
+            terms = tuple((index,) for index in range(len(chunks)))
+        else:
+            terms = tuple(tuple(int(index) for index in term) for term in terms)
+        if not terms:
+            raise ShapeError("the additive backbone needs at least one term.")
+        for term in terms:
+            if not term or len(set(term)) != len(term) or any(not 0 <= index < len(chunks) for index in term):
+                raise ShapeError(f"each term lists distinct fields between 0 and {len(chunks) - 1}; received {term}.")
+        if len({tuple(sorted(term)) for term in terms}) != len(terms):
+            raise ShapeError("the additive backbone's terms must be distinct.")
+        if n_blocks < 1 or d_block < 1 or d_term < 1 or k < 1:
+            raise ShapeError("additive n_blocks, d_block, d_term, and k must be positive.")
+        if not 0.0 <= dropout < 1.0:
+            raise ShapeError("dropout must be in [0, 1).")
+        if activation not in _ACTIVATIONS:
+            raise ShapeError(f"activation must be one of {tuple(_ACTIVATIONS)}; received {activation!r}.")
+        gather = _term_gather(chunks, terms)
+        count, width = gather.shape
+        filled = gather < int(d_in)
+        keys = jax.random.split(key, n_blocks + 1)
+        # Each term's first layer is scaled by its own fan-in; empty slots start, and stay, at zero.
+        limit = jnp.asarray(filled.sum(axis=1), dtype=jnp.float32) ** -0.5
+        first = jax.random.uniform(keys[0], (k, count, width, d_block), jnp.float32, minval=-1.0, maxval=1.0)
+        self.first = first * limit[None, :, None, None] * jnp.asarray(filled, dtype=jnp.float32)[None, :, :, None]
+        self.first_bias = jnp.zeros((k, count, d_block), dtype=jnp.float32)
+        self.blocks = tuple(
+            (
+                _rsqrt_uniform(keys[index], (k, count, d_block, d_block), d_block, jnp.float32),
+                jnp.zeros((k, count, d_block), dtype=jnp.float32),
+            )
+            for index in range(1, n_blocks)
+        )
+        self.last = _rsqrt_uniform(keys[n_blocks], (k, count, d_block, d_term), d_block, jnp.float32)
+        self.last_bias = jnp.zeros((k, count, d_term), dtype=jnp.float32)
+        self.chunks = chunks
+        self.terms = terms
+        self.k = int(k)
+        self.d_term = int(d_term)
+        self.d_out = count * int(d_term)
+        self.dropout_rate = float(dropout)
+        self.activation = activation
+
+    def term_outputs(self, x, *, key=None):
+        """``(batch, member, terms, d_term)``: each term's network on its own fields."""
+        d_in = sum(self.chunks)
+        if x.ndim not in (2, 3) or x.shape[-1] != d_in or (x.ndim == 3 and x.shape[1] != self.k):
+            raise ShapeError(
+                f"the additive backbone expected (batch, {d_in}) or (batch, {self.k}, {d_in}); received {x.shape}."
+            )
+        gather = jnp.asarray(_term_gather(self.chunks, self.terms))
+        padded = jnp.concatenate([x, jnp.zeros(x.shape[:-1] + (1,), dtype=x.dtype)], axis=-1)
+        inputs = padded[..., gather]
+        pattern = "btw,ktwh->bkth" if x.ndim == 2 else "bktw,ktwh->bkth"
+        act = _ACTIVATIONS[self.activation]
+        keys = None if key is None or self.dropout_rate == 0.0 else jax.random.split(key, len(self.blocks) + 1)
+        hidden = act(jnp.einsum(pattern, inputs, self.first) + self.first_bias)
+        hidden = _apply_dropout(hidden, self.dropout_rate, None if keys is None else keys[0])
+        for index, (weight, bias) in enumerate(self.blocks):
+            hidden = act(jnp.einsum("bkth,ktho->bkto", hidden, weight) + bias)
+            hidden = _apply_dropout(hidden, self.dropout_rate, None if keys is None else keys[index + 1])
+        return jnp.einsum("bkth,ktho->bkto", hidden, self.last) + self.last_bias
+
+    def __call__(self, x, *, key):
+        outputs = self.term_outputs(x, key=key)
+        return outputs.reshape(outputs.shape[0], self.k, self.d_out)

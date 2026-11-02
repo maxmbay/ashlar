@@ -42,6 +42,7 @@ from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_sta
 from ashlar.monotone import MONOTONE_TASKS, MonotoneTerm, check_monotone, monotone_edges, output_signs
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
+    AdditiveBackbone,
     CategoricalEmbeddings,
     FeatureTransformer,
     LateBottleneck,
@@ -121,10 +122,26 @@ from ashlar.distributions import (
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
+from ashlar.effects import (
+    EMBEDDING,
+    INTERCEPT,
+    RANDOM_EFFECT_TASKS,
+    RandomEffects,
+    check_random_effects,
+    embedding_leaves,
+    laplace_update,
+    location_outputs,
+    nesting,
+    offset_terms,
+)
+from ashlar.effects import report as effect_report
+from ashlar.shapes import ADDITIVE_REFUSED, additive_terms, check_pairs
 from ashlar.preprocess import (
+    FIELD_ORDER,
     NUMERIC_SCALINGS,
     EncodedBatch,
     FeatureEncoder,
+    _is_missing,
     check_numeric_clip,
     frame_columns,
     target_array,
@@ -139,6 +156,7 @@ _BACKBONES = {
     "tabm": TabMBackbone,
     "transformer": FeatureTransformer,
     "set": SetEncoder,
+    "additive": AdditiveBackbone,
 }
 _FIELD_BACKBONES = (FeatureTransformer, SetEncoder)
 _HEADS = {
@@ -452,8 +470,12 @@ class ASRModel(BaseEstimator):
         ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
         Jeffreys prior from the training counts. The default cuts stay learnable.
     backbone:
-        ``residual_mlp``, ``tabm``, or an Equinox class with
-        ``__init__(d_in, *, key, **kwargs)`` and attributes ``k`` and ``d_out``.
+        ``residual_mlp``, ``tabm``, ``transformer``, ``set``, ``additive``, or
+        an Equinox class with ``__init__(d_in, *, key, **kwargs)`` and
+        attributes ``k`` and ``d_out``. ``additive`` gives each column, and
+        each pair named in ``backbone_kwargs={"pairs": [[a, b], ...]}``, a
+        network of its own, so every head output is a sum of one shape per
+        term; ``shape_functions`` reads them (``ashlar.shapes``).
     objective:
         ``None`` (default) trains on the task's own loss. A callable
         ``objective(raw, y, sample_weight)`` replaces it, and ``custom``
@@ -550,6 +572,24 @@ class ASRModel(BaseEstimator):
         ``gaussian``, ``student_t``, ``quantile_spline``, ``poisson``, and
         ``negative_binomial``. A constrained feature does not interact with
         the others. See ``ashlar.monotone``.
+    random_effects:
+        ``None`` (default) leaves every column to the network. A dict of
+        grouping columns to their terms, ``{"store": "intercept"}`` or
+        ``{"store": ["intercept", "price", "embedding"]}``, or nested in a
+        broader grouping column, ``{"store": {"terms": [...], "within":
+        "region"}}``, so a store is pulled towards its region, takes each
+        grouping column out of the network and gives every group a pooled
+        offset on the head's location, ``b ~ N(0, tau^2)`` with ``tau``
+        learned, plus a random slope on each named numeric feature (per unit
+        of its scaled value). ``"embedding"`` also feeds the network a pooled
+        embedding of the group, shrunk towards the average group by a learned
+        prior, so the group can interact with the other features. A group
+        seen in training predicts with its posterior; an unseen or missing
+        group with the prior, the population answer. For
+        ``regression``, ``gaussian``, ``mixture``, ``flow``, ``student_t``,
+        ``quantile``, ``quantile_spline``, ``poisson``,
+        ``negative_binomial``, and ``hurdle``. See ``ashlar.effects``,
+        ``random_effects_``, and ``with_context``.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -613,6 +653,7 @@ class ASRModel(BaseEstimator):
         random_state: int = 0,
         tree: dict | None = None,
         monotone: dict | None = None,
+        random_effects: dict | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -654,6 +695,7 @@ class ASRModel(BaseEstimator):
         self.categorical_embedding_dim = categorical_embedding_dim
         self.categorical_embedding_hidden = categorical_embedding_hidden
         self.monotone = monotone
+        self.random_effects = random_effects
         self.set_max_length = set_max_length
         self.cyclical = cyclical
         self.random_state = random_state
@@ -705,6 +747,7 @@ class ASRModel(BaseEstimator):
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
         check_numeric_clip(self.numeric_clip, self.numeric_scaling)
+        self._check_random_effects()
         if self.standardize_target and self.task not in _SCALED_TASKS:
             raise AshlarError(
                 "standardize_target is a regression label z-score. It applies to regression and the distribution tasks, "
@@ -757,7 +800,7 @@ class ASRModel(BaseEstimator):
         if self.task in {*DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} and policy != "mixture":
             raise AshlarError("a distribution task predicts the equal-weight mixture of its members: prediction_policy='mixture'.")
         if isinstance(self.backbone, str) and self.backbone not in _BACKBONES:
-            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', or a class.")
+            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', 'additive', or a class.")
         if int(self.categorical_embedding_dim) < 1 or int(self.set_max_length) < 1:
             raise AshlarError("categorical_embedding_dim and set_max_length must be positive.")
         self._bottleneck_width()
@@ -774,11 +817,15 @@ class ASRModel(BaseEstimator):
         self._expectation_weight()
         self._soft_stage_count()
         kwargs = dict(self.backbone_kwargs or {})
-        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs:
+        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
             raise AshlarError(
-                "scaling_chunks and feature_chunks are derived from the fitted schema, and arch_type "
+                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema, and arch_type "
                 "other than batch-ensemble TabM is not implemented. Refusing to ignore those arguments."
             )
+        if self._backbone_cls() is AdditiveBackbone:
+            self._check_additive()
+        elif isinstance(self.backbone, str) and "pairs" in kwargs:
+            raise AshlarError("pairs are the additive backbone's pairwise terms; pass backbone='additive'.")
 
     def _policy(self) -> str:
         if self.prediction_policy is not None:
@@ -825,8 +872,9 @@ class ASRModel(BaseEstimator):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
         self._trial = None
         if not resume:
-            # A fresh fit resolves its own settings; a previous fit's must not leak in.
+            # A fresh fit resolves its own settings and builds its fields in today's order; a previous fit's must not leak in.
             self.resolved_ = None
+            self._legacy_field_order = False
         y, validation = self._candidate_inputs(y, validation)
         y_array = target_array(y)
         X = self._with_cyclical(X)
@@ -859,6 +907,7 @@ class ASRModel(BaseEstimator):
                 )
                 self._trial = chosen
             self._assign_after_success(names, columns, y_array, weights, train_idx, val_idx, val_pack, resume)
+            self._finish_effects(names, columns, y_array, weights, train_idx, val_idx)
             self.resolved_ = self._resolved_training()
             self.search_ = None if trials is None else {"chosen": dict(self.resolved_), "trials": trials}
         finally:
@@ -1110,6 +1159,8 @@ class ASRModel(BaseEstimator):
             train_key = self._train_key
         else:
             init_key, train_key = jax.random.split(jax.random.PRNGKey(int(self.random_state)))
+            # The random effects' KL divergence is counted once per pass over this much training weight.
+            self._effect_mass = float(np.sum(w_train)) if w_train is not None else float(len(train_idx))
             core = self._build_core(
                 encoder,
                 n_events,
@@ -1322,15 +1373,83 @@ class ASRModel(BaseEstimator):
         return result
 
     def _embedding_argument(self) -> list[str] | None:
-        """``None`` embeds every non-set categorical. A list, including ``[]``, is explicit."""
+        """``None`` embeds every non-set categorical. A list, including ``[]``, is explicit.
+
+        A grouping column of ``random_effects`` is always an embedding column, which the core reads as group indices.
+        """
         if self.categorical_embeddings is None:
             return None
-        return list(self.categorical_embeddings)
+        named = list(self.categorical_embeddings)
+        return named + [name for name in check_random_effects(self.random_effects) if name not in named]
+
+    def _check_random_effects(self):
+        effects = check_random_effects(self.random_effects)
+        if not effects:
+            return
+        if self.task not in RANDOM_EFFECT_TASKS:
+            raise AshlarError(
+                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, "
+                f"not {self.task!r}."
+            )
+        if not (self.head is None or isinstance(self.head, str)) or self._cure():
+            raise AshlarError("random effects work with the built-in heads, without cure fractions.")
+        if not self.share_training_batches:
+            raise AshlarError("random effects train with shared minibatches; leave share_training_batches=True.")
+        clash = set(effects).intersection(self.set_features or [])
+        if clash:
+            raise AshlarError(f"grouping columns {sorted(clash)} cannot also be set features.")
+        constrained = check_monotone(self.monotone)
+        for name, terms in effects.items():
+            if name in constrained:
+                raise AshlarError(f"{name!r} is a monotone feature, so it cannot be a grouping column.")
+            sloped = [term for term in terms if term in constrained]
+            if sloped:
+                raise AshlarError(
+                    f"a random slope on a monotone feature ({sloped}) could turn its effect around for a group."
+                )
+
+    def _check_additive(self):
+        """Refuse what would mix the additive backbone's terms before the head's outputs."""
+        if self.task in ADDITIVE_REFUSED:
+            raise AshlarError(
+                f"the {self.task} head reads the hidden layer through a network of its own, so its outputs would not "
+                "be sums of per-feature terms. backbone='additive' takes every other built-in head."
+            )
+        if self._bottleneck_width() is not None:
+            raise AshlarError("a bottleneck mixes the additive backbone's terms; leave bottleneck=None.")
+        if self._soft_stage_count() is not None:
+            raise AshlarError("soft_stages adds stumps outside the additive terms; leave soft_stages=None.")
+        if not self.share_training_batches:
+            raise AshlarError("the additive backbone shows every member the same rows; leave share_training_batches=True.")
+        constrained = check_monotone(self.monotone)
+        for pair in check_pairs((self.backbone_kwargs or {}).get("pairs")):
+            clash = [name for name in pair if name in constrained]
+            if clash:
+                raise AshlarError(f"a monotone feature does not interact with the others, so {clash} cannot be in a pair.")
+
+    def _field_source(self, name: str) -> str:
+        """The column of ``X`` a field comes from: a cyclical column's ``_sin`` and ``_cos`` come from it."""
+        for suffix in ("_sin", "_cos"):
+            if self.cyclical and name.endswith(suffix) and name[: -len(suffix)] in self.cyclical:
+                return name[: -len(suffix)]
+        return name
+
+    def _additive_terms(self, names: list[str], pairs):
+        """The additive backbone's terms over the core's fields ``names``, and each term's columns.
+
+        One term per column of ``X``, so a cyclical column's sine and cosine
+        are one term, and one per pair, over both columns' fields. A monotone
+        feature reaches the outputs through its own shape, so no term reads it.
+        """
+        return additive_terms(
+            [self._field_source(name) for name in names], check_pairs(pairs), set(check_monotone(self.monotone))
+        )
 
     def _categorical_names(self, names, columns):
         requested = set(self.categorical or [])
         requested.update(self.categorical_embeddings or [])
         requested.update(self.set_features or [])
+        requested.update(check_random_effects(self.random_effects))
         unknown = requested.difference(names)
         if unknown:
             raise AshlarError(f"categorical columns {sorted(unknown)} are not in X.")
@@ -1613,6 +1732,62 @@ class ASRModel(BaseEstimator):
         edges = monotone_edges(None if numeric_z is None else np.asarray(numeric_z), columns)
         return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
 
+    def _random_effects_term(self, encoder, members: int, head, d_head: int, key):
+        """The ``RandomEffects`` for ``random_effects=``, or ``None``."""
+        effects = check_random_effects(self.random_effects)
+        if not effects:
+            return None
+        embedded = [column.name for column in encoder.embedding_columns]
+        numeric = [column.name for column in encoder.columns if column.role == "numeric"]
+        missing = [name for name in effects if name not in embedded]
+        if missing:
+            raise AshlarError(f"grouping columns {missing} are not categorical columns of X.")
+        slopes = []
+        for name, terms in effects.items():
+            terms = offset_terms(terms)
+            unknown = [term for term in terms if term != INTERCEPT and term not in numeric]
+            if unknown:
+                raise AshlarError(f"random slopes of {name!r} need numeric columns of X; {unknown} are not.")
+            slopes.append([-1 if term == INTERCEPT else numeric.index(term) for term in terms])
+        shape = jax.eval_shape(lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32))
+        locations, scales = location_outputs(self.task, int(shape.shape[-1]))
+        sizes = [len(encoder.embedding_columns[embedded.index(name)].categories) for name in effects]
+        parents = nesting(self.random_effects)
+        mass = float(getattr(self, "_effect_mass", 1.0) or 1.0)
+        return RandomEffects(
+            sizes,
+            [embedded.index(name) for name in effects],
+            slopes,
+            locations,
+            scales,
+            1.0 / mass,
+            embedded=[position for position, terms in enumerate(effects.values()) if EMBEDDING in terms],
+            embedding_dim=int(self.categorical_embedding_dim),
+            parents=[list(effects).index(parents[name]) if name in parents else -1 for name in effects],
+            key=key,
+        )
+
+    @property
+    def random_effects_(self) -> dict:
+        """Per grouping column: ``terms``, ``tau`` per term, and each seen group's posterior ``mean`` and ``sd``.
+
+        In the units of the head's location: ``y`` for the normal-family heads
+        (``tau`` is the standard deviation of a group's offset in ``y``), and
+        the log mean for the count heads and the gamma severity. ``categories``
+        orders the rows of ``mean`` and ``sd``.
+        """
+        self._require_fitted()
+        module = getattr(self.core_, "random_effects", None)
+        if module is None:
+            raise AshlarError("this model has no random effects; fit with random_effects={column: 'intercept'}.")
+        return effect_report(module, check_random_effects(self.random_effects), self.encoder_, self._location_unit())
+
+    def _location_unit(self) -> float:
+        """One unit of the head's location in ``y``: the target scale for a standardized target, else 1."""
+        if self.task in _SCALED_TASKS and self.standardize_target:
+            return float(np.asarray(self.target_std_, dtype=np.float64).reshape(-1)[0])
+        return 1.0
+
     def _soft_stage_count(self) -> int | None:
         value = self.soft_stages
         if value is None or value is False:
@@ -1635,7 +1810,9 @@ class ASRModel(BaseEstimator):
         if self.num_embeddings is not None:
             embedding_dim = int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
-        chunks = encoder.feature_chunks(embedding_dim, cat_dim)
+        fields = self._core_fields(encoder)
+        effects = check_random_effects(self.random_effects)
+        chunks = [width for _, width in fields]
         d_in = sum(chunks)
         backbone_cls = self._backbone_cls()
         kwargs = dict(self._resolved_training()["backbone_kwargs"] or {})
@@ -1644,6 +1821,9 @@ class ASRModel(BaseEstimator):
             kwargs["share_training_batches"] = bool(self.share_training_batches)
         if backbone_cls in _FIELD_BACKBONES:
             kwargs["feature_chunks"] = chunks
+        if backbone_cls is AdditiveBackbone:
+            kwargs["feature_chunks"] = chunks
+            kwargs["terms"] = self._additive_terms([name for name, _ in fields], kwargs.pop("pairs", None))[0]
         embeddings = None
         if self.num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
@@ -1657,9 +1837,13 @@ class ASRModel(BaseEstimator):
             embeddings = PiecewiseLinearEmbeddings(
                 edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
             )
-        categorical_embeddings = _category_tables(
-            encoder.embedding_columns, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden)
-        )
+        embedded = [column for column in encoder.embedding_columns if column.name not in effects]
+        categorical_embeddings = _category_tables(embedded, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden))
+        embedding_positions = None
+        if effects:
+            embedding_positions = tuple(
+                index for index, column in enumerate(encoder.embedding_columns) if column.name not in effects
+            )
         set_embeddings = _category_tables(encoder.set_columns, cat_dim, set_key, set_encoder=True)
         backbone = backbone_cls(d_in, key=backbone_key, **kwargs)
         if not hasattr(backbone, "k") or not hasattr(backbone, "d_out"):
@@ -1698,8 +1882,11 @@ class ASRModel(BaseEstimator):
                 key=jax.random.fold_in(key, 8),
             )
         monotone = self._monotone_term(encoder, numeric_z, int(backbone.k), head, d_head)
+        random_effects = self._random_effects_term(encoder, int(backbone.k), head, d_head, jax.random.fold_in(key, 9))
         return PredictiveCore(
             monotone=monotone,
+            random_effects=random_effects,
+            embedding_positions=embedding_positions,
             embeddings=embeddings,
             categorical_embeddings=categorical_embeddings,
             set_embeddings=set_embeddings,
@@ -1715,6 +1902,21 @@ class ASRModel(BaseEstimator):
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
         )
+
+    def _core_fields(self, encoder: FeatureEncoder) -> list[tuple[str, int]]:
+        """``(column, width)`` of each field the backbone reads, in the core's order (``FeatureEncoder.fields``).
+
+        A grouping column of ``random_effects`` reaches the network only
+        through its pooled embedding, a field of its own after the others.
+        """
+        embedding_dim = None if self.num_embeddings is None else int(self.num_embedding_dim)
+        cat_dim = int(self.categorical_embedding_dim)
+        fields = encoder.fields(embedding_dim, cat_dim, legacy=bool(getattr(self, "_legacy_field_order", False)))
+        effects = check_random_effects(self.random_effects)
+        if effects:
+            fields = [(name, width) for name, width in fields if name not in effects]
+            fields += [(name, cat_dim) for name in embedding_leaves(effects, nesting(self.random_effects))]
+        return fields
 
     def _fit_target_scale(self, y):
         if not self.standardize_target or self.task not in _SCALED_TASKS:
@@ -1928,6 +2130,20 @@ class ASRModel(BaseEstimator):
         self._require_distribution("explain")
         return explain(self, X, target, **kwargs)
 
+    def shape_functions(self, X, *, center: bool = True):
+        """Each additive term's part of each head output, row by row, for ``backbone="additive"``.
+
+        Returns an ``ashlar.shapes.ShapeFunctions``: per row, the intercept
+        plus the terms is the head's output (a location, a raw scale, a log
+        mean, a logit), so a term's values against its column draw that
+        column's shape on that output. Terms are centered on the rows of
+        ``X``; pass the training rows, or a sample, to read them against the
+        data's average. ``center=False`` leaves each term as the network gives it.
+        """
+        from ashlar.shapes import read_shapes
+
+        return read_shapes(self, X, center=center)
+
     def forward_transformed(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
         """Point predictions from raw numeric values, keeping JAX arrays."""
         raw = self.forward_raw(
@@ -2040,6 +2256,215 @@ class ASRModel(BaseEstimator):
         view = copy(self)
         view._uncertain_inputs = {"draws": int(draws), "noise": noise, "seed": int(seed)}
         return view
+
+    def with_context(self, X, y, *, steps: int = 25):
+        """A copy whose groups' offsets are updated from new rows of those groups, without refitting the network.
+
+        For a model with ``random_effects``: each group in ``X`` has its
+        offsets' posterior updated with the rows' likelihood under the
+        fitted network, by Laplace's method, which a normal head makes exact
+        in one step. A group the model has not seen starts from the prior
+        ``N(0, tau^2)``, so three rows of a new store give it a posterior of
+        its own, pulled towards the average store as the fitted ones were;
+        a group seen in training starts from its fitted posterior, so pass
+        rows it was not fitted on. Groups not in ``X`` keep their posteriors.
+        A pooled embedding is not updated: a new group's stays at the average
+        group's. Several grouping columns are updated one after another, each
+        with the others' offsets at their posterior means.
+
+        Returns a new model; this one is unchanged.
+        """
+        self._require_fitted()
+        return self._updated_offsets(self._with_cyclical(X), y, steps=steps)
+
+    def _updated_offsets(self, X, y, *, steps: int = 25, weights=None, from_prior: bool = False, sweeps: int = 1):
+        """``with_context``'s update on ``X`` with its cyclical columns already expanded; ``fit`` finishes with it.
+
+        ``from_prior`` starts each column's groups from ``N(0, tau^2)`` instead
+        of their posteriors, for rows those posteriors already hold.
+        ``weights`` weight the rows' log likelihoods. ``sweeps`` repeats the
+        columns' updates, each with the others at their latest means, so
+        crossed and nested columns settle together.
+        """
+        import equinox as eqx
+
+        from ashlar.effects import positive, raw_of
+
+        module = getattr(self.core_, "random_effects", None)
+        if module is None or not module.has_offsets:
+            raise AshlarError("with_context updates random effects' offsets; fit with random_effects={column: 'intercept'}.")
+        if self.task == "regression":
+            raise AshlarError("with_context reads the rows' likelihood, and the regression task predicts a point.")
+        values = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
+        if observed.is_observed(target_array(y)) or not np.isfinite(values).all():
+            raise AshlarError("with_context takes finite values of y, not observed labels.")
+        effects = check_random_effects(self.random_effects)
+        names, columns = frame_columns(X)
+        if len(values) != (len(columns[0]) if columns else 0):
+            raise AshlarError("X and y have different numbers of rows.")
+        row_weights = np.ones(len(values)) if weights is None else np.asarray(weights, dtype=np.float64).reshape(-1)
+        payload = self.encoder_.to_json()
+        by_name = {item["name"]: item for item in payload["columns"]}
+        added = {}
+        for name in effects:
+            if name not in names:
+                raise AshlarError(f"with_context needs the grouping column {name!r} in X.")
+            known = by_name[name]["categories"]
+            seen = set(known)
+            fresh = []
+            for value in columns[names.index(name)].tolist():
+                if _is_missing(value):
+                    continue
+                text = str(value)
+                if text not in seen:
+                    seen.add(text)
+                    fresh.append(text)
+            known.extend(fresh)
+            added[name] = len(fresh)
+        encoder = FeatureEncoder.from_json(payload)
+        encoder.numeric_transform = self.numeric_transform_
+        # New groups start at the prior: offsets N(0, tau^2), embeddings at the average group's.
+        means, scales = list(module.means), list(module.raw_scales)
+        for position, (name, tau) in enumerate(zip(effects, module.taus())):
+            count = added[name]
+            means[position] = jnp.concatenate([means[position], jnp.zeros((count, means[position].shape[1]))], axis=0)
+            scales[position] = jnp.concatenate([scales[position], jnp.tile(raw_of(tau)[None, :], (count, 1))], axis=0)
+        embed_means, embed_scales = list(module.embed_means), list(module.embed_raw_scales)
+        for number, (position, tau) in enumerate(zip(module.embedded, module.embed_taus())):
+            count = added[list(effects)[position]]
+            width = embed_means[number].shape[1]
+            embed_means[number] = jnp.concatenate([embed_means[number], jnp.zeros((count, width))], axis=0)
+            embed_scales[number] = jnp.concatenate([embed_scales[number], jnp.tile(raw_of(tau)[None, :], (count, 1))], axis=0)
+        module = eqx.tree_at(
+            lambda tree: (tree.means, tree.raw_scales, tree.embed_means, tree.embed_raw_scales),
+            module,
+            (tuple(means), tuple(scales), tuple(embed_means), tuple(embed_scales)),
+        )
+        view = copy(self)
+        view.encoder_ = encoder
+        encoded = encoder.transform(X)
+        numeric_z = self.numeric_transform_(encoded.numeric_raw)
+        inputs = (numeric_z, encoded.categorical_onehot, encoded.category_index, encoded.set_tokens, encoded.set_mask)
+        view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
+        n_rows = int(numeric_z.shape[0])
+        if n_rows <= EVAL_CHUNK_ROWS:
+            raw = view.core_(*inputs, key=None, offsets=False)
+        else:
+            forward = _jit_forward(offsets=False)
+            raw = jnp.concatenate(
+                [
+                    forward(view.core_, *(array[start : start + EVAL_CHUNK_ROWS] for array in inputs))
+                    for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+                ],
+                axis=0,
+            )
+        locations = np.zeros((raw.shape[-1],), dtype=np.float32)
+        locations[list(module.locations)] = 1.0
+        locations = jnp.asarray(locations)
+        target = jnp.asarray(values.astype(np.float32))
+        chunk = max(1, min(EVAL_CHUNK_ROWS, n_rows))
+
+        @jax.jit
+        def chunk_derivatives(raw_rows, shift, target_rows):
+            # Each row's log likelihood reads only its own offset, so the Hessian is diagonal: a JVP with ones reads it.
+            def loglik(delta):
+                shifted = raw_rows + (shift + delta)[:, None, None] * locations
+                return jnp.sum(view._dist_from_raw(shifted).log_prob(target_rows))
+
+            zero = jnp.zeros_like(shift)
+            return jax.jvp(jax.grad(loglik), (zero,), (jnp.ones_like(zero),))
+
+        def derivatives(rows, shift):
+            """Each row's first and second derivative of its weighted log likelihood in its offset, at ``shift``."""
+            first, second = np.zeros(len(rows)), np.zeros(len(rows))
+            for start in range(0, len(rows), chunk):
+                part = rows[start : start + chunk]
+                size = len(part)
+                padding = chunk - size
+                # The last piece is padded to the chunk, so one compiled shape serves every piece.
+                index = np.concatenate([part, np.full(padding, part[0])])
+                moved = np.concatenate([shift[start : start + size], np.zeros(padding)])
+                one, two = chunk_derivatives(raw[index], jnp.asarray(moved, dtype=jnp.float32), target[index])
+                first[start : start + size] = np.asarray(one, dtype=np.float64)[:size]
+                second[start : start + size] = np.asarray(two, dtype=np.float64)[:size]
+            return first * row_weights[rows], second * row_weights[rows]
+
+        for _ in range(int(sweeps)):
+            for position, terms in enumerate(module.slope_columns):
+                if not terms:
+                    continue
+                column = module.index_columns[position]
+                groups = np.asarray(encoded.category_index[:, column])
+                rows = np.flatnonzero(groups > 0)
+                if not rows.size:
+                    continue
+                total, _ = module.offsets(encoded.category_index, numeric_z)
+                covariate = np.stack(
+                    [np.ones(len(groups)) if term < 0 else np.asarray(numeric_z[:, term], dtype=np.float64) for term in terms],
+                    axis=1,
+                )
+                current = np.asarray(module.means[position], dtype=np.float64)
+                # The offsets of the other columns stay at their posterior means.
+                others = np.asarray(total, dtype=np.float64) - np.sum(current[groups] * covariate, axis=1)
+                present = np.unique(groups[rows])
+                compact = np.zeros(len(current), dtype=np.int64)
+                compact[present] = np.arange(len(present))
+                if from_prior:
+                    tau = np.asarray(module.taus()[position], dtype=np.float64)
+                    prior_mean = np.zeros((len(present), len(terms)))
+                    prior_var = np.tile(np.square(tau)[None, :], (len(present), 1))
+                else:
+                    prior_mean = current[present]
+                    prior_var = np.square(np.asarray(positive(module.raw_scales[position]), dtype=np.float64)[present])
+
+                def row_derivatives(offset, rows=rows, others=others):
+                    return derivatives(rows, others[rows] + offset)
+
+                mean, variance = laplace_update(
+                    row_derivatives, prior_mean, prior_var, covariate[rows], compact[groups[rows]], len(present), steps=steps
+                )
+                updated_means = module.means[position].at[present].set(jnp.asarray(mean, dtype=jnp.float32))
+                updated_scales = module.raw_scales[position].at[present].set(
+                    raw_of(jnp.asarray(np.sqrt(variance), dtype=jnp.float32))
+                )
+                module = eqx.tree_at(
+                    lambda tree, position=position: (tree.means[position], tree.raw_scales[position]),
+                    module,
+                    (updated_means, updated_scales),
+                )
+        view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
+        if any(added.values()):
+            # The optimizer's moments match the fitted tables, not the grown ones; a refit starts them afresh.
+            view.opt_state_ = None
+        return view
+
+    def _finish_effects(self, names, columns, y_array, weights, train_idx, val_idx):
+        """After training, each group's offsets at their posterior under the trained network, from every row of ``X``.
+
+        Training fits the posteriors by stochastic variational inference, which
+        leaves a group with few rows short of its optimum, since its rows reach
+        few minibatches, and never sees a group whose rows all fell in the
+        validation partition. This is the step the variational objective
+        converges to for the offsets, given the network: Laplace's method from
+        ``N(0, tau^2)`` on the group's rows of ``X``, both partitions, which a
+        normal head makes exact. Observed labels keep the variational posteriors.
+        """
+        module = getattr(self.core_, "random_effects", None)
+        if module is None or not module.has_offsets or self.task == "regression" or self._observing():
+            return
+        rows = np.asarray(train_idx)
+        if val_idx is not None and len(val_idx):
+            rows = np.concatenate([rows, np.asarray(val_idx)])
+        values = np.asarray(target_array(y_array), dtype=np.float64)[rows]
+        if values.ndim != 1 or not np.isfinite(values).all():
+            return
+        sweeps = 1 if len(module.slope_columns) == 1 else 3
+        finished = self._updated_offsets(
+            _take_rows(names, columns, rows), values, weights=np.asarray(weights)[rows], from_prior=True, sweeps=sweeps
+        )
+        self.encoder_ = finished.encoder_
+        self.core_ = finished.core_
+        self.opt_state_ = finished.opt_state_
 
     def fit_inputs(self, X):
         """Refit the copula of the numeric features (``input_model_``) on ``X``, for example after ``load``."""
@@ -3341,6 +3766,8 @@ class ASRModel(BaseEstimator):
             "cyclical": self.cyclical,
             "tree": None if self.tree is None else self.tree_.spec,
             "monotone": check_monotone(self.monotone) or None,
+            "random_effects": _saved_effects(self.random_effects),
+            "random_effects_mass": getattr(self, "_effect_mass", None),
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
@@ -3349,11 +3776,12 @@ class ASRModel(BaseEstimator):
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
             "flow_layout": FLOW_LAYOUT,
+            "field_order": FIELD_ORDER,
         }
         (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
         save_leaves(directory / "core.eqx", self.core_)
         save_leaves(directory / "numeric.eqx", self.numeric_transform_)
-        if save_optimizer:
+        if save_optimizer and getattr(self, "opt_state_", None) is not None:
             save_opt_state(directory, self.opt_state_)
         return str(directory)
 
@@ -3406,8 +3834,12 @@ class ASRModel(BaseEstimator):
             random_state=payload["random_state"],
             tree=payload.get("tree"),
             monotone=payload.get("monotone"),
+            random_effects=payload.get("random_effects"),
         )
+        estimator._effect_mass = payload.get("random_effects_mass")
         estimator.tree_ = parse_tree(tree_json(estimator.tree)) if estimator.task == "tree" else None
+        # Saved before the fields followed the core's order: build the core the way it was trained.
+        estimator._legacy_field_order = payload.get("field_order") != FIELD_ORDER
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
@@ -3597,21 +4029,28 @@ _TASK_MODELS = {model.__name__: model for model in (ASRRegressor, ASRClassifier,
 __getattr__ = renamed(__name__, globals(), {"TabularEstimator": "ASRModel"})
 
 
-_FORWARD = None
+_FORWARD = {}
 
 
-def _jit_forward():
-    """One compiled inference pass, shared by every fitted core."""
-    global _FORWARD
-    if _FORWARD is None:
+def _jit_forward(offsets: bool = True):
+    """One compiled inference pass, shared by every fitted core; ``offsets=False`` leaves out the random effects'."""
+    if offsets not in _FORWARD:
         import equinox as eqx
 
-        @eqx.filter_jit
-        def forward(core, *inputs):
-            return core(*inputs, key=None)
+        if offsets:
 
-        _FORWARD = forward
-    return _FORWARD
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None)
+
+        else:
+
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None, offsets=False)
+
+        _FORWARD[offsets] = forward
+    return _FORWARD[offsets]
 
 
 def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, task):
@@ -3911,6 +4350,18 @@ def _saved_head_kwargs(estimator):
     if prior is not None:
         payload["class_prior"] = [float(value) for value in np.asarray(prior, dtype=np.float64).tolist()]
     return payload or None
+
+
+def _saved_effects(spec):
+    """``random_effects`` as JSON: each column's checked terms, and the column it is nested ``within``."""
+    checked = check_random_effects(spec)
+    if not checked:
+        return None
+    parents = nesting(spec)
+    return {
+        name: {"terms": list(terms), "within": parents[name]} if name in parents else list(terms)
+        for name, terms in checked.items()
+    }
 
 
 def _category_tables(columns, dim: int, key, *, set_encoder: bool = False, hidden: bool = False):
