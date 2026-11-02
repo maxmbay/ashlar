@@ -1,0 +1,15 @@
+at af21622 (claude/project-thread-j36znx)
+loaded /Users/maxwellbay/.cache/ashlar-bench/readme/hero-flights/ashlar-mixture-seed0
+ashlar {'raw': 0.8056, 'crossfit': 0.8} {'raw': 33.1, 'crossfit': 32.18}
+lightgbmlss {'raw': 0.7873, 'crossfit': 0.8} {'raw': 28.44, 'crossfit': 30.06}
+catboost_uncertainty {'raw': 0.9391, 'crossfit': 0.8} {'raw': 66.82, 'crossfit': 28.4}
+catboost scaled {'factor': 0.4257, 'crps': 10.5057, 'brier60': 0.041, 'coverage80': 0.8008, 'width80': 28.4422}
+ashlar                raw       80.6% at  33.1 | by period 79%, 81%, 81%, 81% | by own fifth 80%, 80%, 80%, 81%, 81%
+ashlar                crossfit  80.0% at  32.2 | by period 79%, 80%, 80%, 80% | by own fifth 80%, 79%, 80%, 80%, 81%
+ashlar                calibrate 80.1% at  32.4 | by period 79%, 80%, 80%, 80% | by own fifth 80%, 80%, 80%, 81%, 81%
+lightgbmlss           raw       78.7% at  28.4 | by period 77%, 78%, 80%, 79% | by own fifth 76%, 77%, 77%, 79%, 85%
+lightgbmlss           crossfit  80.0% at  30.1 | by period 78%, 80%, 82%, 80% | by own fifth 77%, 78%, 78%, 81%, 86%
+catboost_uncertainty  raw       93.9% at  66.8 | by period 95%, 94%, 93%, 92% | by own fifth 95%, 95%, 94%, 94%, 92%
+catboost_uncertainty  crossfit  80.0% at  28.4 | by period 87%, 82%, 76%, 70% | by own fifth 85%, 84%, 82%, 78%, 72%
+catboost_uncertainty  scaled    80.1% at  28.4 | by period 87%, 82%, 76%, 70% | by own fifth 85%, 84%, 82%, 78%, 72%
+coverage.json: 39 KB
