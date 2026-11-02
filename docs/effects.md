@@ -77,4 +77,12 @@ With `backbone="additive"`, `shape_functions` gives the offsets as one more term
 
 ## Against the alternatives
 
-<!-- results of examples/benchmark_effects.py -->
+[docs/benchmarks.md](benchmarks.md#entity-effects) runs the protocol of issue #41 on Rossmann's 1,115 stores and FreshRetailNet's 898, three splits each. In each split, a fifth of the stores are held out whole and the others train on 1 to 300 of their rows. On Rossmann:
+
+- **Stores with few rows gain the most.** On stores with 1 to 5 training rows, offsets plus embeddings score a CRPS of 0.096 in log sales. The ordinary embedding scores 0.120, GPBoost 0.125, and a statsmodels mixed model 0.131.
+- **A new store gets an honest interval.** The ordinary embedding's 80% interval holds 36% of an unseen store's rows. Pooling's holds 75% to 78%.
+- **Five rows of a new store halve its CRPS.** `with_context` takes it from 0.189 to 0.091.
+- **The embedding earns its place.** Offsets plus embeddings beat offsets alone in every bucket, by 23% on stores with 101 to 300 rows. Nesting in the store's type added nothing on either table.
+- **Finishing the posteriors after training helps small stores.** Stores with 1 to 5 rows went from 0.106 to 0.096. Their raw 80% interval went from 75% to 72% of rows, because the posteriors are now as narrow as the model says. Calibrate when coverage matters.
+
+The issue's amortized variant was also tested: reading a store's effect from its other rows in context, the neural-process view of a mixed model, through the set encoder. Each row carried up to 32 of its store's rows as tokens of their binned outcomes. It lost to the exact update on CRPS in every column on both tables, and on FreshRetailNet even to leaving the store out, so it is not part of the library.
