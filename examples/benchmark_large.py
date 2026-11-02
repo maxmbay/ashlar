@@ -756,7 +756,7 @@ METRIC_NAMES = {
 
 
 def report(out, variant_for=None, seeds=None):
-    """Markdown tables: mean ± std over the seeds that ran, per table and model."""
+    """Markdown tables: mean ± std over the seeds that ran, per table and model; seconds from seed 0."""
     variant_for = variant_for or {}
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     frame = pd.DataFrame(rows)
@@ -789,7 +789,10 @@ def report(out, variant_for=None, seeds=None):
                     cells.append(f"{values.iloc[0]:.4g}")
                 else:
                     cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
-            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {group['seconds'].mean():.0f} |")
+            # Seed 0 ran each tree on one thread and seeds 1 and 2 on six, so the seconds are seed 0's.
+            first = group[group["seed"] == 0]
+            seconds = (first if not first.empty else group)["seconds"].mean()
+            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {seconds:.0f} |")
 
 
 def done_runs(out):

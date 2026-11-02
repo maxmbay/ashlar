@@ -84,7 +84,8 @@ def compare(rows, table, ours, theirs, metric, *, error=False) -> dict | None:
     change = np.array([(mine[s] - pool[best][s]) / pool[best][s] for s in seeds]) * 100
     return {"table": table, "best": best, "seeds": seeds, "change": change, "mean": float(change.mean()),
             "sd": float(change.std(ddof=0)), "ours": float(np.mean([mine[s] for s in seeds])),
-            "theirs": float(means[best]), "metric": metric}
+            "theirs": float(means[best]), "metric": metric,
+            "ours_sd": float(np.std([mine[s] for s in seeds])), "theirs_sd": float(np.std([pool[best][s] for s in seeds]))}
 
 
 def results(rows):
@@ -207,5 +208,61 @@ def draw() -> None:
                   round(item["sd"], 2), round(item["ours"], 5), round(item["theirs"], 5))
 
 
+ROWS = {"airlines_delay": "2,000,000", "year": "515,345", "zurich": "2,000,000", "taxi_tip": "581,835",
+        "higgs": "2,000,000", "covertype": "581,012", "click": "1,997,410", "airlines": "539,383"}
+TARGETS = {"airlines_delay": "delay in minutes", "year": "release year", "zurich": "delay", "taxi_tip": "tip in $",
+           "higgs": "signal", "covertype": "7 forest types", "click": "click", "airlines": "delayed"}
+
+
+def _entry(value: float, sd: float, seeds: int, digits: int, bold: bool, name: str = "") -> str:
+    """A table cell: the mean (bold when it is the better one), ± the sd over the splits, and the model's name."""
+    text = f"{value:.{digits}f}".replace("-", "−")
+    text = f"**{text}**" if bold else text
+    if seeds > 1:
+        text += f" ± {sd:.1g}"
+    return text + (f" ({name})" if name else "")
+
+
+def tables() -> None:
+    """The README's two tables, as means ± sd over the splits: point accuracy, then the distributions."""
+    rows = load()
+    print("| Table | Rows | Target, metric | Ashlar | Best tree |\n|---|---:|---|---:|---:|")
+    for group, entries in GROUPS:
+        for table, name, _ in entries:
+            regression = group == "Regression"
+            got = compare(rows, table, "ashlar", TREES, "rmse" if regression else "accuracy", error=not regression)
+            if got is None:
+                continue
+            ours_better = got["ours"] < got["theirs"]  # an error either way: RMSE, or 1 - accuracy
+            if not regression:
+                got["ours"], got["theirs"] = 1.0 - got["ours"], 1.0 - got["theirs"]
+            digits = (2 if got["ours"] > 10 else 3) if regression else 3
+            print(f"| {name} | {ROWS[table]} | {TARGETS[table]}, {'RMSE ↓' if regression else 'accuracy ↑'} | "
+                  f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_better)} | "
+                  f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, not ours_better, NAMES[got['best']])} |")
+    print()
+    print("| Table | Score | Ashlar | Best tree distribution |\n|---|---|---:|---:|")
+    for group, entries in GROUPS:
+        for table, name, _ in entries:
+            regression = group == "Regression"
+            scores = (("crps", "CRPS"), ("nll", "NLL")) if regression else (("log_loss", "Log loss"),)
+            for n, (metric, label) in enumerate(scores):
+                got = compare(rows, table, "ashlar_mixture" if regression else "ashlar",
+                              TREE_DISTRIBUTIONS if regression else TREES, metric)
+                if got is None:
+                    continue
+                ours_better = got["ours"] < got["theirs"]
+                digits = 2 if regression else 3
+                title = f"{name}, {TARGETS[table]}" if regression else name
+                print(f"| {title if n == 0 else ''} | {label} | "
+                      f"{_entry(got['ours'], got['ours_sd'], len(got['seeds']), digits, ours_better)} | "
+                      f"{_entry(got['theirs'], got['theirs_sd'], len(got['seeds']), digits, not ours_better, NAMES[got['best']])} |")
+
+
 if __name__ == "__main__":
-    k.main(draw=draw)
+    import sys
+
+    if sys.argv[1:] == ["tables"]:
+        tables()
+    else:
+        k.main(draw=draw)
