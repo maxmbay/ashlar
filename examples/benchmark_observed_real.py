@@ -80,8 +80,12 @@ sold out when its demand reached the stock. Days 0 to 59 train, days 60 to
 69 calibrate, and days 70 to 89 test. Each head, ``mixture`` and
 ``hurdle``, is fitted four ways: on the true demand (the oracle), on sales as
 if they were demand, on the days that did not sell out, and on
-``observed.censored(sales, sold_out)``; LightGBM's quantile regression on
-sales is the tree baseline. The features are the store, the product and its
+``observed.censored(sales, sold_out)``. The tree baselines are LightGBM's
+quantile regression on sales, and XGBoost's AFT model on the censored sales,
+the one gradient-boosted tree that reads censoring: its log of demand plus a
+shift (1, or a tenth of the mean training sales), with the shift, error
+family, depth, and spread chosen by likelihood on the calibration days'
+censored sales. The features are the store, the product and its
 three category levels, the city, the weekday, the discount, the holiday and
 activity flags, the weather, and the series' mean recorded sales on its
 training days. Scored on the test days against the true demand: the NLL
@@ -90,7 +94,7 @@ days sold nothing and a density cannot score that atom; CRPS from 1,000
 draws; the share at or below the predicted 90% quantile; the newsvendor
 cost of ordering the 75% quantile (a lost sale costs 3, a leftover unit 1)
 in percent above the cost of the same head's oracle fit, the mixture's for
-LightGBM; and the 80% interval after ``calibrate`` on the calibration days:
+the trees; and the 80% interval after ``calibrate`` on the calibration days:
 on their true demand for the oracle, their censored labels for the censored
 fit, and their sales for the others.
 
@@ -110,7 +114,8 @@ the weekday profile error: the root mean square, over clients and weekdays,
 of the error in each weekday's share of the client's mean load.
 
 Results go to ``/tmp/ashlar-bench/observed-real-<stage>.json`` after every
-fit, or every split for the clinical tables, and a stage restarted with the
+fit, or every split for the clinical tables (``ASHLAR_BENCH_DIR`` moves the
+folder, data included), and a stage restarted with the
 same command skips what is done; a Backblaze split missing a model, such as
 pycox after it failed, fits only that model. pycox fits in a process of its
 own, since torch's OpenMP runtime can hang in one where XGBoost's has run.
@@ -148,7 +153,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ashlar import ASRRegressor, observed
 
-DATA_DIR = Path("/tmp/ashlar-bench")
+DATA_DIR = Path(os.environ.get("ASHLAR_BENCH_DIR", "/tmp/ashlar-bench"))
 RESULTS = DATA_DIR / "observed-real-{stage}.json"
 SEEDS = (0, 1, 2, 3, 4)
 DRAWS = 1000
@@ -264,6 +269,17 @@ def integrated_brier(time_, event, curves, grid) -> float:
 def d_calibration(at_time, event, bins: int = D_BINS, before=None) -> tuple[float, float]:
     """Haider et al. (2020): the chi-square statistic and p-value of ``S(T)`` against uniform in equal bins.
 
+    The weights in the bins are ``d_calibration_counts``.
+    """
+    counts = d_calibration_counts(at_time, event, bins, before)
+    expected = len(np.asarray(at_time)) / bins
+    chi2 = float(np.sum((counts - expected) ** 2 / expected))
+    return chi2, float(stats.chi2.sf(chi2, bins - 1))
+
+
+def d_calibration_counts(at_time, event, bins: int = D_BINS, before=None) -> np.ndarray:
+    """The weight of the test rows in each of ``bins`` equal bins of ``S(T)``, low survival first.
+
     An event puts its weight in the bin of ``S(T)``. A row censored at ``c``
     has ``S(T)`` uniform on ``[0, S(c)]`` if the model is right, so it
     spreads its weight over that range. A step curve that drops at an
@@ -281,9 +297,7 @@ def d_calibration(at_time, event, bins: int = D_BINS, before=None) -> tuple[floa
     counts += np.sum(np.clip(np.minimum(edges[1:], high) - np.maximum(edges[:-1], low), 0.0, None) / (high - low), axis=0)
     censored = s[~event][:, None]
     counts += np.sum(np.clip(np.minimum(edges[1:], censored) - edges[:-1], 0.0, None) / censored, axis=0)
-    expected = len(s) / bins
-    chi2 = float(np.sum((counts - expected) ** 2 / expected))
-    return chi2, float(stats.chi2.sf(chi2, bins - 1))
+    return counts
 
 
 def _step_grid(times, survival, grid) -> np.ndarray:
@@ -322,22 +336,35 @@ def _ashlar_scores(model, x, log_time, event, log_grid, calibrated: bool) -> dic
     return {"curves": curves, "own": own, "risk": -median, "nll": nll}
 
 
+def _aft_matrix(x, lower, upper):
+    """An XGBoost matrix whose label is the interval ``[lower, upper]``; ``upper`` is ``inf`` for a right-censored row."""
+    import xgboost
+
+    data = xgboost.DMatrix(x)
+    data.set_float_info("label_lower_bound", lower)
+    data.set_float_info("label_upper_bound", upper)
+    return data
+
+
 def _aft(x_fit, t_fit, e_fit, x_val, t_val, e_val, seed: int):
     """XGBoost's AFT model, its error family, depth, and spread chosen by validation likelihood, each early stopped.
 
     Returns the chosen booster, family, and spread, and the seconds of that one fit, to read beside the grid's.
     """
+    fit = _aft_matrix(x_fit, t_fit, np.where(e_fit, t_fit, np.inf))
+    validation = _aft_matrix(x_val, t_val, np.where(e_val, t_val, np.inf))
+    return _aft_grid(fit, validation, seed)[1:5]
+
+
+def _aft_grid(fit, validation, seed: int, grid=AFT_GRID):
+    """Every setting of ``grid`` fitted on ``fit`` and early stopped on ``validation``; the best there by likelihood.
+
+    Returns its validation NLL, the booster, family, spread, the seconds of that one fit, and its depth.
+    """
     import xgboost
 
-    def matrix(x, t, e):
-        data = xgboost.DMatrix(x)
-        data.set_float_info("label_lower_bound", t)
-        data.set_float_info("label_upper_bound", np.where(e, t, np.inf))
-        return data
-
-    fit, validation = matrix(x_fit, t_fit, e_fit), matrix(x_val, t_val, e_val)
     best = None
-    for family, depth, scale in AFT_GRID:
+    for family, depth, scale in grid:
         params = {
             "objective": "survival:aft",
             "eval_metric": "aft-nloglik",
@@ -354,8 +381,8 @@ def _aft(x_fit, t_fit, e_fit, x_val, t_val, e_val, seed: int):
                 verbose_eval=False,
             )
         if best is None or booster.best_score < best[0]:
-            best = (booster.best_score, booster, family, scale, {"cpu": clock.cpu, "wall": clock.wall})
-    return best[1:]
+            best = (booster.best_score, booster, family, scale, {"cpu": clock.cpu, "wall": clock.wall}, depth)
+    return best
 
 
 def _aft_scores(booster, family, scale, x, log_time, event, log_grid) -> dict:
@@ -546,6 +573,17 @@ UNDER, OVER = 3.0, 1.0
 RATIO = UNDER / (UNDER + OVER)
 STOCK_HEADS = ("mixture", "hurdle")
 STOCK_FITS = ("oracle: true demand", "sales as demand", "days not sold out", "censored")
+# XGBoost's AFT models the log of its label, so it is fitted to demand plus a shift: 1, which makes it log1p of
+# the demand, or a tenth of the mean training sales, nearer the log itself and still finite at zero. A shift
+# leaves the label's density unchanged, so the validation likelihoods of the two are comparable. A day's log
+# sales spread far less than a log survival time, so the spreads start well below the clinical grid's.
+STOCK_AFT_SHIFTS = ("1", "a tenth of the mean")
+STOCK_AFT_GRID = tuple(
+    (family, depth, scale)
+    for family in AFT_FAMILIES
+    for depth in (3, 6)
+    for scale in (0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+)
 
 
 def fresh_frame() -> pd.DataFrame:
@@ -570,8 +608,12 @@ def fresh_frame() -> pd.DataFrame:
     return pd.read_parquet(cache)
 
 
-def fresh_days(frame: pd.DataFrame, seed: int):
-    """The fully stocked days of ``SERIES`` sampled series, a simulated stock for each, and the features."""
+def fresh_days(frame: pd.DataFrame, seed: int, stock: bool = False):
+    """The fully stocked days of ``SERIES`` sampled series, a simulated stock for each, and the features.
+
+    Returns the features, each row's day, the true demand, the sales the stock allowed, and whether the day sold
+    out; with ``stock``, the simulated stock as well.
+    """
     rng = np.random.default_rng(seed)
     day = (pd.to_datetime(frame["dt"]) - pd.to_datetime(frame["dt"]).min()).dt.days.to_numpy()
     stocked = frame["stock_hour6_22_cnt"].to_numpy() == 0
@@ -586,9 +628,9 @@ def fresh_days(frame: pd.DataFrame, seed: int):
     day, key = day[rows], series.to_numpy()[rows]
     demand = days["sale_amount"].to_numpy(np.float64)
     mean = summary["mean"].reindex(key).to_numpy()
-    stock = mean * np.exp(rng.normal(0.0, 0.25, size=len(rows))) * rng.uniform(1.0, 1.5, size=len(rows))
-    sales = np.minimum(demand, stock)
-    sold_out = demand >= stock
+    stock_ = mean * np.exp(rng.normal(0.0, 0.25, size=len(rows))) * rng.uniform(1.0, 1.5, size=len(rows))
+    sales = np.minimum(demand, stock_)
+    sold_out = demand >= stock_
     features = pd.DataFrame({name: pd.Categorical(days[name].astype(str)) for name in FRESH_CATEGORIES})
     for name in FRESH_NUMBERS:
         features[name] = days[name].to_numpy(np.float32)
@@ -596,11 +638,96 @@ def fresh_days(frame: pd.DataFrame, seed: int):
     # What the shop knows of each series: its mean recorded sales on the training days.
     recorded = pd.Series(np.where(day < TRAIN_DAYS, sales, np.nan)).groupby(key).mean()
     features["recorded_level"] = recorded.reindex(key).to_numpy(np.float32)
+    if stock:
+        return features, day, demand, sales, sold_out, stock_
     return features, day, demand, sales, sold_out
 
 
 def _newsvendor(order, demand) -> float:
     return float(np.mean(UNDER * np.maximum(demand - order, 0) + OVER * np.maximum(order - demand, 0)))
+
+
+def stockouts_aft(features, sales, sold_out, train, calibration, seed: int) -> dict:
+    """XGBoost's AFT model on ``observed.censored(sales, sold_out)``, the one gradient-boosted tree that reads censoring.
+
+    Its label is ``[sales + shift, sales + shift]`` on a day that did not sell out and ``[sales + shift, inf)`` on
+    one that did. The shift (``STOCK_AFT_SHIFTS``), error family, depth, and spread are chosen by likelihood on the
+    calibration days' censored sales, each of the grid's fits early stopped there, as for the clinical tables.
+    Returns what ``stockouts_aft_predict`` reads, and the seconds of the grid and of the one fit it chose.
+    """
+    shifts = {"1": 1.0, "a tenth of the mean": 0.1 * float(np.mean(sales[train]))}
+    best, cpu, wall = None, 0.0, 0.0
+    for name in STOCK_AFT_SHIFTS:
+        lower = sales + shifts[name]
+        upper = np.where(sold_out, np.inf, lower)
+        fit = _aft_matrix(features.iloc[train], lower[train], upper[train])
+        validation = _aft_matrix(features.iloc[calibration], lower[calibration], upper[calibration])
+        with _Clock() as clock:
+            score, booster, family, scale, single, depth = _aft_grid(fit, validation, seed, STOCK_AFT_GRID)
+        cpu, wall = cpu + clock.cpu, wall + clock.wall
+        if best is None or score < best["validation_nll"]:
+            best = {
+                "validation_nll": float(score),
+                "booster": booster,
+                "family": family,
+                "scale": float(scale),
+                "depth": int(depth),
+                "shift_name": name,
+                "shift": shifts[name],
+                "single": single,
+            }
+    best["cpu"], best["wall"] = cpu, wall
+    return best
+
+
+def stockouts_aft_predict(fitted: dict, x) -> np.ndarray:
+    """The AFT's location of ``log(demand + shift)`` for each row of ``x``."""
+    import xgboost
+
+    booster = fitted["booster"]
+    loc = booster.predict(xgboost.DMatrix(x), output_margin=True, iteration_range=(0, booster.best_iteration + 1))
+    return np.asarray(loc, np.float64)
+
+
+def stockouts_aft_quantiles(fitted: dict, loc: np.ndarray, levels) -> np.ndarray:
+    """Quantiles of demand, ``(rows, levels)``: ``exp(loc + scale * w) - shift`` at each level ``w`` of the error."""
+    error = AFT_FAMILIES[fitted["family"]]
+    w = error.ppf(np.asarray(levels, np.float64))
+    return np.exp(loc[:, None] + fitted["scale"] * w[None, :]) - fitted["shift"]
+
+
+def _log_interval(error, low, high) -> np.ndarray:
+    """``log P(low <= W <= high)`` for the error family, subtracted on the side of its median where the interval lies."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        right = error.logsf(low) + np.log1p(-np.exp(error.logsf(high) - error.logsf(low)))
+        left = error.logcdf(high) + np.log1p(-np.exp(error.logcdf(low) - error.logcdf(high)))
+    return np.where(low > error.median(), right, left)
+
+
+def _stockouts_aft_record(fitted: dict, x_test, y_test, half_bin: float, oracle_cost: float, seed: int) -> dict:
+    """The AFT scored as the other fits are: the NLL of the true demand's bin, CRPS, the 90% quantile, the order."""
+    error, scale, shift = AFT_FAMILIES[fitted["family"]], fitted["scale"], fitted["shift"]
+    loc = stockouts_aft_predict(fitted, x_test)
+    q90, q75 = stockouts_aft_quantiles(fitted, loc, [0.9, RATIO]).T
+    low = (np.log(np.maximum(y_test - half_bin + shift, 1e-12)) - loc) / scale
+    high = (np.log(y_test + half_bin + shift) - loc) / scale
+    noise = error.rvs(size=(len(loc), DRAWS), random_state=np.random.default_rng(seed))
+    draws = np.exp(loc[:, None] + scale * noise) - shift
+    cost = _newsvendor(q75, y_test)
+    return {
+        "nll": float(-np.mean(_log_interval(error, low, high))),
+        "crps": _crps(draws, y_test),
+        "q90": float(np.mean(y_test <= q90)),
+        "cost_value": cost,
+        "cost": float(100.0 * (cost / oracle_cost - 1.0)),
+        "calibrated_80": None,
+        "cpu": fitted["cpu"],
+        "wall": fitted["wall"],
+        "chosen": f"shift {fitted['shift_name']}, {fitted['family']}, depth {fitted['depth']}, scale {fitted['scale']}",
+        "chosen_cpu": fitted["single"]["cpu"],
+        "chosen_wall": fitted["single"]["wall"],
+        "validation_nll": fitted["validation_nll"],
+    }
 
 
 def run_stockouts() -> None:
@@ -658,32 +785,40 @@ def run_stockouts() -> None:
                 }
                 print(f"  {head:8s} {fit:20s}", {name: round(value, 4) for name, value in results[key].items()}, flush=True)
                 _save("stockouts", results)
-        key = f"{seed}/lightgbm quantile/sales as demand"
-        if key in results:
-            continue
-        try:
-            import lightgbm
-        except ImportError:
-            print("  lightgbm is not installed; skipping its baseline", flush=True)
-            continue
-        orders = {}
-        with _Clock() as clock:
-            for level in (0.9, RATIO):
-                booster = lightgbm.LGBMRegressor(
-                    objective="quantile", alpha=level, n_estimators=400, learning_rate=0.05, verbose=-1, random_state=seed
-                )
-                booster.fit(features.iloc[train], sales[train])
-                orders[level] = booster.predict(x_test)
+        # The tree baselines' orders are priced against the mixture's oracle, as the mixture's own are.
         oracle_cost = results[f"{seed}/mixture/{STOCK_FITS[0]}"]["cost_value"]
-        results[key] = {
-            "q90": float(np.mean(y_test <= orders[0.9])),
-            "cost_value": _newsvendor(orders[RATIO], y_test),
-            "cost": float(100.0 * (_newsvendor(orders[RATIO], y_test) / oracle_cost - 1.0)),
-            "cpu": clock.cpu,
-            "wall": clock.wall,
-        }
-        print(f"  {'lightgbm':8s} {'sales as demand':20s}", {name: round(value, 4) for name, value in results[key].items()}, flush=True)
-        _save("stockouts", results)
+        key = f"{seed}/lightgbm quantile/sales as demand"
+        if key not in results and importlib.util.find_spec("lightgbm") is None:
+            print("  lightgbm is not installed; skipping its baseline", flush=True)
+        elif key not in results:
+            import lightgbm
+
+            orders = {}
+            with _Clock() as clock:
+                for level in (0.9, RATIO):
+                    booster = lightgbm.LGBMRegressor(
+                        objective="quantile", alpha=level, n_estimators=400, learning_rate=0.05, verbose=-1, random_state=seed
+                    )
+                    booster.fit(features.iloc[train], sales[train])
+                    orders[level] = booster.predict(x_test)
+            results[key] = {
+                "q90": float(np.mean(y_test <= orders[0.9])),
+                "cost_value": _newsvendor(orders[RATIO], y_test),
+                "cost": float(100.0 * (_newsvendor(orders[RATIO], y_test) / oracle_cost - 1.0)),
+                "cpu": clock.cpu,
+                "wall": clock.wall,
+            }
+            print(f"  {'lightgbm':8s} {'sales as demand':20s}", {name: round(value, 4) for name, value in results[key].items()}, flush=True)
+            _save("stockouts", results)
+        key = f"{seed}/xgboost aft/censored"
+        if key not in results and importlib.util.find_spec("xgboost") is None:
+            print("  xgboost is not installed; skipping its AFT baseline", flush=True)
+        elif key not in results:
+            fitted = stockouts_aft(features, sales, sold_out, train, calibration, seed)
+            results[key] = _stockouts_aft_record(fitted, x_test, y_test, half_bin, oracle_cost, seed)
+            printable = {name: round(value, 4) if isinstance(value, float) else value for name, value in results[key].items()}
+            print(f"  {'xgboost aft':8s} {'censored':20s}", printable, flush=True)
+            _save("stockouts", results)
 
 
 def _table(results: dict, keys: list[tuple[str, str]], columns) -> None:
@@ -725,8 +860,10 @@ def stockouts_report() -> None:
     )
     print("| Head | Trained on | NLL ↓ | CRPS ↓ | Below the 90% quantile | Order cost above the oracle's ↓ | Calibrated 80% holds | CPU seconds |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
-    keys = [(head, fit) for head in STOCK_HEADS for fit in STOCK_FITS] + [("lightgbm quantile", "sales as demand")]
+    keys = [(head, fit) for head in STOCK_HEADS for fit in STOCK_FITS]
+    keys += [("lightgbm quantile", "sales as demand"), ("xgboost aft", "censored")]
     _table(results, keys, columns)
+    _aft_note([results[key] for key in results if key.endswith("/xgboost aft/censored")])
 
 
 # Daily loads from totals --------------------------------------------------
