@@ -20,6 +20,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Distributions on smaller tables](#distributions-on-smaller-tables)
 - [Learned embeddings](#learned-embeddings)
 - [Entity effects](#entity-effects)
+- [Additive models against R's gamlss](#additive-models-against-rs-gamlss)
 - [Forecast heads](#forecast-heads)
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
@@ -402,6 +403,42 @@ The methods, all with a normal head on log sales:
 - **Ashlar's pooled models beat GPBoost and the mixed model on CRPS in every column on both tables.** Their intervals are nearer 80% on Rossmann, 79% to 84%, but on seen stores their CRPS is 29% to 101% worse than offsets plus embeddings.
 - **Finishing the posteriors.** Before `fit` set each store's offsets exactly after training, the variational posteriors scored 0.1061 (offsets plus embeddings) and 0.1108 (offsets) at 1 to 5 rows on Rossmann. Finishing takes them to 0.0963 and 0.1013 and moves every larger bucket by under 0.002. The posteriors are now as narrow as the model says, so the raw 80% interval of those stores holds 72% of their rows instead of 75%. Calibrate on held-out rows when coverage matters.
 - **Reading the store in context loses to the exact update.** This is the amortized, neural-process view of a mixed model. It loses to offsets plus embeddings on CRPS in every column on both tables. On FreshRetailNet it loses even to leaving the store out. On Rossmann it beats the ordinary embedding at 1 to 5 rows and on unseen stores, and GPBoost everywhere, and its unseen interval is the best calibrated of Ashlar's, at 78.9%. A set encoder over binned tokens is a cruder reader of the rows than a dedicated numeric one could be. Even so, it would have to beat `with_context`, which is exact for the offset, so the variant was not built into the library.
+
+## Additive models against R's gamlss
+
+From [`examples/benchmark_additive.py`](../examples/benchmark_additive.py), the protocol of [#42](https://github.com/maxmbay/ashlar/issues/42). Every parameter of an additive model of a distribution is a sum of one shape per column. R's `gamlss` 5.4.22 fits each shape as a penalized B-spline (`pb`) by backfitting. `backbone="additive"` fits each as a small network, trained by gradient descent with the head. Two tables, with three random 80/20 splits each:
+
+- **Hourly bike rentals**, 17,379 hours, a count. Every model is a negative binomial whose mean and dispersion are each additive in every column: Ashlar's `negative_binomial` head and `gamlss`'s `NBI`. Each additive model is also fitted with the one pair that matters, the hour by the working day.
+- **Abalone rings**, 4,177 abalone, treated as continuous. Ashlar's `gaussian` is set against `gamlss`'s `NO`, each with an additive mean and log scale. Ashlar's `mixture` is set against `gamlss`'s `BCCGo`, a Box-Cox Cole-Green with an additive median and scale and a constant skewness.
+
+The residual-network rows are Ashlar's default backbone with the same head. Scores are on the test rows: the negative log-likelihood (log mass for the counts, log density for the rings), the CRPS, and the raw central 80% interval. R computes the CRPS of `gamlss` from its own CDFs on the same grid as Python. For the `NBI` and `NO` fits, Python recomputed it from R's fitted parameters and agreed within 5e-12 per row. ± is one standard error over the splits. Seconds are the mean per fit on one laptop. Some `gamlss` fits shared it with other jobs, so their times run high.
+
+### Hourly bike rentals, negative binomial
+
+| Model | NLL | CRPS | 80% coverage | 80% width | Seconds per fit |
+|---|---:|---:|---:|---:|---:|
+| Ashlar, additive | 5.089 ± 0.010 | 42.25 ± 0.68 | 82.5% | 223.1 | 8 |
+| `gamlss` `NBI`, additive | 5.078 ± 0.012 | 42.15 ± 0.48 | 82.1% | 222.7 | 122 |
+| Ashlar, additive + hour × working day | 4.755 ± 0.014 | 23.46 ± 0.31 | 83.4% | 110.8 | 10 |
+| `gamlss` `NBI`, additive + hour × working day | 4.763 ± 0.020 | 23.40 ± 0.28 | 82.6% | 108.8 | 1,093 |
+| Ashlar, residual network | 4.497 ± 0.012 | 16.48 ± 0.34 | 80.1% | 69.5 | 19 |
+
+### Abalone rings
+
+| Model | NLL | CRPS | 80% coverage | 80% width | Seconds per fit |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `gaussian`, additive | 2.193 ± 0.059 | 1.156 ± 0.019 | 84.6% | 5.48 | 2 |
+| `gamlss` `NO`, additive | 2.135 ± 0.030 | 1.115 ± 0.025 | 83.0% | 5.06 | 173 |
+| Ashlar `mixture`, additive | 1.949 ± 0.021 | 1.085 ± 0.019 | 79.0% | 4.67 | 2 |
+| `gamlss` `BCCGo`, additive, constant skewness | 1.982 ± 0.021 | 1.096 ± 0.019 | 79.6% | 4.59 | 104 |
+| Ashlar `gaussian`, residual network | 2.049 ± 0.015 | 1.095 ± 0.017 | 83.8% | 5.07 | 3 |
+| Ashlar `mixture`, residual network | 1.938 ± 0.019 | 1.071 ± 0.019 | 80.2% | 4.80 | 3 |
+
+- **On bike rentals the additive models match `gamlss`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the pair, each within a standard error. Ashlar's likelihood is 0.011 nats behind without the pair and 0.008 ahead with it.
+- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds. `gamlss` took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit.
+- **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
+- **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
+- **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
 
 ## Forecast heads
 

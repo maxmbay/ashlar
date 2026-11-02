@@ -6,6 +6,15 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Added
 
+- **Additive models of the whole distribution, a neural GAMLSS.**
+  - `backbone="additive"` gives each column of `X` a small network of its own, and each pair named in `backbone_kwargs={"pairs": [...]}` one more. The networks meet only in the head, which is linear in them, so each of the head's outputs (a location, a raw scale, a log mean, a logit) is an intercept plus one shape per term.
+  - Works on every built-in head but `multivariate_flow` and `chain`, so an additive model also gets the count and hurdle heads, mixtures and flows, observed labels, monotone constraints, entity effects, and `calibrate`.
+  - `model.shape_functions(X)` reads the terms back per row, term, and output, with `importance` and `to_frame`, and keeps members apart in `member_values`. New module `ashlar.shapes`.
+  - On hourly bike rentals, the additive negative binomial matches R's `gamlss` with penalized splines: CRPS 42.25 against 42.15, and 23.46 against 23.40 with the hour × working day pair. Each fit takes 8 to 10 seconds, against 2 to 45 minutes for `gamlss`.
+  - On abalone rings, the additive `mixture` beats `gamlss`'s Box-Cox Cole-Green, CRPS 1.085 against 1.096. `gamlss`'s normal beats the additive `gaussian`, 1.115 against 1.156.
+  - The residual network, with every interaction, scores 16.48 on bike rentals: what additivity costs there.
+  - `examples/benchmark_additive.py` runs the comparison and draws `docs/images/additive-bike.png`. [docs/additive.md](docs/additive.md) is the guide, and [docs/benchmarks.md](docs/benchmarks.md#additive-models-against-rs-gamlss) has the tables.
+  - The research models `ASRAdditive` and `ASRGatedAdditive` are marked experimental and point to `backbone="additive"`. ([#42](https://github.com/maxmbay/ashlar/issues/42))
 - **Entity effects, pooled across groups.**
   - `random_effects={"store": "intercept"}` on `ASRRegressor` takes the grouping column out of the network. Each group gets a variational offset on the head's location, `N(0, tau²)` with `tau` learned. A numeric feature named among the terms gets a random slope.
   - `"embedding"` adds a pooled vector per group that the network reads, shrunk the same way, so a group can interact with the other features.
@@ -37,6 +46,10 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - **Joint regions.** `predict_region(X, coverage)` gives a joint head's highest-density region per row as a log density threshold: `log_prob(X, Y) >= threshold` is inside. `calibrate` calibrates it on the model's probability of an outcome denser than the one seen, so the region holds `coverage` of new rows. New `ashlar.calibrate.density_pit`, `region_level`, and `region_threshold`.
 - `examples/benchmark_uncertainty.py --stage groups` scores the 80% interval within groups of each calibration table before and after calibration per group, and `--stage localize` past the training range with `localize="members"`. `examples/joint_demand.py by_hour` calibrates the total per hour of day and scores the joint region. Results in [docs/benchmarks.md](docs/benchmarks.md#coverage-within-groups): one calibration already holds within the groups of four of the five tables; a table per hour puts the electricity total near 80% at every hour; calibration takes the 80% joint region from 61% of hours to 79% for the joint normal and from 53% to 78% for the flow; and no calibration on rows in range, `localize="members"` included, holds the interval past the training range.
 - `examples/benchmark_observed_real.py`: the labels that say what was observed, on real data. Survival on SUPPORT, METABRIC, and GBSG against XGBoost's AFT model, tuned on a grid, and a Cox model; drive failures with delayed entry on Backblaze's first quarter of 2024 against XGBoost AFT and pycox; demand from censored sales on FreshRetailNet-50K; and daily loads from meter readings. Results in [docs/benchmarks.md](docs/benchmarks.md#observed-labels-on-real-data): fits to censored sales score within 0.005 nats of fits to the true demand, and their orders cost 4% more than the oracle's, against 12% for fits to sales; readings every 2 to 12 days teach the daily load nearly as well as the days, and weekly totals cannot place it within the week; the `mixture` head has a better likelihood than tuned AFT on two clinical tables of three and ties on the third; and on the drives, AFT fitted to the days watched with the age as a feature beats Ashlar's truncated likelihood. [docs/observed.md](docs/observed.md#survival-times) has a new section on survival times. ([#39](https://github.com/maxmbay/ashlar/issues/39))
+
+### Fixed
+
+- The transformer and set backbones could read the wrong slice of their input when a table mixed numeric, one-hot, embedded, and set columns out of schema order. The core concatenates its fields grouped by kind, but `feature_chunks` listed them in schema order. Fields now follow the core's order, saved with the model as `field_order`, and a model saved without it loads with the old order. ([#42](https://github.com/maxmbay/ashlar/issues/42))
 
 ## 0.0.4 — 2026-10-31
 

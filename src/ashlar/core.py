@@ -41,11 +41,12 @@ class PredictiveCore(Module):
     # The columns of ``category_index`` the learned embeddings read; ``None`` is every column.
     embedding_positions: tuple[int, ...] | None = field(static=True, default=None)
 
-    def __call__(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key, offsets: bool = True):
-        """The head's raw output, ``(batch, members, outputs)``.
+    def fields(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key=None):
+        """The backbone's input, ``(batch, sum(feature_chunks))``: every field, side by side, before field dropout.
 
-        ``offsets=False`` leaves out the random effects' offsets on the location (``ashlar.effects``), so a
-        caller can add its own, as ``with_context`` does.
+        The numeric columns come first, then the one-hot columns, the learned
+        embeddings, the sets, and the pooled group embeddings, each a field of
+        ``feature_chunks``. With a ``key`` the pooled embeddings are a posterior draw.
         """
         if numeric_z.ndim != 2 or categorical_onehot.ndim != 2:
             raise ShapeError(
@@ -72,10 +73,6 @@ class PredictiveCore(Module):
                 f"received {set_tokens.shape} and {set_mask.shape}."
             )
         pieces = []
-        if key is None:
-            feature_key, backbone_key = None, None
-        else:
-            feature_key, backbone_key = jax.random.split(key)
         trunk_z = numeric_z if self.monotone is None else self.monotone.without(numeric_z)
         if self.n_numeric:
             pieces.append(trunk_z if self.embeddings is None else self.embeddings(trunk_z))
@@ -91,7 +88,19 @@ class PredictiveCore(Module):
             pieces.append(self.random_effects.embed(category_index, embed_key(key)))
         if not pieces:
             raise ShapeError("the core has no features.")
-        encoded = pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces, axis=1)
+        return pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces, axis=1)
+
+    def __call__(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key, offsets: bool = True):
+        """The head's raw output, ``(batch, members, outputs)``.
+
+        ``offsets=False`` leaves out the random effects' offsets on the location (``ashlar.effects``), so a
+        caller can add its own, as ``with_context`` does.
+        """
+        if key is None:
+            feature_key, backbone_key = None, None
+        else:
+            feature_key, backbone_key = jax.random.split(key)
+        encoded = self.fields(numeric_z, categorical_onehot, category_index, set_tokens, set_mask, key=key)
         encoded = drop_features(encoded, self.feature_chunks, self.feature_dropout, feature_key)
         hidden = self.backbone(encoded, key=backbone_key)
         if self.bottleneck is not None:
@@ -113,7 +122,6 @@ class PredictiveCore(Module):
                 f"received {residual.shape} for head output {log_probs.shape}."
             )
         return jax.nn.log_softmax(log_probs + residual[:, None, :], axis=-1)
-
 
     def penalty(self):
         """Terms of the model's own beside the objective, per training row: the random effects' KL divergence."""
