@@ -30,7 +30,9 @@ The README's pooling figure. Two stages, run from the repo root:
   ``docs/benchmarks.md``.
 - ``check.json``: this fit's CRPS by bucket, beside the saved seed-0 run.
 
-``draw`` reads only the artifacts.
+``draw`` reads only ``stores.json`` and ``buckets.json``. ``unseen.npz`` backs
+the numbers on new stores in ``docs/benchmarks.md`` ("The README's pooling
+figure").
 
 Rossmann is the fev benchmark's ``rossmann/1D``, saved as
 ``$ASHLAR_BENCH/rossmann-1D.parquet`` (default ``/tmp/ashlar-bench``).
@@ -289,10 +291,11 @@ def compute(seed: int = SEED, epochs=None):
 
 FIGURE = "store-pooling"
 Z80 = 1.2815515655446004
-# The right panel's rows, top to bottom, and their labels.
+# The right panel's rows, top to bottom, and their labels. A row of Rossmann is one day of one store.
 BUCKETS = ("1-5", "6-20", "21-100", "101-300", "unseen", "unseen_context")
-BUCKET_LABELS = ("1–5 rows", "6–20", "21–100", "101–300", "no rows", "after 5 rows")
+BUCKET_LABELS = ("1–5 days", "6–20", "21–100", "101–300", "no days", "after 5 days")
 WORDS = {2: "two", 3: "three", 4: "four", 5: "five"}
+SMALL = 5  # the left panel joins the own mean of each store with at most this many training days to its pooled effect
 # Methods, back to front: (method, colour, legend label).
 METHODS = (
     ("embedding", "DATA_DARK", "ordinary embedding"),
@@ -300,7 +303,7 @@ METHODS = (
     ("gpboost", "CLAY", "GPBoost"),
     ("pooled_embedding", "TEAL", "Ashlar, pooled"),
 )
-NONE_X, GAP_X = 0.42, 0.66  # the left panel's "no rows yet", and the break before 1 row
+NONE_X, GAP_X = 0.42, 0.66  # the left panel's "no days yet", and the break before 1 day
 
 
 def bucket_stats(buckets: dict, method: str) -> dict:
@@ -316,22 +319,6 @@ def bucket_stats(buckets: dict, method: str) -> dict:
         out[bucket] = {"crps": float(crps.mean()), "sd": float(crps.std(ddof=1)) if len(crps) > 1 else 0.0,
                        "coverage": float(np.mean(coverage)) if coverage else None, "splits": len(cells)}
     return out
-
-
-def highlighted(unseen: dict) -> int:
-    """The new store drawn: the unseen store whose |level| is nearest the 90th percentile among unseen stores,
-    a fixed rule for a store that differs from the average one."""
-    size = np.abs(unseen["level"].astype(np.float64))
-    return int(np.argmin(np.abs(size - np.quantile(size, 0.9))))
-
-
-def raw_path(unseen: dict, pick: int) -> np.ndarray:
-    """The new store's own running mean residual over its first k rows, its context rows then its test rows,
-    in the order the compute stage read them."""
-    first = (unseen["context_y"] - unseen["context_population"])[unseen["context_store"] == pick]
-    then = (unseen["row_y"] - unseen["row_population"])[unseen["row_store"] == pick]
-    residual = np.concatenate([first, then]).astype(np.float64)
-    return np.cumsum(residual) / np.arange(1, len(residual) + 1)
 
 
 def _legend(k, fig, items, line: int = 0):
@@ -357,15 +344,16 @@ def draw():
     import style as k
 
     stores = k.load_json(FIGURE, "stores")
-    unseen = k.load_npz(FIGURE, "unseen")
     buckets = k.load_json(FIGURE, "buckets")
     stats = {method: bucket_stats(buckets, method) for method, *_ in METHODS}
-    ours, gpb, emb, mix = (stats[name] for name in ("pooled_embedding", "gpboost", "embedding", "mixedlm"))
+    ours, gpb = stats["pooled_embedding"], stats["gpboost"]
     splits = buckets.get("splits") or max(cell["splits"] for cell in ours.values())
     tau = float(stores["tau"])
     rows = np.asarray(stores["rows"], dtype=np.float64)
+    raw = np.asarray(stores["raw"], dtype=np.float64)
     pooled = np.asarray(stores["pooled"], dtype=np.float64)
     sd = np.asarray(stores["offset_sd"], dtype=np.float64)
+    small = rows <= SMALL
     halo = [path_effects.withStroke(linewidth=4.5, foreground=k.CARD)]
     splits_text = WORDS.get(splits, str(splits))
 
@@ -375,72 +363,68 @@ def draw():
         f"{gpb['1-5']['crps']:.3f}.",
         f"Rossmann, {buckets.get('stores', 1115):,} stores: log daily sales given the store's type and assortment, "
         "the date, promotions, holidays and competition, with a store effect pooled towards the average store. "
-        "A fifth of the stores held out whole. Left: one split. Right: CRPS by rows per store, "
-        f"mean of {splits_text} splits.",
+        "Each seen store trains on a random 1 to 300 of its days (log-uniform), and a fifth of the stores are "
+        f"held out whole. Left: one split. Right: mean of {splits_text} splits.",
         height=9.4, footer=3.35,
     )
     left = k.panel(fig, rect=(0.0, 0.0, 0.575, 1.0), head=0.95, tail=0.8, lpad=0.72, rpad=0.12, grid="y")
     right = k.panel(fig, rect=(0.635, 0.0, 1.0, 1.0), head=0.95, tail=0.8, lpad=1.32, rpad=0.08, grid="x")
 
-    # Left, behind: every seen store's pooled effect with its 80% interval.
+    # Left: every seen store's pooled effect with its 80% interval. A store with 1 to 5 training days is drawn as a
+    # line from its own mean residual (grey, left) to its pooled effect (teal, right): how far the average pulls it.
     rng = np.random.default_rng(0)
     x = rows * np.exp(rng.uniform(-0.09, 0.09, len(rows)))
-    pick = highlighted(unseen)
-    steps = np.asarray(unseen["path_steps"], dtype=np.float64)
-    mean = np.asarray(unseen["path_mean"][pick], dtype=np.float64)
-    spread = Z80 * np.asarray(unseen["path_sd"][pick], dtype=np.float64)
-    level = float(unseen["level"][pick])
-    level_rows = int(unseen["level_rows"][pick])
-    own = raw_path(unseen, pick)
-    own_steps = own[np.minimum(steps.astype(int), len(own)) - 1]
-    reach = max(np.quantile(np.abs(pooled), 0.995), Z80 * tau, np.max(np.abs(mean) + spread), abs(level), 0.2)
+    own_x, pooled_x = rows * np.exp(-0.11), rows * np.exp(0.07)
+    reach = max(np.max(np.abs(pooled)), np.max(np.abs(raw[small])), Z80 * tau, 0.2)
     limit = float(np.ceil(reach * 1.08 * 10) / 10)
+    inside = lambda values: np.clip(values, -limit * 0.98, limit * 0.98)  # noqa: E731
     left.axhline(0.0, color=k.MUTED, lw=1.0, zorder=0.6)
-    left.add_collection(LineCollection(np.stack([np.c_[x, pooled - Z80 * sd], np.c_[x, pooled + Z80 * sd]], axis=1),
-                                       colors=k.TEAL_PALE, linewidths=0.9, zorder=1))
-    left.scatter(x, np.clip(pooled, -limit * 0.98, limit * 0.98), s=9, color=k.TEAL, alpha=0.8, lw=0, zorder=3)
+    big = ~small
+    left.add_collection(LineCollection(np.stack([np.c_[x, pooled - Z80 * sd], np.c_[x, pooled + Z80 * sd]],
+                                                axis=1)[big], colors=k.TEAL_PALE, linewidths=0.9, zorder=1))
+    left.scatter(x[big], inside(pooled[big]), s=9, color=k.TEAL, alpha=0.85, lw=0, zorder=3)
+    left.add_collection(LineCollection(np.stack([np.c_[own_x, inside(raw)], np.c_[pooled_x, inside(pooled)]],
+                                                axis=1)[small], colors=k.DATA, linewidths=0.9, zorder=2))
+    left.scatter(own_x[small], inside(raw[small]), s=12, color=k.DATA_DARK, lw=0, zorder=2.5)
+    left.scatter(pooled_x[small], inside(pooled[small]), s=12, color=k.TEAL, lw=0, zorder=3.2)
+    # How far, on average: the pooled effect against the store's own mean, a least-squares slope through zero.
+    pull = []
+    for low, high in ((1, 1), (2, 3), (4, 10), (11, 300)):
+        group = (rows >= low) & (rows <= high)
+        pull.append(float(np.sum(raw[group] * pooled[group]) / np.sum(raw[group] ** 2)))
+    note = k.value(left, 0.34, limit * 1.38,
+                   f"How much of its own mean a store keeps, on average:\n{k.pct(pull[0])} at 1 day, "
+                   f"{k.pct(pull[1])} at 2 to 3 days, {k.pct(pull[2])} at 4 to 10, {k.pct(pull[3])} above",
+                   k.INK, ha="left", va="top", size=12.5, zorder=8)
+    note.set_linespacing(1.25)
 
-    # Left, in front: one new store, from the prior (no rows) through with_context on its first 1 to 35 rows.
+    # A store with no days: the population, its offset anywhere in the spread between stores.
     left.axvspan(0.2, GAP_X, color=k.CARD, lw=0, zorder=3.5)
     left.axvline(GAP_X, color=k.HAIR, lw=1.0, zorder=3.6)
-    path_x = np.r_[NONE_X, steps]
-    path_mean, path_spread = np.r_[0.0, mean], np.r_[Z80 * tau, spread]
-    left.plot([NONE_X * 0.72, steps[-1] * 1.5], [level, level], color=k.INK, lw=1.6, ls=(0, (4, 2.5)), zorder=4)
-    bars = LineCollection(np.stack([np.c_[path_x, path_mean - path_spread], np.c_[path_x, path_mean + path_spread]],
-                                   axis=1), colors=k.TEAL_DARK, linewidths=6.5, capstyle="butt", zorder=5)
-    bars.set_path_effects([path_effects.withStroke(linewidth=9.5, foreground=k.CARD)])
-    left.add_collection(bars)
-    left.plot(path_x, path_mean, color=k.TEAL_DARK, lw=1.4, zorder=5.5)
-    left.scatter(steps, own_steps, s=40, color=k.DATA_DARK, edgecolor=k.CARD, lw=1.0, zorder=6)
-    left.scatter(path_x, path_mean, s=46, color=k.TEAL, edgecolor=k.CARD, lw=1.2, zorder=7)
-
-    up = 1.0 if level >= 0 else -1.0
-    k.value(left, NONE_X, -up * (Z80 * tau + 0.035 * limit), "a new\nstore", k.TEAL_DARK, ha="center",
-            va="top" if up > 0 else "bottom", size=12.5, zorder=8).set_linespacing(1.05)
-    edge = np.max(up * np.r_[mean + up * spread, own_steps])
-    k.code(left, 3.2, up * (max(edge, Z80 * tau) + 0.09 * limit), "with_context(X, y)", k.TEAL_DARK, bold=True,
-           ha="center", va="bottom" if up > 0 else "top", zorder=8).set_path_effects(halo)
-    tag = k.value(left, steps[-1] * 1.6, level, f"its level over\nall {level_rows:,} days", k.INK, ha="left",
-                  va="center", size=12, zorder=8)
-    tag.set_linespacing(1.1)
-    tag.set_path_effects(halo)
+    prior = LineCollection([[(NONE_X, -Z80 * tau), (NONE_X, Z80 * tau)]], colors=k.TEAL_DARK, linewidths=6.5,
+                           capstyle="butt", zorder=5)
+    prior.set_path_effects([path_effects.withStroke(linewidth=9.5, foreground=k.CARD)])
+    left.add_collection(prior)
+    left.scatter([NONE_X], [0.0], s=46, color=k.TEAL, edgecolor=k.CARD, lw=1.2, zorder=7)
+    k.value(left, NONE_X, -(Z80 * tau + 0.035 * limit), "a new\nstore", k.TEAL_DARK, ha="center", va="top",
+            size=12.5, zorder=8).set_linespacing(1.05)
 
     left.set_xscale("log")
     left.set_xlim(0.3, 480)
-    left.set_ylim(-limit, limit)
+    left.set_ylim(-limit, limit * 1.42)
     step = 0.5 if limit > 0.8 else 0.25
     marks = np.arange(-np.floor(limit / step), np.floor(limit / step) + 1) * step
     left.set_yticks(marks)
-    left.set_yticklabels(["0" if m == 0 else f"{m:+g}".replace("-", "\u2212") for m in marks])
+    left.set_yticklabels(["0" if m == 0 else f"{m:+g}".replace("-", "−") for m in marks])
     ticks = [1, 3, 10, 30, 100, 300]
     left.set_xticks([NONE_X, *ticks])
     left.set_xticklabels(["0", *map(str, ticks)])
     left.minorticks_off()
     k.style(left, frame="lb", grid="y")
-    k.axis_names(left, x="rows of the store the model has read", y="the store's effect on log sales")
-    k.panel_title(left, "Every seen store's effect; one new store, row by row", raise_by=0.42)
+    k.axis_names(left, x="training days of the store", y="the store's effect on log sales")
+    k.panel_title(left, "The fewer its days, the further a store is pulled to the average", raise_by=0.42)
 
-    # Right: CRPS by rows per store, a dot per method, seen stores above, new stores below.
+    # Right: CRPS by training days per store, a dot per method, seen stores above, new stores below.
     ys = np.r_[np.arange(4), np.arange(4, 6) + 0.55]
     ys = ys.max() - ys
     for row, bucket in enumerate(BUCKETS):
@@ -477,34 +461,33 @@ def draw():
     right.set_ylim(ys.min() - 0.6, ys.max() + 1.05)
     k.style(right, frame="b", grid="x")
     k.axis_names(right, x="CRPS of log sales, lower is better")
-    k.panel_title(right, "Scores by rows per store", raise_by=0.42)
+    k.panel_title(right, "Scores by training days per store", raise_by=0.42)
     for row, text, lift in ((0, "stores seen in training", 0.8), (4, "new stores, held out whole", 0.48)):
         right.text(0.002, ys[row] + lift, text, fontproperties=k.F.small, color=k.MUTED, ha="left", va="center")
 
-    coverage = {method: stats[method].get("unseen", {}).get("coverage") for method in stats}
-    later = {method: stats[method].get("unseen_context", {}).get("coverage") for method in stats}
-    if None not in coverage.values():
-        new = ("unseen", "unseen_context")
-        worse = [stats[m][b]["crps"] / ours[b]["crps"] - 1 for m in ("gpboost", "mixedlm") for b in new]
-        x0, label, number = fig.box.left / fig.box.width, k.F.label, k.F.value
+    # Below: coverage of the raw 80% interval, seen small stores and new stores apart.
+    cover = {method: {bucket: stats[method].get(bucket, {}).get("coverage") for bucket in BUCKETS} for method in stats}
+    x0, label, number = fig.box.left / fig.box.width, k.F.label, k.F.value
+    needed = [cover[m][b] for m in ("pooled_embedding", "gpboost", "mixedlm") for b in ("1-5", "unseen", "unseen_context")]
+    if None not in needed and cover["embedding"]["unseen"] is not None:
         first = [
-            ("A new store's 80% interval holds ", k.INK, label), (k.pct(coverage["pooled_embedding"]), k.TEAL, number),
-            (" of its days, against ", k.INK, label), (k.pct(coverage["embedding"]), k.DATA_DARK, number),
-            (" for an ordinary embedding", k.INK, label),
+            ("Stores with 1 to 5 days: Ashlar's 80% interval holds ", k.INK, label),
+            (k.pct(cover["pooled_embedding"]["1-5"]), k.TEAL, number), (", against ", k.INK, label),
+            (k.pct(cover["gpboost"]["1-5"]), k.CLAY, number), (" for GPBoost and ", k.INK, label),
+            (k.pct(cover["mixedlm"]["1-5"]), k.SLATE, number), (" for the mixed model.", k.INK, label),
         ]
-        second = [("GPBoost's and the mixed model's hold nearer 80%, ", k.MUTED, label),
-                  (k.pct(coverage["gpboost"]), k.CLAY, number), (" and ", k.MUTED, label),
-                  (k.pct(coverage["mixedlm"]), k.SLATE, number)]
-        if None not in (later["pooled_embedding"], later["gpboost"], later["mixedlm"]):
-            first += [("; after five of its rows, ", k.INK, label), (k.pct(later["pooled_embedding"]), k.TEAL, number)]
-            second += [(", then ", k.MUTED, label), (k.pct(later["gpboost"]), k.CLAY, number),
-                       (" and ", k.MUTED, label), (k.pct(later["mixedlm"]), k.SLATE, number)]
-        first += [(".", k.INK, label)]
-        second += [(f", at a CRPS {k.pct(min(worse))} to {k.pct(max(worse))} higher.", k.MUTED, label)]
+        second = [
+            ("New stores: ", k.INK, label), (k.pct(cover["pooled_embedding"]["unseen"]), k.TEAL, number),
+            (" with no days, against ", k.INK, label), (k.pct(cover["embedding"]["unseen"]), k.DATA_DARK, number),
+            (" for an ordinary embedding; after five days, ", k.INK, label),
+            (k.pct(cover["pooled_embedding"]["unseen_context"]), k.TEAL, number), (" against ", k.INK, label),
+            (k.pct(cover["gpboost"]["unseen_context"]), k.CLAY, number), (" and ", k.INK, label),
+            (k.pct(cover["mixedlm"]["unseen_context"]), k.SLATE, number), (".", k.INK, label),
+        ]
         k.rich(fig, x0, (0.34 + 0.45 + 0.34) / fig.box.height, first, va="bottom")
         k.rich(fig, x0, (0.34 + 0.45) / fig.box.height, second, va="bottom")
     _legend(k, fig, [
-        ("dot", k.DATA_DARK, "the new store's own mean so far"),
+        ("dot", k.DATA_DARK, f"own mean, 1 to {SMALL} days"),
         ("dot", k.TEAL, "Ashlar, pooled, with its 80% interval"),
         ("dot", k.CLAY, "GPBoost"),
         ("dot", k.SLATE, "linear mixed model"),
@@ -513,27 +496,29 @@ def draw():
     k.save(fig, FIGURE)
 
     def mark(ax):
-        ax.add_collection(LineCollection(np.stack([np.c_[x, pooled - Z80 * sd], np.c_[x, pooled + Z80 * sd]], axis=1),
-                                         colors=k.TEAL_WASH, linewidths=0.8, zorder=1))
-        ax.scatter(x, pooled, s=4, color=k.TEAL_PALE, lw=0, zorder=2)
-        ax.axvspan(0.2, GAP_X, color=k.CARD, lw=0, zorder=3)
+        # The left panel without its words: small stores' own means joined to their pooled effects, the rest as dots.
+        ax.add_collection(LineCollection(np.stack([np.c_[x, pooled - Z80 * sd], np.c_[x, pooled + Z80 * sd]],
+                                                  axis=1)[big], colors=k.TEAL_WASH, linewidths=0.8, zorder=1))
+        ax.scatter(x[big], pooled[big], s=5, color=k.TEAL, alpha=0.85, lw=0, zorder=3)
+        ax.add_collection(LineCollection(np.stack([np.c_[own_x, raw], np.c_[pooled_x, pooled]], axis=1)[small],
+                                         colors=k.DATA, linewidths=0.9, zorder=2))
+        ax.scatter(own_x[small], raw[small], s=7, color=k.DATA_DARK, lw=0, zorder=2.5)
+        ax.scatter(pooled_x[small], pooled[small], s=7, color=k.TEAL, lw=0, zorder=3.2)
+        ax.axvspan(0.2, GAP_X, color=k.CARD, lw=0, zorder=3.5)
         ax.axhline(0.0, color=k.HAIR, lw=1.0, zorder=0.5)
-        ax.plot([NONE_X * 0.72, steps[-1] * 1.5], [level, level], color=k.INK, lw=1.8, ls=(0, (4, 2.5)), zorder=4)
-        bars = LineCollection(np.stack([np.c_[path_x, path_mean - path_spread], np.c_[path_x, path_mean + path_spread]],
-                                       axis=1), colors=k.TEAL_DARK, linewidths=7, capstyle="butt", zorder=5)
-        bars.set_path_effects([path_effects.withStroke(linewidth=10, foreground=k.CARD)])
-        ax.add_collection(bars)
-        ax.plot(path_x, path_mean, color=k.TEAL_DARK, lw=1.6, zorder=5.5)
-        ax.scatter(path_x, path_mean, s=40, color=k.TEAL, edgecolor=k.CARD, lw=1.2, zorder=7)
+        bar = LineCollection([[(NONE_X, -Z80 * tau), (NONE_X, Z80 * tau)]], colors=k.TEAL_DARK, linewidths=7,
+                             capstyle="butt", zorder=5)
+        ax.add_collection(bar)
+        ax.scatter([NONE_X], [0.0], s=40, color=k.TEAL, edgecolor=k.CARD, lw=1.2, zorder=7)
         ax.set_xscale("log")
         ax.set_xlim(0.3, 480)
-        ax.set_ylim(-limit * 0.85, limit * 0.85)
+        ax.set_ylim(-limit, limit)
         ax.minorticks_off()
         ax.set_xticks([])
         ax.set_yticks([])
 
     k.thumb("pooling", "Groups borrow strength", [
-        (f"{ours['1-5']['crps']:.3f}", k.TEAL), (" CRPS at 1–5 rows, against ", k.MUTED),
+        (f"{ours['1-5']['crps']:.3f}", k.TEAL), (" CRPS at 1–5 days, against ", k.MUTED),
         (f"{gpb['1-5']['crps']:.3f}", k.CLAY),
     ], mark)
 

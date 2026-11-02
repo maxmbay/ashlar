@@ -209,6 +209,10 @@ def headline(saved: dict) -> dict:
     calibrated_peak = {name: seed_mean(saved, name, "paths", "peak", "calibrated_brier") for name in ASHLAR_HEADS}
     calibrated_peak = {name: value for name, value in calibrated_peak.items() if value is not None}
     best = min(calibrated_peak, key=calibrated_peak.get) if calibrated_peak else None
+    # Every model's peak Brier, raw and after calibrate: the best of all, for the footnote's "DeepAR's scores best".
+    peak = {(name, key): seed_mean(saved, name, "paths", "peak", key) for name in saved
+            for key in ("brier", "calibrated_brier")}
+    peak = {pair: value for pair, value in peak.items() if value is not None}
     rate = seed_mean(saved, "joint", "paths", "peak", "event_rate")
     return {
         "joint_total_coverage": seed_mean(saved, "joint", "paths", "total", "coverage"),
@@ -221,6 +225,8 @@ def headline(saved: dict) -> dict:
         "deepar_peak_brier": seed_mean(saved, "deepar", "paths", "peak", "brier"),
         "best_peak_brier": calibrated_peak.get(best),
         "best_peak_head": best,
+        "best_any_peak": min(peak, key=peak.get) if peak else None,
+        "best_any_peak_brier": min(peak.values()) if peak else None,
         "peak_rate": rate,
         "base_rate_brier": None if rate is None else rate * (1 - rate),
         "seeds": len(saved.get("joint", {})),
@@ -354,10 +360,14 @@ def draw():
         (k.num(numbers["lags_daily"]), k.SLATE, k.F.value), (" to ", k.INK, k.F.label),
         (k.num(numbers["joint_daily"]), k.TEAL, k.F.value), (".", k.INK, k.F.label),
     ], va="bottom")
-    k.footnote(fig, f"Work in progress. Chronos-2, zero-shot, is level day by day ({numbers['chronos_daily']:.1f} "
-                    f"against {numbers['joint_daily']:.1f}) and draws no paths. DeepAR calibrates the peak day best, "
-                    f"Brier {numbers['deepar_peak_brier']:.3f} against {numbers['best_peak_brier']:.3f}, and none "
-                    f"beats always saying {k.pct(rate)}, {numbers['base_rate_brier']:.3f}.", line=0)
+    # The footnote's words, checked: DeepAR's probability of a new peak scores best of every model, raw or after
+    # calibrate, and none beats a constant at the base rate. The section's prose gives the Brier scores.
+    assert numbers["best_any_peak"][0] == "deepar", numbers["best_any_peak"]
+    assert numbers["base_rate_brier"] < numbers["best_any_peak_brier"], numbers
+    k.footnote(fig, f"Chronos-2, zero-shot, is level day by day ({numbers['chronos_daily']:.1f} against "
+                    f"{numbers['joint_daily']:.1f}) and draws no paths. For the chance that one of the 12 days beats "
+                    f"the best of the 28 before, DeepAR's probability scores best, and none beats always saying "
+                    f"{k.pct(rate)}.", line=0)
     k.save(fig, FIGURE)
 
     def mark(ax):
