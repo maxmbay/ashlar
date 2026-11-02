@@ -41,7 +41,10 @@ PANEL = 348.0  # width of the code under the courses, before the caption
 # Slot labels knock out the lit path where it runs under them.
 HALO = 'stroke="#fbfaf7" stroke-width="5" stroke-linejoin="round" paint-order="stroke"'
 
-# (slot, argument, [(label, lit, accent)])
+LINE_GAP = 8.0  # px between the lines of one course
+BREAK = None  # starts a new line within a course
+
+# (slot, argument, [(label, lit, accent) or BREAK])
 COURSES = [
     (
         "encode",
@@ -74,16 +77,17 @@ COURSES = [
         "head",
         "task, head_kwargs",
         [
-            ("point", False, False),
             ("gaussian", False, True),
             ("mixture", False, True),
             ("flow", False, True),
             ("histogram", False, True),
             ("quantile_spline", False, True),
             ("negative_binomial", True, True),
+            BREAK,
             ("hurdle", False, True),
             ("chain", False, True),
             ("multivariate_*", False, True),
+            ("point", False, False),
             ("classes", False, False),
             ("your head", False, False),
         ],
@@ -173,18 +177,24 @@ def draw(theme: str) -> str:
     width = 0.0
     y = TOP + 26.0
     for slot, argument, options in COURSES:
-        x = LEFT
+        x, line_y = LEFT, y
         row = {"slot": slot, "argument": argument, "y": y, "blocks": []}
-        for label, lit, accent in options:
+        for option in options:
+            if option is BREAK:
+                width = max(width, x - GAP)
+                x, line_y = LEFT, line_y + BH + LINE_GAP
+                continue
+            label, lit, accent = option
             w = _width(label)
-            row["blocks"].append((x, w, label, lit, accent))
+            row["blocks"].append((x, line_y, w, label, lit, accent))
             x += w + GAP
         width = max(width, x - GAP)
+        row["bottom"] = line_y + BH
         rows.append(row)
-        y += BH + VGAP
+        y = row["bottom"] + VGAP
 
     code_h = len(CODE) * 22.0
-    total_w = width + 2 * LEFT - 0.0
+    total_w = width + 2 * LEFT
     total_h = y - VGAP + 34.0 + 28.0 + max(code_h, len(CAPTION) * 17.0) + 10.0
     out = [
         (
@@ -195,25 +205,26 @@ def draw(theme: str) -> str:
         f'<rect width="{total_w:.0f}" height="{total_h:.0f}" rx="10" fill="{colors["card"]}"/>',
     ]
 
-    # The lit path, drawn under the blocks so it reads as one line through the courses.
-    lit_points = []
+    # The lit path, drawn under the blocks so it reads as one line through the courses. It leaves each
+    # lit block downward to a lane under its course (a course's later lines leave room under the lit
+    # block), runs across, and drops into the next lit block.
+    lit = []
     for row in rows:
-        for x, w, _label, lit, _accent in row["blocks"]:
-            if lit:
-                lit_points.append((x + w / 2, row["y"]))
+        for x, line_y, w, _label, is_lit, _accent in row["blocks"]:
+            if is_lit:
+                lit.append((x + w / 2, line_y, row["bottom"]))
     path = []
-    for index, (cx, cy) in enumerate(lit_points):
-        if index:
-            px, py = lit_points[index - 1]
-            # Orthogonal: down, across a clear lane above the next slot label, then down.
-            lane = py + BH + 16.0
-            turn = 6.0 if cx > px else -6.0
-            path.append(
-                f"M{px:.1f} {py + BH:.1f}V{lane - 6:.1f}Q{px:.1f} {lane:.1f} {px + turn:.1f} {lane:.1f}"
-                f"H{cx - turn:.1f}Q{cx:.1f} {lane:.1f} {cx:.1f} {lane + 6:.1f}V{cy:.1f}"
-                if abs(cx - px) > 14
-                else f"M{px:.1f} {py + BH:.1f}V{cy:.1f}"
-            )
+    for index in range(1, len(lit)):
+        px, py, bottom = lit[index - 1]
+        cx, cy, _ = lit[index]
+        lane = bottom + 16.0
+        turn = 6.0 if cx > px else -6.0
+        path.append(
+            f"M{px:.1f} {py + BH:.1f}V{lane - 6:.1f}Q{px:.1f} {lane:.1f} {px + turn:.1f} {lane:.1f}"
+            f"H{cx - turn:.1f}Q{cx:.1f} {lane:.1f} {cx:.1f} {lane + 6:.1f}V{cy:.1f}"
+            if abs(cx - px) > 14
+            else f"M{px:.1f} {py + BH:.1f}V{cy:.1f}"
+        )
     out.append(
         f'<path d="{"".join(path)}" fill="none" stroke="{CLAY}" stroke-width="2" stroke-opacity="0.55"/>'
     )
@@ -229,11 +240,11 @@ def draw(theme: str) -> str:
             f'font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" '
             f'fill="{MUTED}" {HALO}>{_escape(row["argument"])}</text>'
         )
-        for x, w, label, lit, accent in row["blocks"]:
-            out.extend(_block(x, row["y"], w, label, lit, accent))
+        for x, line_y, w, label, is_lit, accent in row["blocks"]:
+            out.extend(_block(x, line_y, w, label, is_lit, accent))
 
     # The code under the courses: the arguments that light the path above, the caption beside it.
-    py = rows[-1]["y"] + BH + 30.0
+    py = rows[-1]["bottom"] + 30.0
     out.append(f'<path d="M{LEFT:.1f} {py - 12:.1f}H{width + LEFT:.1f}" stroke="{FLOOR}" stroke-width="1"/>')
     top = py + 8.0
     for line in CODE:
