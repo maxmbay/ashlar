@@ -1,0 +1,2 @@
+at 2dd6705 (claude/project-thread-j36znx)
+{"table": "year", "model": "lightgbmlss_mixture", "variant": "", "seed": 2, "seconds": 183.3, "trees": 267, "rmse": 8.794403190479034, "mae": 5.977196495113841, "crps": 4.16337023446667, "nll": 3.1868969734423294, "pinball": 1.8505828841370484, "coverage80": 0.75824, "width80": 16.725634519781792, "crps_gumbel_weights": 4.417562001980441, "nll_gumbel_weights": 3.271085507538767}
