@@ -2,7 +2,8 @@
 
 No data and no fit. Each glyph puts one label on the same predictive density: what the label says of ``y`` in ink,
 and the part of the density the head scores, its likelihood, in teal. ``draw`` writes
-``docs/images/readme/label-grammar.png``; there is no ``compute`` stage.
+``docs/images/readme/label-grammar.png`` and the gallery thumbnail ``thumbs/observed.png``; there is no ``compute``
+stage.
 
     python examples/readme/label_grammar.py draw
 """
@@ -243,6 +244,34 @@ def draw() -> None:
             fig.text(left / box.width, (base - 0.3) / box.height, meaning, fontproperties=k.F.small, color=k.MUTED,
                      ha="left", va="baseline")
     k.save(fig, "label-grammar")
+    _thumb()
+
+
+# The tile's number: four products that sell out together, simulated (docs/benchmarks.md, "Several products that
+# sell out together"). The joint mixture fitted to the censored label expects every shelf empty on 11.4% of test
+# days, against the 11.1% on which it happened; four censored fits, one per product, expect 0.7%.
+JOINT_EMPTY = {"joint": 0.114, "seen": 0.111, "one per product": 0.007}
+
+
+def _thumb() -> None:
+    def mark(ax):
+        ax.axis("off")
+        for column, glyph in enumerate((censored, noisy, total)):
+            inset = ax.inset_axes([column * 0.35, 0.0, 0.3, 1.0])
+            k.style(inset, frame="")
+            glyph(inset)
+            for line in inset.lines:  # the tile is shown at a quarter of its pixels: heavier strokes
+                line.set_linewidth(1.8 * line.get_linewidth())
+            for patch in inset.patches:
+                patch.set_linewidth(1.6 * patch.get_linewidth())
+            for dots in inset.collections:
+                if hasattr(dots, "get_sizes") and len(dots.get_sizes()):
+                    dots.set_sizes(2.2 * dots.get_sizes())
+
+    k.thumb("observed", "Observed labels",
+            [("All four out: ", k.MUTED), (k.pct(JOINT_EMPTY["joint"], 1), k.TEAL),
+             (f", seen {k.pct(JOINT_EMPTY['seen'], 1)}, against ", k.MUTED),
+             (k.pct(JOINT_EMPTY["one per product"], 1), k.CLAY)], mark)
 
 
 if __name__ == "__main__":

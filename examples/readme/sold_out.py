@@ -13,8 +13,7 @@ AFT model on the censored sales, chosen as the benchmark chooses it. It writes t
 - ``check.json``: this seed's test scores of each fit, beside the benchmark's own scores for the same seed;
 - ``stockouts.json``: a copy of the benchmark's results over its seeds, which the order-cost bars read.
 
-``draw`` runs in the cloud container, which has the fonts, and writes ``docs/images/readme/sold-out.png`` and the
-gallery thumbnail ``thumbs/observed.png``.
+``draw`` runs in the cloud container, which has the fonts, and writes ``docs/images/readme/sold-out.png``.
 
     JAX_PLATFORMS=cpu python examples/readme/sold_out.py compute
     python examples/readme/sold_out.py draw
@@ -229,12 +228,13 @@ def compute() -> None:
 SERIES = 0  # the candidate the figure draws, in the order of ``candidates``
 BAR = 0.56  # a day's bar width, in days
 COSTS = (  # the order-cost bars: the benchmark's key, the label, the bar's colour, the value's colour
-    ("mixture/censored", "Ashlar, censored sales", "TEAL", "TEAL"),
-    ("xgboost aft/censored", "XGBoost AFT, censored sales", "SLATE", "SLATE"),
-    ("lightgbm quantile/sales as demand", "LightGBM quantile, sales", "CLAY", "CLAY"),
-    ("mixture/sales as demand", "Ashlar, sales as demand", "TEAL_PALE", "MUTED"),
+    ("xgboost aft/censored", "XGBoost AFT", "CLAY", "CLAY"),
+    ("mixture/censored", "Ashlar, mixture head", "TEAL", "TEAL"),
+    ("lightgbm quantile/sales as demand", "LightGBM quantile regression", "SLATE", "SLATE"),
+    ("mixture/sales as demand", "Ashlar, mixture head", "TEAL_PALE", "MUTED"),
     ("mixture/days not sold out", "Ashlar, sold-out days dropped", "TEAL_PALE", "MUTED"),
 )
+READ_AS = ((0, "Read as censored"), (2, "Read as demand, or dropped"))  # group headers over the bars
 
 
 def _steps(day, values):
@@ -264,27 +264,58 @@ def _order_costs(bench: dict, k) -> tuple[list[int], list]:
     return seeds, rows
 
 
-def _shelf(ax, k, days: dict, *, lid: float = 3.2, dot: float = 46, lines: bool = True) -> float:
-    """Sales bars, a lid where the shelf ran out, the demand it hid, Ashlar's band, and LightGBM's quantiles."""
+def _shelf(ax, k, days: dict) -> None:
+    """Sales bars, a lid where the shelf ran out, the demand it hid, and each fit's quantiles of demand."""
     day, sold = days["day"], days["sold_out"]
-    x, teal = _steps(day, days["quantiles"]["censored"])
+    q = days["quantiles"]
+    x, teal = _steps(day, q["censored"])
+    _, clay = _steps(day, q["xgboost aft"])
+    _, slate = _steps(day, q["lightgbm"])
     ax.bar(day, days["sales"], width=BAR, color=k.DATA, lw=0, zorder=2)
     ax.fill_between(x, teal[0], teal[-1], color=k.TEAL, alpha=0.17, lw=0, zorder=3)  # a veil: the bars show through
-    if lines:
-        for level in (0, -1):
-            ax.plot(x, teal[level], color=k.TEAL, lw=1.3, zorder=3.5)
-        _, clay = _steps(day, days["quantiles"]["lightgbm"])
-        for level in (0, -1):
-            ax.plot(x, clay[level], color=k.CLAY, lw=2.0, zorder=4)
-    ax.hlines(days["stock"][sold], day[sold] - BAR / 2, day[sold] + BAR / 2, color=k.INK, lw=lid, zorder=5)
+    for level in (0, -1):
+        ax.plot(x, teal[level], color=k.TEAL, lw=1.4, zorder=3.5)
+        ax.plot(x, clay[level], color=k.CLAY, lw=2.0, zorder=4)
+    ax.plot(x, slate[-1], color=k.SLATE, lw=1.8, linestyle=(0, (4, 2.5)), zorder=4.2)
+    ax.hlines(days["stock"][sold], day[sold] - BAR / 2, day[sold] + BAR / 2, color=k.INK, lw=3.2, zorder=5)
     hid = sold & (days["demand"] > days["stock"])
     ax.vlines(day[hid], days["stock"][hid], days["demand"][hid], color=k.INK, lw=1.3, linestyles=(0, (1.2, 1.8)),
               zorder=5)
-    ax.scatter(day[sold], days["demand"][sold], s=dot, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=6)
-    top = max(days["demand"].max(), teal.max(), days["quantiles"]["lightgbm"].max())
+    ax.scatter(day[sold], days["demand"][sold], s=46, color=k.INK, edgecolor=k.CARD, lw=1.2, zorder=6)
+    top = max(days["demand"].max(), teal.max(), clay.max(), slate.max())
     ax.set_xlim(day.min() - 0.7, day.max() + 0.7)
     ax.set_ylim(0.0, 1.08 * top)
-    return top
+
+
+def _costs(ax, k, costs: list, seeds: list) -> None:
+    """The order cost of each fit above the oracle's: a bar at the mean over seeds, a dot for each seed."""
+    rows = len(costs) + len(READ_AS)
+    low = min(0.0, min(float(values.min()) for *_, values in costs))
+    high = max(float(values.max()) for *_, values in costs)
+    left, right = 1.2 * low - 1.0, 1.3 * high
+    pad = 0.02 * (right - left)  # labels start just right of zero, over the bars that start there
+    y = rows - 0.6
+    headers = dict(READ_AS)
+    for row, (label, bar, text, values) in enumerate(costs):
+        if row in headers:
+            ax.text(pad, y + 0.05, headers[row], fontproperties=k.F.label, color=k.INK, ha="left", va="center")
+            y -= 0.9
+        mean = float(values.mean())
+        ax.barh(y, mean, height=0.36, color=bar, lw=0, zorder=3)
+        ax.scatter(values, np.full(len(values), y), s=16, color=k.INK, edgecolor=k.CARD, lw=0.8, zorder=4)
+        ax.text(pad, y + 0.25, label, fontproperties=k.F.small, color=k.MUTED, ha="left", va="bottom")
+        k.value(ax, max(0.0, float(values.max())) + 0.03 * (right - left), y, f"{k.signed(mean, 1)}", color=text)
+        y -= 1.0
+    ax.axvline(0.0, color=k.INK, lw=1.1, zorder=2)
+    ax.set_xlim(left, right)
+    ax.set_ylim(y + 0.45, rows - 0.1)
+    step = 10.0
+    ticks = np.arange(np.ceil(left / step) * step, right, step)
+    ax.set_xticks(ticks, [k.signed(tick, 0) if tick else "0" for tick in ticks])
+    ax.set_yticks([])
+    k.style(ax, frame="b", grid="x")
+    k.axis_names(ax, y=f"mean of {len(seeds)} seeds, a dot for each")
+    k.panel_title(ax, "Order cost above the oracle's")
 
 
 def draw() -> None:
@@ -304,65 +335,46 @@ def draw() -> None:
 
     sold = int(days["sold_out"].sum())
     fig = k.card(
-        "The shelf ran out. The model didn't.",
-        f"FreshRetailNet-50K: one store's fresh product over its {len(days['day'])} test days, {when(days['day'][0])} to "
-        f"{when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the demand a sold-out "
-        "day hid is known. Bands run from 10% to 90% of demand: Ashlar's mixture head fitted to the censored sales in "
-        "teal, LightGBM's quantile regression on sales in clay.",
-        height=8.9,
-        footer=3,
+        "Read the sold-out days as censored, and the demand comes back.",
+        f"FreshRetailNet-50K: one store's fresh product over its {len(days['day'])} test days, {when(days['day'][0])} "
+        f"to {when(days['day'][-1])}. The stock is simulated on days that recorded their demand, so the demand a "
+        "sold-out day hid is known. Bands run from 10% to 90% of demand, fitted to the censored sales: Ashlar's "
+        "mixture head in teal, XGBoost's AFT model in clay. LightGBM's 90% quantile, fitted to sales, in slate.",
+        height=9.5,
+        footer=4,
     )
-    left, right = k.panels(fig, 1, 2, widths=[2.15, 1.0], wspace=0.55, head=0.75, tail=0.62, rpad=0.25)[0]
+    left, right = k.panels(fig, 1, 2, widths=[2.1, 1.0], wspace=0.55, head=0.75, tail=0.62, rpad=0.25)[0]
 
     _shelf(left, k, days)
     weekly = np.arange(days["day"][0], days["day"][-1] + 1, 7)
     left.set_xticks(weekly, [when(day) for day in weekly])
     k.style(left, frame="lb", grid="y")
     k.axis_names(left, y="sales and demand, a day")
-    k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days. The bars stop at the stock; the demand did not.")
+    k.panel_title(left, f"Sold out on {sold} of {len(days['day'])} days: the bars stop at the stock, the demand does not")
+    _costs(right, k, costs, seeds)
 
-    n = len(costs)
-    widest = max(float(values.max()) for _, _, _, values in costs)
-    for row, (label, bar, text, values) in enumerate(costs):
-        y = n - 1 - row
-        mean = float(values.mean())
-        right.barh(y, mean, height=0.36, color=bar, lw=0, zorder=3)
-        right.scatter(values, np.full(len(values), y), s=16, color=k.INK, edgecolor=k.CARD, lw=0.8, zorder=4)
-        right.text(0.0, y + 0.26, label, fontproperties=k.F.small, color=k.INK, ha="left", va="bottom")
-        k.value(right, max(mean, float(values.max())) + 0.03 * widest, y, f"{mean:.1f}%", color=text)
-    right.set_ylim(-0.5, n - 0.2)
-    right.set_xlim(0.0, 1.25 * widest)
-    ticks = np.arange(0, 1.25 * widest, 5.0 if widest < 25 else 10.0)
-    right.set_xticks(ticks, [f"{tick:.0f}%" for tick in ticks])
-    right.set_yticks([])
-    k.style(right, frame="b", grid="x")
-    k.axis_names(right, y=f"mean of {len(seeds)} seeds; a dot is one seed")
-    k.panel_title(right, "Order cost above the oracle's")
-
+    by = {label + (" censored" if row < 2 else ""): values.mean() for row, (label, *_, values) in enumerate(costs)}
+    demand_read = [values.mean() for row, (*_, values) in enumerate(costs) if row >= 2]
+    box = fig.box
+    k.rich(fig, box.left / box.width, (0.34 + 3 * 0.32 + 0.1) / box.height,
+           [(f"{len(seeds)} seeds of 2,000 series: ", k.INK, k.F.label),
+            ("read as demand, orders cost ", k.MUTED, k.F.label),
+            (f"{min(demand_read):.0f}% to {max(demand_read):.0f}%", k.SLATE, k.F.value),
+            (" more than the oracle's; read as censored, Ashlar's ", k.MUTED, k.F.label),
+            (f"{by['Ashlar, mixture head censored']:.1f}%", k.TEAL, k.F.value),
+            (" more, AFT's ", k.MUTED, k.F.label),
+            (f"{abs(by['XGBoost AFT censored']):.1f}%", k.CLAY, k.F.value),
+            (" less." if by["XGBoost AFT censored"] < 0 else " more.", k.MUTED, k.F.label)], va="bottom")
     k.legend_row(
         fig,
-        [("bar", k.DATA, "sales"), ("line", k.INK, "sold out at the stock"), ("dot", k.INK, "the demand that day"),
-         ("pale", k.TEAL_PALE, "Ashlar, censored sales"), ("line", k.CLAY, "LightGBM quantile, sales")],
+        [("bar", k.DATA, "sales"), ("line", k.INK, "sold out"), ("dot", k.INK, "demand"),
+         ("pale", k.TEAL_PALE, "Ashlar, censored"), ("line", k.CLAY, "XGBoost AFT, censored"),
+         ("dashed", k.SLATE, "LightGBM, sales")],
         line=2,
     )
-    k.footnote(fig, "Order cost: stock each test day's 75% quantile of demand when a lost sale costs three times a "
-                    "leftover unit, in percent above the same head fitted to the true demand (the mixture's, for the "
-                    "trees). Each seed is 2,000 series with its own stock; 31% of their days sell out.")
+    k.footnote(fig, "The oracle is the mixture head fitted to the true demand. An order stocks the day's 75% quantile, "
+                    "for a lost sale that costs three times a leftover unit. 31% of the days sell out.")
     k.save(fig, "sold-out")
-    _thumb(k, days, costs)
-
-
-def _thumb(k, days: dict, costs: list) -> None:
-    ours = next(values for label, _, _, values in costs if label.startswith("Ashlar, censored"))
-    trees = next(values for label, _, _, values in costs if label.startswith("LightGBM"))
-
-    def mark(ax):
-        _shelf(ax, k, days, lid=3.6, dot=60, lines=False)
-        ax.plot(ax.get_xlim(), [0.0, 0.0], color=k.INK, lw=1.2, solid_capstyle="butt", zorder=7)
-
-    k.thumb("observed", "Censored sales",
-            [(f"{ours.mean():.0f}%", k.TEAL), (" over the oracle's order cost, against ", k.MUTED),
-             (f"{trees.mean():.0f}%", k.CLAY)], mark)
 
 
 STAGES = {"compute": compute, "draw": draw}
