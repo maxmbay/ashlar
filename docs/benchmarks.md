@@ -26,10 +26,16 @@ python examples/benchmark_uncertainty.py --stage report
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
 - [Hurdle head](#hurdle-head)
+- [Spikes, caps, and skew](#spikes-caps-and-skew)
+- [Chained claim counts and costs](#chained-claim-counts-and-costs)
+- [Monotone constraints on freMTPL2](#monotone-constraints-on-fremtpl2)
 - [Labels that say what was observed](#labels-that-say-what-was-observed)
 - [Observed labels on real data](#observed-labels-on-real-data)
 - [Joint demand across locations](#joint-demand-across-locations)
 - [Member uncertainty](#member-uncertainty)
+- [Decisions from the distribution](#decisions-from-the-distribution)
+- [Explanations beside SHAP](#explanations-beside-shap)
+- [Missing and noisy inputs](#missing-and-noisy-inputs)
 
 ## How it was run
 
