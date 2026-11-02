@@ -175,6 +175,37 @@ def test_a_small_fit_predicts_saves_and_takes_context(tmp_path):
     assert not np.allclose(adapted.predict(unseen), model.predict(unseen))
 
 
+def test_a_group_seen_only_in_the_validation_rows_is_known_after_fit():
+    frame, y, _, _ = _stores(groups=12)
+    # A temporal split holds out the last rows, so the last store's one row is only ever a validation row.
+    frame = pd.concat([frame, frame.iloc[[0]].assign(store="late")], ignore_index=True)
+    y = np.append(y, y.max() + 3.0)
+    model = _small(random_effects={"store": "intercept"}, split="temporal").fit(frame, y)
+    report = model.random_effects_["store"]
+    late = report["categories"].index("late")
+    tau = float(report["tau"][0])
+    assert report["mean"][late, 0] > 0.0 and report["sd"][late, 0] < tau
+    assert model.predict(frame.iloc[[-1]])[0] > model.predict(frame.iloc[[-1]].assign(store="new"))[0]
+
+
+def test_fit_finishes_each_group_at_its_posterior_given_the_network():
+    # The identity holds for any network, so a tiny one trained for four epochs checks it.
+    frame, y, group, _ = _stores(groups=40, low=1, high=6, seed=3)
+    model = _small(random_effects={"store": "intercept"}).fit(frame, y)
+    report = model.random_effects_["store"]
+    assert len(report["categories"]) == 40
+    order = [int(name[1:]) for name in report["categories"]]
+    # The conjugate posterior of each store's offset, from the network's offset-free prediction of its rows.
+    population = frame.assign(store=None)
+    location = np.asarray(model.predict(population))
+    tau = float(report["tau"][0])
+    noise = np.asarray(model.predict_dist(population).stddev()) ** 2 - tau**2
+    precision = np.bincount(group, weights=1.0 / noise) + 1.0 / tau**2
+    mean = np.bincount(group, weights=(y - location) / noise) / precision
+    assert np.max(np.abs(report["mean"][:, 0] - mean[order])) < 1e-4
+    assert np.max(np.abs(report["sd"][:, 0] - np.sqrt(1.0 / precision[order]))) < 1e-4
+
+
 @pytest.mark.slow
 def test_the_fit_recovers_tau_and_shrinks_small_groups():
     frame, y, group, effect = _stores(groups=300, low=2, high=40)

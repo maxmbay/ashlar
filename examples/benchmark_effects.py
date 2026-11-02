@@ -18,6 +18,17 @@ Methods, all on ``log`` sales with a normal predictive distribution:
   on Rossmann, city on FreshRetailNet), which has its own offset and embedding.
 - ``*_context``: a pooled model after ``with_context`` on each unseen store's
   5 context rows; it changes only the unseen stores.
+- ``in_context``: the store's effect read in context, the neural-process view
+  of a mixed model. No store column; instead each row carries up to 32 other
+  rows of its store as two set features through the existing set encoder:
+  their binned outcomes, and their binned outcomes by a key covariate (promo
+  on Rossmann, activity on FreshRetailNet), with the set's size as a number.
+  A training row's set comes from its store's other training rows, leaving
+  the row out, with a random size so that small sets are common. A seen
+  store's test row reads its store's training rows, an unseen store's reads
+  its 5 context rows, and the plain unseen score reads an empty set. The
+  outcome is binned at 24 quantiles of the training rows, since a set
+  feature holds tokens.
 - ``gpboost``: GPBoost, tree boosting with a grouped random intercept;
   ``gpboost_context`` adds the conjugate update from the 5 context rows with
   its fitted variances.
@@ -67,6 +78,9 @@ MAX_TRAIN_ROWS = 300
 BUCKETS = ((1, 5), (6, 20), (21, 100), (101, MAX_TRAIN_ROWS))
 N_DRAWS = 400
 ASHLAR_METHODS = ("embedding", "dropped", "pooled", "pooled_embedding", "nested")
+CONTEXT_SET = 32
+Y_BINS = 24
+CONTEXT_KEY = {"rossmann": "promo", "freshretail": "activity"}
 
 
 # ---------------------------------------------------------------- data
@@ -208,6 +222,49 @@ def _ashlar_scores(model, x, y, rows, seed, drop):
     return lambda mask: _scores(mean[mask], None, y[rows][mask], draws[mask])
 
 
+def _context_frame(x, y, rows, pool, key, edges, rng, random_size, sets=None):
+    """``x`` at ``rows`` without the store, plus each row's context: up to ``CONTEXT_SET`` other rows of its store from
+    ``pool`` (never the row itself), or ``sets[store]`` when given, as two token sets and the set's size."""
+    stores = x["store"].to_numpy()
+    bins = np.clip(np.searchsorted(edges, y, side="right") - 1, 0, Y_BINS - 1)
+    keys = x[key].to_numpy()
+    if sets is None:
+        sets = pd.Series(pool).groupby(stores[pool]).apply(np.asarray).to_dict()
+    outcome, by_key, size = [], [], []
+    for row in rows:
+        candidates = sets.get(stores[row], np.empty(0, dtype=np.int64))
+        candidates = candidates[candidates != row]
+        limit = min(CONTEXT_SET, len(candidates))
+        count = int(rng.integers(0, limit + 1)) if random_size else limit
+        chosen = rng.choice(candidates, size=count, replace=False) if count else candidates[:0]
+        outcome.append([f"y{bins[c]}" for c in chosen])
+        by_key.append([f"{keys[c]:g}:y{bins[c]}" for c in chosen])
+        size.append(float(count))
+    frame = x.iloc[rows].drop(columns=["store"]).reset_index(drop=True)
+    return frame.assign(context_y=outcome, context_key_y=by_key, context_rows=size)
+
+
+def _in_context(table, x, y, train, test, context, unseen, seed):
+    """Fit on each training row in its leave-one-out context and score the seen, unseen, and unseen-with-context rows."""
+    rng = np.random.default_rng(seed + 1000)
+    key = CONTEXT_KEY[table]
+    edges = np.quantile(y[train], np.linspace(0.0, 1.0, Y_BINS + 1))
+    fit_frame = _context_frame(x, y, train, train, key, edges, rng, random_size=True)
+    model = ASRRegressor(task="gaussian", set_features=["context_y", "context_key_y"], set_max_length=CONTEXT_SET,
+                         random_state=seed).fit(fit_frame, y[train])
+    frames = {
+        "seen": (_context_frame(x, y, test, train, key, edges, rng, random_size=False), test),
+        "unseen": (_context_frame(x, y, unseen, context[:0], key, edges, rng, random_size=False), unseen),
+        "unseen_context": (_context_frame(x, y, unseen, context, key, edges, rng, random_size=False), unseen),
+    }
+    scored = {}
+    for name, (frame, rows) in frames.items():
+        draws = np.asarray(model.sample(frame, n=N_DRAWS, seed=seed)).T
+        mean = np.asarray(model.predict(frame))
+        scored[name] = (lambda mask, mean=mean, draws=draws, rows=rows: _scores(mean[mask], None, y[rows][mask], draws[mask]))
+    return model, scored
+
+
 def _encoded(x, columns):
     """Categorical columns as integer codes over the whole table, for GPBoost."""
     out = x[columns].copy()
@@ -261,29 +318,49 @@ def _filled(x, train):
     return out
 
 
-def _mixedlm(x, y, train):
-    import statsmodels.formula.api as smf
+def _independent(matrix):
+    """Columns of a largest linearly independent set, by QR with column pivoting."""
+    from scipy.linalg import qr
 
-    x = _filled(x, train)
-    features = [column for column in x.columns if column not in {"store", "product"}]
-    frame = x.iloc[train].reset_index(drop=True).assign(y=y[train])
-    terms = [column if pd.api.types.is_numeric_dtype(x[column]) else f"C({column})" for column in features]
-    result = smf.mixedlm("y ~ " + " + ".join(terms), frame, groups=frame["store"]).fit(method=["lbfgs"])
+    _, r, pivot = qr(matrix, mode="economic", pivoting=True)
+    diagonal = np.abs(np.diag(r))
+    return np.sort(pivot[: int(np.sum(diagonal > 1e-9 * diagonal[0]))])
+
+
+def _mixedlm(x, y, train, other):
+    """A linear mixed model with a random intercept per store, on dummies of every categorical but the store and
+    product. The design is built once over the training rows and ``other``, the rows it will score, and its columns
+    are cut to an independent set on the training rows: a category nested in a broader one (FreshRetailNet's
+    third-level category in its first) makes the full design singular."""
+    import patsy
+    import statsmodels.api as sm
+
+    needed = np.unique(np.concatenate([train, other]))
+    local = pd.Series(np.arange(len(needed)), index=needed)
+    fit_rows = local[train].to_numpy()
+    frame = _filled(x.iloc[needed].reset_index(drop=True), fit_rows)
+    features = [column for column in frame.columns if column not in {"store", "product"}]
+    terms = [column if pd.api.types.is_numeric_dtype(frame[column]) else f"C({column})" for column in features]
+    design = np.asarray(patsy.dmatrix(" + ".join(terms), frame, return_type="matrix"))
+    design = design[:, _independent(design[fit_rows])]
+    stores = frame["store"].to_numpy()
+    result = sm.MixedLM(y[train], design[fit_rows], groups=stores[fit_rows]).fit(method=["lbfgs"])
     noise, tau2 = float(result.scale), float(np.asarray(result.cov_re).reshape(-1)[0])
     try:
         effects = {store: float(np.asarray(value).reshape(-1)[0]) for store, value in result.random_effects.items()}
     except (ValueError, np.linalg.LinAlgError):
         # The stores' variance was fitted at zero, so every store sits at the population mean.
         effects, tau2 = {}, 0.0
-    counts = frame["store"].value_counts().to_dict()
+    counts = pd.Series(stores[fit_rows]).value_counts().to_dict()
+    weights = np.asarray(result.fe_params)
 
     def fixed(rows):
-        return np.asarray(result.predict(x.iloc[rows].reset_index(drop=True)))
+        return design[local[rows].to_numpy()] @ weights
 
     def predict(rows):
-        stores = x["store"].to_numpy()[rows]
-        offset = np.array([effects.get(store, 0.0) for store in stores])
-        n = np.array([counts.get(store, 0) for store in stores], dtype=np.float64)
+        names = x["store"].to_numpy()[rows]
+        offset = np.array([effects.get(store, 0.0) for store in names])
+        n = np.array([counts.get(store, 0) for store in names], dtype=np.float64)
         posterior = tau2 * noise / (noise + n * tau2)
         return fixed(rows) + offset, np.sqrt(noise + posterior)
 
@@ -304,7 +381,7 @@ def _conjugate(fixed, noise, tau2, x, y, context, rows):
 # ---------------------------------------------------------------- run
 
 
-def run(table, results, seeds, methods):
+def run(table, results, seeds, methods, redo=False):
     x, y, broader = TABLES[table]()
     entity = x["store"].to_numpy()
     out = results.setdefault(table, {"rows": int(len(y)), "stores": int(len(np.unique(entity))), "runs": {}})
@@ -313,10 +390,17 @@ def run(table, results, seeds, methods):
         run_out = out["runs"].setdefault(str(seed), {"train_rows": int(len(train)), "test_rows": int(len(test)),
                                                     "unseen_rows": int(len(unseen))})
         for method in methods:
-            if method in run_out:
+            if method in run_out and not redo:
                 continue
             started = time.perf_counter()
-            if method in ASHLAR_METHODS:
+            if method == "in_context":
+                model, scored = _in_context(table, x, y, train, test, context, unseen, seed)
+                scores = _bucketed(scored["seen"], test_count)
+                everything = np.ones(len(unseen), dtype=bool)
+                scores["unseen"] = scored["unseen"](everything)
+                scores["unseen_context"] = scored["unseen_context"](everything)
+                scores["epochs"] = len(model.history_["train_loss"])
+            elif method in ASHLAR_METHODS:
                 model = _ashlar(method, x, y, train, seed, broader)
                 seen = _ashlar_scores(model, x, y, test, seed, method == "dropped")
                 cold = _ashlar_scores(model, x, y, unseen, seed, method == "dropped")
@@ -329,11 +413,10 @@ def run(table, results, seeds, methods):
                 if getattr(model.core_, "random_effects", None) is not None:
                     scores["tau"] = float(model.random_effects_["store"]["tau"][0])
             else:
-                fitter = _gpboost if method == "gpboost" else _mixedlm
                 if method == "gpboost":
-                    predict, fixed, noise, tau2 = fitter(x, y, train, seed)
+                    predict, fixed, noise, tau2 = _gpboost(x, y, train, seed)
                 else:
-                    predict, fixed, noise, tau2 = fitter(x, y, train)
+                    predict, fixed, noise, tau2 = _mixedlm(x, y, train, np.concatenate([test, context, unseen]))
                 mean, sd = predict(test)
                 scores = _bucketed(lambda mask: _scores(mean[mask], sd[mask], y[test][mask]), test_count)
                 mean, sd = predict(unseen)
@@ -365,7 +448,7 @@ def report():
             columns = [f"{low}-{high}" for low, high in BUCKETS] + ["unseen", "unseen_context"]
             print("| Method | " + " | ".join(f"CRPS {c}" for c in columns) + " | Coverage unseen | Coverage 1-5 | tau |")
             print("|---|" + "---:|" * (len(columns) + 3))
-            methods = [m for m in (*ASHLAR_METHODS, "gpboost", "mixedlm") if m in runs[0]]
+            methods = [m for m in (*ASHLAR_METHODS, "in_context", "gpboost", "mixedlm") if m in runs[0]]
             for method in methods:
                 cells = []
                 for column in columns:
@@ -382,8 +465,9 @@ def report():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tables", nargs="*", default=list(TABLES))
-    parser.add_argument("--methods", nargs="*", default=[*ASHLAR_METHODS, "gpboost", "mixedlm"])
+    parser.add_argument("--methods", nargs="*", default=[*ASHLAR_METHODS, "in_context", "gpboost", "mixedlm"])
     parser.add_argument("--seeds", nargs="*", type=int, default=list(SEEDS))
+    parser.add_argument("--redo", action="store_true", help="refit the methods named even where results are saved")
     parser.add_argument("--report", action="store_true")
     args = parser.parse_args()
     if args.report:
@@ -392,7 +476,7 @@ def main():
     for table in args.tables:
         path = _path(table)
         results = json.loads(path.read_text()) if path.exists() else {}
-        run(table, results, args.seeds, args.methods)
+        run(table, results, args.seeds, args.methods, args.redo)
 
 
 if __name__ == "__main__":

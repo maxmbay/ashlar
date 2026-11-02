@@ -907,6 +907,7 @@ class ASRModel(BaseEstimator):
                 )
                 self._trial = chosen
             self._assign_after_success(names, columns, y_array, weights, train_idx, val_idx, val_pack, resume)
+            self._finish_effects(names, columns, y_array, weights, train_idx, val_idx)
             self.resolved_ = self._resolved_training()
             self.search_ = None if trials is None else {"chosen": dict(self.resolved_), "trials": trials}
         finally:
@@ -2273,11 +2274,22 @@ class ASRModel(BaseEstimator):
 
         Returns a new model; this one is unchanged.
         """
+        self._require_fitted()
+        return self._updated_offsets(self._with_cyclical(X), y, steps=steps)
+
+    def _updated_offsets(self, X, y, *, steps: int = 25, weights=None, from_prior: bool = False, sweeps: int = 1):
+        """``with_context``'s update on ``X`` with its cyclical columns already expanded; ``fit`` finishes with it.
+
+        ``from_prior`` starts each column's groups from ``N(0, tau^2)`` instead
+        of their posteriors, for rows those posteriors already hold.
+        ``weights`` weight the rows' log likelihoods. ``sweeps`` repeats the
+        columns' updates, each with the others at their latest means, so
+        crossed and nested columns settle together.
+        """
         import equinox as eqx
 
         from ashlar.effects import positive, raw_of
 
-        self._require_fitted()
         module = getattr(self.core_, "random_effects", None)
         if module is None or not module.has_offsets:
             raise AshlarError("with_context updates random effects' offsets; fit with random_effects={column: 'intercept'}.")
@@ -2290,6 +2302,7 @@ class ASRModel(BaseEstimator):
         names, columns = frame_columns(X)
         if len(values) != (len(columns[0]) if columns else 0):
             raise AshlarError("X and y have different numbers of rows.")
+        row_weights = np.ones(len(values)) if weights is None else np.asarray(weights, dtype=np.float64).reshape(-1)
         payload = self.encoder_.to_json()
         by_name = {item["name"]: item for item in payload["columns"]}
         added = {}
@@ -2333,67 +2346,125 @@ class ASRModel(BaseEstimator):
         numeric_z = self.numeric_transform_(encoded.numeric_raw)
         inputs = (numeric_z, encoded.categorical_onehot, encoded.category_index, encoded.set_tokens, encoded.set_mask)
         view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
-        raw = view.core_(*inputs, key=None, offsets=False)
+        n_rows = int(numeric_z.shape[0])
+        if n_rows <= EVAL_CHUNK_ROWS:
+            raw = view.core_(*inputs, key=None, offsets=False)
+        else:
+            forward = _jit_forward(offsets=False)
+            raw = jnp.concatenate(
+                [
+                    forward(view.core_, *(array[start : start + EVAL_CHUNK_ROWS] for array in inputs))
+                    for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+                ],
+                axis=0,
+            )
         locations = np.zeros((raw.shape[-1],), dtype=np.float32)
         locations[list(module.locations)] = 1.0
         locations = jnp.asarray(locations)
         target = jnp.asarray(values.astype(np.float32))
-        for position, terms in enumerate(slope for slope in module.slope_columns):
-            if not terms:
-                continue
-            column = module.index_columns[position]
-            groups = np.asarray(encoded.category_index[:, column])
-            live = groups > 0
-            if not live.any():
-                continue
-            total, _ = module.offsets(encoded.category_index, numeric_z)
-            covariate = np.stack(
-                [np.ones(len(groups)) if term < 0 else np.asarray(numeric_z[:, term], dtype=np.float64) for term in terms],
-                axis=1,
-            )
-            current = np.asarray(module.means[position], dtype=np.float64)
-            # The offsets of the other columns stay at their posterior means.
-            others = np.asarray(total, dtype=np.float64) - np.sum(current[groups] * covariate, axis=1)
+        chunk = max(1, min(EVAL_CHUNK_ROWS, n_rows))
 
-            def loglik(delta, rows=np.flatnonzero(live), others=others):
-                shifted = raw[rows] + jnp.asarray(others[rows] + delta, dtype=raw.dtype)[:, None, None] * locations
-                return view._dist_from_raw(shifted).log_prob(target[rows])
+        @jax.jit
+        def chunk_derivatives(raw_rows, shift, target_rows):
+            # Each row's log likelihood reads only its own offset, so the Hessian is diagonal: a JVP with ones reads it.
+            def loglik(delta):
+                shifted = raw_rows + (shift + delta)[:, None, None] * locations
+                return jnp.sum(view._dist_from_raw(shifted).log_prob(target_rows))
 
-            def derivatives(offset, loglik=loglik, rows=np.flatnonzero(live)):
-                delta = jnp.asarray(offset[rows], dtype=jnp.float32)
-                grad = jax.grad(lambda d: jnp.sum(loglik(d)))
-                first, second = jax.jvp(grad, (delta,), (jnp.ones_like(delta),))
-                full_first, full_second = np.zeros(len(offset)), np.zeros(len(offset))
-                full_first[rows], full_second[rows] = np.asarray(first), np.asarray(second)
-                return full_first, full_second
+            zero = jnp.zeros_like(shift)
+            return jax.jvp(jax.grad(loglik), (zero,), (jnp.ones_like(zero),))
 
-            present = np.unique(groups[live])
-            compact = np.zeros(len(current), dtype=np.int64)
-            compact[present] = np.arange(len(present))
-            rows = np.flatnonzero(live)
-            prior_mean = current[present]
-            prior_var = np.square(np.asarray(positive(module.raw_scales[position]), dtype=np.float64)[present])
+        def derivatives(rows, shift):
+            """Each row's first and second derivative of its weighted log likelihood in its offset, at ``shift``."""
+            first, second = np.zeros(len(rows)), np.zeros(len(rows))
+            for start in range(0, len(rows), chunk):
+                part = rows[start : start + chunk]
+                size = len(part)
+                padding = chunk - size
+                # The last piece is padded to the chunk, so one compiled shape serves every piece.
+                index = np.concatenate([part, np.full(padding, part[0])])
+                moved = np.concatenate([shift[start : start + size], np.zeros(padding)])
+                one, two = chunk_derivatives(raw[index], jnp.asarray(moved, dtype=jnp.float32), target[index])
+                first[start : start + size] = np.asarray(one, dtype=np.float64)[:size]
+                second[start : start + size] = np.asarray(two, dtype=np.float64)[:size]
+            return first * row_weights[rows], second * row_weights[rows]
 
-            def row_derivatives(offset, rows=rows, derivatives=derivatives, size=len(groups)):
-                padded = np.zeros(size)
-                padded[rows] = offset
-                first, second = derivatives(padded)
-                return first[rows], second[rows]
+        for _ in range(int(sweeps)):
+            for position, terms in enumerate(module.slope_columns):
+                if not terms:
+                    continue
+                column = module.index_columns[position]
+                groups = np.asarray(encoded.category_index[:, column])
+                rows = np.flatnonzero(groups > 0)
+                if not rows.size:
+                    continue
+                total, _ = module.offsets(encoded.category_index, numeric_z)
+                covariate = np.stack(
+                    [np.ones(len(groups)) if term < 0 else np.asarray(numeric_z[:, term], dtype=np.float64) for term in terms],
+                    axis=1,
+                )
+                current = np.asarray(module.means[position], dtype=np.float64)
+                # The offsets of the other columns stay at their posterior means.
+                others = np.asarray(total, dtype=np.float64) - np.sum(current[groups] * covariate, axis=1)
+                present = np.unique(groups[rows])
+                compact = np.zeros(len(current), dtype=np.int64)
+                compact[present] = np.arange(len(present))
+                if from_prior:
+                    tau = np.asarray(module.taus()[position], dtype=np.float64)
+                    prior_mean = np.zeros((len(present), len(terms)))
+                    prior_var = np.tile(np.square(tau)[None, :], (len(present), 1))
+                else:
+                    prior_mean = current[present]
+                    prior_var = np.square(np.asarray(positive(module.raw_scales[position]), dtype=np.float64)[present])
 
-            mean, variance = laplace_update(
-                row_derivatives, prior_mean, prior_var, covariate[rows], compact[groups[rows]], len(present), steps=steps
-            )
-            updated_means = module.means[position].at[present].set(jnp.asarray(mean, dtype=jnp.float32))
-            updated_scales = module.raw_scales[position].at[present].set(raw_of(jnp.asarray(np.sqrt(variance), dtype=jnp.float32)))
-            module = eqx.tree_at(
-                lambda tree, position=position: (tree.means[position], tree.raw_scales[position]),
-                module,
-                (updated_means, updated_scales),
-            )
+                def row_derivatives(offset, rows=rows, others=others):
+                    return derivatives(rows, others[rows] + offset)
+
+                mean, variance = laplace_update(
+                    row_derivatives, prior_mean, prior_var, covariate[rows], compact[groups[rows]], len(present), steps=steps
+                )
+                updated_means = module.means[position].at[present].set(jnp.asarray(mean, dtype=jnp.float32))
+                updated_scales = module.raw_scales[position].at[present].set(
+                    raw_of(jnp.asarray(np.sqrt(variance), dtype=jnp.float32))
+                )
+                module = eqx.tree_at(
+                    lambda tree, position=position: (tree.means[position], tree.raw_scales[position]),
+                    module,
+                    (updated_means, updated_scales),
+                )
         view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
-        # The optimizer's moments match the fitted tables, not the grown ones; a refit starts them afresh.
-        view.opt_state_ = None
+        if any(added.values()):
+            # The optimizer's moments match the fitted tables, not the grown ones; a refit starts them afresh.
+            view.opt_state_ = None
         return view
+
+    def _finish_effects(self, names, columns, y_array, weights, train_idx, val_idx):
+        """After training, each group's offsets at their posterior under the trained network, from every row of ``X``.
+
+        Training fits the posteriors by stochastic variational inference, which
+        leaves a group with few rows short of its optimum, since its rows reach
+        few minibatches, and never sees a group whose rows all fell in the
+        validation partition. This is the step the variational objective
+        converges to for the offsets, given the network: Laplace's method from
+        ``N(0, tau^2)`` on the group's rows of ``X``, both partitions, which a
+        normal head makes exact. Observed labels keep the variational posteriors.
+        """
+        module = getattr(self.core_, "random_effects", None)
+        if module is None or not module.has_offsets or self.task == "regression" or self._observing():
+            return
+        rows = np.asarray(train_idx)
+        if val_idx is not None and len(val_idx):
+            rows = np.concatenate([rows, np.asarray(val_idx)])
+        values = np.asarray(target_array(y_array), dtype=np.float64)[rows]
+        if values.ndim != 1 or not np.isfinite(values).all():
+            return
+        sweeps = 1 if len(module.slope_columns) == 1 else 3
+        finished = self._updated_offsets(
+            _take_rows(names, columns, rows), values, weights=np.asarray(weights)[rows], from_prior=True, sweeps=sweeps
+        )
+        self.encoder_ = finished.encoder_
+        self.core_ = finished.core_
+        self.opt_state_ = finished.opt_state_
 
     def fit_inputs(self, X):
         """Refit the copula of the numeric features (``input_model_``) on ``X``, for example after ``load``."""
@@ -3958,21 +4029,28 @@ _TASK_MODELS = {model.__name__: model for model in (ASRRegressor, ASRClassifier,
 __getattr__ = renamed(__name__, globals(), {"TabularEstimator": "ASRModel"})
 
 
-_FORWARD = None
+_FORWARD = {}
 
 
-def _jit_forward():
-    """One compiled inference pass, shared by every fitted core."""
-    global _FORWARD
-    if _FORWARD is None:
+def _jit_forward(offsets: bool = True):
+    """One compiled inference pass, shared by every fitted core; ``offsets=False`` leaves out the random effects'."""
+    if offsets not in _FORWARD:
         import equinox as eqx
 
-        @eqx.filter_jit
-        def forward(core, *inputs):
-            return core(*inputs, key=None)
+        if offsets:
 
-        _FORWARD = forward
-    return _FORWARD
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None)
+
+        else:
+
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None, offsets=False)
+
+        _FORWARD[offsets] = forward
+    return _FORWARD[offsets]
 
 
 def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, task):
