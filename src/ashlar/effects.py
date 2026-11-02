@@ -208,6 +208,15 @@ def unit_nodes(count: int) -> np.ndarray:
     return (nodes / np.sqrt(np.mean(nodes**2))).astype(np.float32)
 
 
+def target_nodes(count: int, targets: int) -> np.ndarray:
+    """``(targets, count)``: the unit nodes in a fixed order of each target's own, the first in their natural order."""
+    base = unit_nodes(count)
+    rows = [base]
+    for number in range(1, int(targets)):
+        rows.append(base[np.random.default_rng(number).permutation(int(count))])
+    return np.stack(rows, axis=0)
+
+
 def positive(raw):
     """``softplus(raw) + 1e-4``: a standard deviation from its raw leaf."""
     return jax.nn.softplus(raw) + jnp.asarray(_SCALE_FLOOR, dtype=raw.dtype)
@@ -255,6 +264,9 @@ class RandomEffects(Module):
     locations: tuple[int, ...] = field(static=True)
     scales: tuple[int, ...] | None = field(static=True)
     kl_weight: float = field(static=True)
+    # Groups of raw outputs, each moved by an offset of its own: one target for a one-column head, one per
+    # chain column with a location (one per class after the first for a categorical column).
+    targets: tuple[tuple[int, ...], ...] = field(static=True)
 
     def __init__(
         self,
@@ -269,17 +281,27 @@ class RandomEffects(Module):
         embedding_dim: int = 8,
         parents=None,
         key=None,
+        targets=None,
     ):
         if not (len(vocab_sizes) == len(index_columns) == len(slope_columns)) or not vocab_sizes:
             raise ShapeError("random effects need one vocabulary size, index column, and term list per grouping column.")
+        targets = (tuple(locations),) if targets is None else tuple(tuple(int(p) for p in target) for target in targets)
+        if not targets or any(not target for target in targets):
+            raise ShapeError("random effects need at least one target, each with at least one output.")
+        if len(targets) > 1 and scales is not None:
+            raise ShapeError("several offset targets integrate on nodes; scales must be None.")
+        self.targets = targets
+        count = len(targets)
         start = float(np.log(np.expm1(TAU_START - _SCALE_FLOOR)))
+        # Offset terms are laid out term-major: column t * targets + l is term t on target l.
         self.means = tuple(
-            jnp.zeros((int(size) + 1, len(terms)), dtype=jnp.float32) for size, terms in zip(vocab_sizes, slope_columns)
+            jnp.zeros((int(size) + 1, len(terms) * count), dtype=jnp.float32) for size, terms in zip(vocab_sizes, slope_columns)
         )
         self.raw_scales = tuple(
-            jnp.full((int(size) + 1, len(terms)), start, dtype=jnp.float32) for size, terms in zip(vocab_sizes, slope_columns)
+            jnp.full((int(size) + 1, len(terms) * count), start, dtype=jnp.float32)
+            for size, terms in zip(vocab_sizes, slope_columns)
         )
-        self.raw_taus = tuple(jnp.full((len(terms),), start, dtype=jnp.float32) for terms in slope_columns)
+        self.raw_taus = tuple(jnp.full((len(terms) * count,), start, dtype=jnp.float32) for terms in slope_columns)
         self.embedded = tuple(int(position) for position in embedded)
         self.parents = tuple(-1 for _ in vocab_sizes) if parents is None else tuple(int(parent) for parent in parents)
         keys = jax.random.split(jax.random.PRNGKey(0) if key is None else key, max(1, len(self.embedded)))
@@ -295,9 +317,13 @@ class RandomEffects(Module):
         self.embed_raw_taus = tuple(jnp.full((int(embedding_dim),), start, dtype=jnp.float32) for _ in self.embedded)
         self.index_columns = tuple(int(column) for column in index_columns)
         self.slope_columns = tuple(tuple(int(column) for column in terms) for terms in slope_columns)
-        self.locations = tuple(int(position) for position in locations)
+        self.locations = tuple(sorted({int(position) for target in targets for position in target}))
         self.scales = None if scales is None else tuple(int(position) for position in scales)
         self.kl_weight = float(kl_weight)
+
+    @property
+    def n_targets(self) -> int:
+        return len(self.targets)
 
     @property
     def has_offsets(self) -> bool:
@@ -318,9 +344,10 @@ class RandomEffects(Module):
     def embed_taus(self) -> tuple[jax.Array, ...]:
         return tuple(positive(raw) for raw in self.embed_raw_taus)
 
-    def offsets(self, category_index, numeric_z):
-        """Each row's offset mean and variance, ``(batch,)`` each, summed over the columns and terms."""
-        mean = jnp.zeros((category_index.shape[0],), dtype=jnp.float32)
+    def target_offsets(self, category_index, numeric_z):
+        """Each row's offset mean and variance on every target, ``(batch, targets)`` each, summed over columns and terms."""
+        count = self.n_targets
+        mean = jnp.zeros((category_index.shape[0], count), dtype=jnp.float32)
         variance = jnp.zeros_like(mean)
         for column, means, raw_scales, tau, terms in zip(
             self.index_columns, self.means, self.raw_scales, self.taus(), self.slope_columns
@@ -329,11 +356,22 @@ class RandomEffects(Module):
                 continue
             group = category_index[:, column]
             seen = (group > 0)[:, None]
-            row_mean = jnp.where(seen, means[group], 0.0)
-            row_sd = jnp.where(seen, positive(raw_scales[group]), tau[None, :])
-            covariate = jnp.stack([jnp.ones_like(mean) if term < 0 else numeric_z[:, term] for term in terms], axis=1)
-            mean = mean + jnp.sum(row_mean * covariate, axis=1)
-            variance = variance + jnp.sum(jnp.square(row_sd * covariate), axis=1)
+            row_mean = jnp.where(seen, means[group], 0.0).reshape(-1, len(terms), count)
+            row_sd = jnp.where(seen, positive(raw_scales[group]), tau[None, :]).reshape(-1, len(terms), count)
+            ones = jnp.ones((group.shape[0],), dtype=jnp.float32)
+            covariate = jnp.stack([ones if term < 0 else numeric_z[:, term] for term in terms], axis=1)
+            mean = mean + jnp.einsum("btl,bt->bl", row_mean, covariate)
+            variance = variance + jnp.einsum("btl,bt->bl", jnp.square(row_sd), jnp.square(covariate))
+        return mean, variance
+
+    def offsets(self, category_index, numeric_z):
+        """Each row's offset mean and variance, ``(batch,)`` each, summed over the columns and terms.
+
+        With several targets, ``(batch, targets)`` each (``target_offsets``).
+        """
+        mean, variance = self.target_offsets(category_index, numeric_z)
+        if self.n_targets == 1:
+            return mean[:, 0], variance[:, 0]
         return mean, variance
 
     def column_offsets(self, category_index, numeric_z) -> list[tuple[int, jax.Array]]:
@@ -390,32 +428,53 @@ class RandomEffects(Module):
                 total = total + jnp.sum(jnp.square(tau)) / (2.0 * TAU_PRIOR**2)
         return total * self.kl_weight
 
+    def target_masks(self, width: int) -> jax.Array:
+        """``(targets, width)``: 1 where a target's offset moves a raw output."""
+        masks = np.zeros((self.n_targets, int(width)), dtype=np.float32)
+        for number, target in enumerate(self.targets):
+            masks[number, list(target)] = 1.0
+        return jnp.asarray(masks)
+
     def shift(self, raw, mean, variance, nodes: int | None):
-        """``raw`` with each row's offset: on ``nodes`` folded into the member axis, or in closed form for ``None``."""
-        mask = np.zeros((raw.shape[-1],), dtype=np.float32)
-        mask[list(self.locations)] = 1.0
-        mask = jnp.asarray(mask)
+        """``raw`` with each row's offset: on ``nodes`` folded into the member axis, or in closed form for ``None``.
+
+        ``mean`` and ``variance`` are ``(batch,)`` for one target, or ``(batch, targets)``. Each target
+        reads the same equal-weight nodes in an order of its own, so the targets' offsets are spread
+        apart rather than moving in step; an objective that sums one term per target (a chain's columns,
+        each moved by its own target) reads each target's expected log likelihood exactly either way.
+        """
+        if mean.ndim == 1:
+            mean, variance = mean[:, None], variance[:, None]
+        masks = self.target_masks(raw.shape[-1])
         if nodes is None:
-            moved = raw + mean[:, None, None] * mask
+            moved = raw + jnp.einsum("bl,lo->bo", mean, masks)[:, None, :]
             if not self.scales:
                 return moved
             positions = list(self.scales)
-            widened = raw_of(jnp.sqrt(jnp.square(positive(moved[..., positions])) + variance[:, None, None]))
+            widened = raw_of(jnp.sqrt(jnp.square(positive(moved[..., positions])) + variance[:, :1, None]))
             return moved.at[..., positions].set(widened)
-        points = jnp.asarray(unit_nodes(nodes))
-        offsets = mean[:, None] + jnp.sqrt(variance)[:, None] * points[None, :]
-        expanded = raw[:, :, None, :] + offsets[:, None, :, None] * mask
+        points = jnp.asarray(target_nodes(nodes, self.n_targets))
+        offsets = mean[:, :, None] + jnp.sqrt(variance)[:, :, None] * points[None, :, :]
+        expanded = raw[:, :, None, :] + jnp.einsum("bln,lo->bno", offsets, masks)[:, None, :, :]
         return expanded.reshape(raw.shape[0], raw.shape[1] * int(nodes), raw.shape[-1])
 
     def __call__(self, raw, category_index, numeric_z, *, training: bool):
+        """The head's output with the offsets. A chain's output is a tuple whose first part holds the parameters
+        (``ashlar.chain``); its shared weights are repeated along the member axis when nodes are folded into it."""
+        shared = ()
+        if isinstance(raw, tuple):
+            raw, shared = raw[0], tuple(raw[1:])
         if raw.ndim != 3:
             raise ShapeError(f"random effects read a head output (batch, member, output); received {raw.shape}.")
         if not self.has_offsets:
-            return raw
-        mean, variance = self.offsets(category_index, numeric_z)
-        if training:
-            return self.shift(raw, mean, variance, TRAIN_NODES)
-        return self.shift(raw, mean, variance, None if self.scales is not None else PREDICT_NODES)
+            return (raw, *shared) if shared else raw
+        mean, variance = self.target_offsets(category_index, numeric_z)
+        nodes = TRAIN_NODES if training else (None if self.scales is not None else PREDICT_NODES)
+        moved = self.shift(raw, mean, variance, nodes)
+        if not shared:
+            return moved
+        repeats = 1 if nodes is None else int(nodes)
+        return (moved, *(jnp.repeat(part, repeats, axis=0) for part in shared))
 
 
 def embed_key(key):
@@ -435,13 +494,21 @@ def report(module: RandomEffects, spec: dict, encoder, unit: float) -> dict:
     for position, ((name, terms), means, raw_scales, tau) in enumerate(
         zip(spec.items(), module.means, module.raw_scales, module.taus())
     ):
+        count = module.n_targets
+        tau = np.asarray(tau, dtype=np.float64) * unit
+        mean = np.asarray(means[1:], dtype=np.float64) * unit
+        sd = np.asarray(positive(raw_scales[1:]), dtype=np.float64) * unit
+        if count > 1:
+            # Several targets (a chain's columns): one more axis, terms by targets.
+            tau = tau.reshape(-1, count)
+            mean, sd = mean.reshape(mean.shape[0], -1, count), sd.reshape(sd.shape[0], -1, count)
         entry = {
             "within": None if module.parents[position] < 0 else names[module.parents[position]],
             "terms": list(offset_terms(terms)),
-            "tau": np.asarray(tau, dtype=np.float64) * unit,
+            "tau": tau,
             "categories": list(columns[name].categories),
-            "mean": np.asarray(means[1:], dtype=np.float64) * unit,
-            "sd": np.asarray(positive(raw_scales[1:]), dtype=np.float64) * unit,
+            "mean": mean,
+            "sd": sd,
         }
         if position in embedded:
             number = embedded[position]

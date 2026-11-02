@@ -6,6 +6,11 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Added
 
+- **Pooled groups, monotone features, and early-ending rows in a chain.**
+  - `task="chain"` takes `random_effects`: every column with a location gets an offset of its own per group, with its own spread between groups, and a `categorical` column one per class after the first. All columns train together on one trunk, so a lender can be pooled across the cause, the time, and the loss of a loan in one fit.
+  - `task="chain"` takes `monotone=`, on `gaussian`, `student_t`, `mixture`, count, `hurdle`, and two-class `categorical` columns. A column's own `{"monotone": {"rate": -1}}` flips a feature's direction for that column.
+  - A chain's label may end early: a censored or interval cell before the last column is scored where every later cell of its row is unknown, such as a loan still running, with a censored time and no loss yet.
+  - [docs/distributions.md](docs/distributions.md#outcomes-of-different-kinds-chained) has an example.
 - **Forecast paths with covariates, as a table.**
   - New module `ashlar.horizon`. `horizon_frame(data, target=..., lookback=..., horizon=..., series=..., time=...)` turns a long table of many series into one row per series and forecast origin. Its features are the target's last `lookback` values, the same lags of each `past` column, each `known` column at every step ahead, and the series' `static` columns. Its outcome is the next `horizon` values.
   - Any `ASRRegressor` fits it. A joint head (`multivariate_gaussian`, `multivariate_mixture`, `multivariate_flow`) forecasts the whole path in one pass, with an exact log density and draws whose days move together.

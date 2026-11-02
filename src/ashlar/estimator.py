@@ -22,7 +22,7 @@ from sklearn.base import BaseEstimator
 
 from ashlar._compat import renamed
 from ashlar._version import __version__
-from ashlar.chain import ChainHead, chain_columns, column_start, resolve_columns
+from ashlar.chain import ChainHead, chain_columns, chain_monotone_signs, chain_targets, column_start, resolve_columns
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
 from ashlar.heads import (
@@ -570,8 +570,10 @@ class ASRModel(BaseEstimator):
         quantile up, so the whole predictive distribution moves one way
         with each: first-order stochastic dominance. For ``regression``,
         ``gaussian``, ``student_t``, ``quantile_spline``, ``poisson``, and
-        ``negative_binomial``. A constrained feature does not interact with
-        the others. See ``ashlar.monotone``.
+        ``negative_binomial``, and ``chain``, whose columns each move with
+        the feature given the columns before them, a column's own
+        ``"monotone"`` entry flipping its direction. A constrained feature
+        does not interact with the others. See ``ashlar.monotone``.
     random_effects:
         ``None`` (default) leaves every column to the network. A dict of
         grouping columns to their terms, ``{"store": "intercept"}`` or
@@ -588,8 +590,9 @@ class ASRModel(BaseEstimator):
         group with the prior, the population answer. For
         ``regression``, ``gaussian``, ``mixture``, ``flow``, ``student_t``,
         ``quantile``, ``quantile_spline``, ``poisson``,
-        ``negative_binomial``, and ``hurdle``. See ``ashlar.effects``,
-        ``random_effects_``, and ``with_context``.
+        ``negative_binomial``, and ``hurdle``, and ``chain``, which gives
+        every column with a location an offset of its own. See
+        ``ashlar.effects``, ``random_effects_``, and ``with_context``.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -703,7 +706,7 @@ class ASRModel(BaseEstimator):
 
     def _check_config(self):
         if check_monotone(self.monotone):
-            if self.task not in MONOTONE_TASKS:
+            if self.task not in (*MONOTONE_TASKS, "chain"):
                 raise AshlarError(
                     f"monotone constraints need a head whose outputs move every quantile one way: "
                     f"{', '.join(MONOTONE_TASKS)}; this model is {self.task}."
@@ -1041,11 +1044,19 @@ class ASRModel(BaseEstimator):
             columns = chain_columns((self.head_kwargs or {}).get("columns"))
             fixed = [index for index, column in enumerate(columns[:-1]) if column.kind != "categorical"]
             for part in labels:
-                if fixed and not observed.is_exact(part[:, fixed]).all():
+                if not fixed:
+                    continue
+                exact = observed.is_exact(part)
+                fields = np.asarray(part)
+                unknown = np.isneginf(fields["lower"]) & np.isposinf(fields["upper"])
+                # A coarse cell is allowed where every later cell of its row is unknown.
+                tail = np.flip(np.cumsum(np.flip(~unknown, axis=1), axis=1), axis=1)
+                tail_unknown = np.concatenate([tail[:, 1:] == 0, np.ones((len(fields), 1), dtype=bool)], axis=1)
+                if not (exact[:, fixed] | tail_unknown[:, fixed]).all():
                     raise AshlarError(
                         "a chain conditions each column on the ones before it, so a cell before the last column must be "
-                        "exact, unless its column is categorical, whose classes a range sums over. Put a censored or "
-                        "interval column last."
+                        "exact, unless its column is categorical, whose classes a range sums over, or every later cell "
+                        "of its row is unknown, observed.interval(-inf, inf). Put a censored or interval column last."
                     )
         if coarse and self.task == "multivariate_flow" and int((self.head_kwargs or {}).get("depth", 1)) != 1:
             raise AshlarError(
@@ -1386,9 +1397,9 @@ class ASRModel(BaseEstimator):
         effects = check_random_effects(self.random_effects)
         if not effects:
             return
-        if self.task not in RANDOM_EFFECT_TASKS:
+        if self.task not in (*RANDOM_EFFECT_TASKS, "chain"):
             raise AshlarError(
-                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, "
+                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, or chain, "
                 f"not {self.task!r}."
             )
         if not (self.head is None or isinstance(self.head, str)) or self._cure():
@@ -1725,11 +1736,14 @@ class ASRModel(BaseEstimator):
         if unknown:
             raise AshlarError(f"monotone features must be numeric columns of X; {unknown} are not.")
         columns = [numeric.index(name) for name in constraints]
+        edges = monotone_edges(None if numeric_z is None else np.asarray(numeric_z), columns)
+        if self.task == "chain":
+            signs = chain_monotone_signs(head.columns, head.hidden, constraints)
+            return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
         shape = jax.eval_shape(lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32))
         if not hasattr(shape, "shape") or len(shape.shape) != 3:
             raise AshlarError(f"monotone constraints need one of {', '.join(MONOTONE_TASKS)}; this model is {self.task}.")
         signs = output_signs(self.task, int(shape.shape[-1]))
-        edges = monotone_edges(None if numeric_z is None else np.asarray(numeric_z), columns)
         return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
 
     def _random_effects_term(self, encoder, members: int, head, d_head: int, key):
@@ -1749,8 +1763,16 @@ class ASRModel(BaseEstimator):
             if unknown:
                 raise AshlarError(f"random slopes of {name!r} need numeric columns of X; {unknown} are not.")
             slopes.append([-1 if term == INTERCEPT else numeric.index(term) for term in terms])
-        shape = jax.eval_shape(lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32))
-        locations, scales = location_outputs(self.task, int(shape.shape[-1]))
+        targets = None
+        if self.task == "chain":
+            # One offset per column with a location, and per class after the first of a categorical column.
+            targets, _ = chain_targets(head.columns)
+            locations, scales = [position for target in targets for position in target], None
+        else:
+            shape = jax.eval_shape(
+                lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+            )
+            locations, scales = location_outputs(self.task, int(shape.shape[-1]))
         sizes = [len(encoder.embedding_columns[embedded.index(name)].categories) for name in effects]
         parents = nesting(self.random_effects)
         mass = float(getattr(self, "_effect_mass", 1.0) or 1.0)
@@ -1765,6 +1787,7 @@ class ASRModel(BaseEstimator):
             embedding_dim=int(self.categorical_embedding_dim),
             parents=[list(effects).index(parents[name]) if name in parents else -1 for name in effects],
             key=key,
+            targets=targets,
         )
 
     @property
@@ -1784,7 +1807,7 @@ class ASRModel(BaseEstimator):
 
     def _location_unit(self) -> float:
         """One unit of the head's location in ``y``: the target scale for a standardized target, else 1."""
-        if self.task in _SCALED_TASKS and self.standardize_target:
+        if self.task in _SCALED_TASKS and self.standardize_target and self.task != "chain":
             return float(np.asarray(self.target_std_, dtype=np.float64).reshape(-1)[0])
         return 1.0
 
@@ -2295,6 +2318,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError("with_context updates random effects' offsets; fit with random_effects={column: 'intercept'}.")
         if self.task == "regression":
             raise AshlarError("with_context reads the rows' likelihood, and the regression task predicts a point.")
+        if self.task == "chain":
+            raise AshlarError("with_context updates one offset per row; a chain's groups have one per column, which it does not yet update.")
         values = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if observed.is_observed(target_array(y)) or not np.isfinite(values).all():
             raise AshlarError("with_context takes finite values of y, not observed labels.")

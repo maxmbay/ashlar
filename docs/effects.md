@@ -71,7 +71,7 @@ With `backbone="additive"`, `shape_functions` gives the offsets as one more term
 ## Limits
 
 - A grouping column cannot be a set feature or a monotone feature, and a slope cannot be on a monotone feature, which a group's slope could turn around.
-- `random_effects` needs a built-in head without a cure fraction and `share_training_batches=True`.
+- `random_effects` needs a built-in head without a cure fraction and `share_training_batches=True`. On `task="chain"` every column with a location gets an offset of its own ([chained outcomes](distributions.md#outcomes-of-different-kinds-chained)); `with_context` does not yet update them.
 - The offsets move the location only. A store whose sales are more variable than others', not just higher, gets that from the embedding, which the network can read into the spread, not from an offset.
 - The variational posteriors are independent normals per group and term, so the posterior correlation between a group's intercept and its slope is not kept.
 

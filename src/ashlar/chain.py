@@ -56,6 +56,9 @@ class ChainColumn(NamedTuple):
     count, ``classes`` a categorical column's class count (values are the
     codes ``0 .. classes - 1``), and ``scale`` the spread of ``log1p`` of a
     count or amount, which divides it when it conditions a later column.
+    ``monotone`` overrides, for this column, the direction of features the
+    model names in ``monotone=``: ``{"rate": -1}`` makes a time fall as the
+    rate rises while the model's ``{"rate": 1}`` raises a default's odds.
     """
 
     kind: str
@@ -64,6 +67,8 @@ class ChainColumn(NamedTuple):
     bins: int | None = None
     classes: int | None = None
     scale: float = 1.0
+    # ``(feature, direction)`` pairs that override the model's ``monotone=`` directions for this column.
+    monotone: tuple = ()
 
     @property
     def scaled(self) -> bool:
@@ -100,6 +105,8 @@ class ChainColumn(NamedTuple):
             payload["classes"] = int(self.classes)
         if self.kind in (*COUNT_KINDS, "hurdle"):
             payload["scale"] = float(self.scale)
+        if self.monotone:
+            payload["monotone"] = {name: int(direction) for name, direction in self.monotone}
         return payload
 
 
@@ -129,7 +136,7 @@ def chain_columns(spec) -> tuple[ChainColumn, ...]:
             "hurdle": {"severity", "scale"},
             "histogram": {"bins"},
             "categorical": {"classes"},
-        }.get(kind, set())
+        }.get(kind, set()) | {"monotone"}
         unknown = sorted(set(entry) - allowed)
         if unknown:
             raise AshlarError(f"a {kind} column of a chain does not take {', '.join(unknown)}.")
@@ -140,6 +147,14 @@ def chain_columns(spec) -> tuple[ChainColumn, ...]:
         if classes is not None and int(classes) < 2:
             raise AshlarError(f"a categorical column needs at least 2 classes; received {classes}.")
         bins = entry.get("bins")
+        monotone = entry.get("monotone") or {}
+        if isinstance(monotone, (list, tuple)):
+            monotone = dict(monotone)
+        if not isinstance(monotone, dict):
+            raise AshlarError("a chain column's monotone is a dict of feature names to +1 or -1.")
+        for name, direction in monotone.items():
+            if isinstance(direction, bool) or direction not in (1, -1):
+                raise AshlarError(f"a chain column's monotone[{name!r}] must be +1 or -1; received {direction!r}.")
         scale = float(entry.get("scale", 1.0))
         if not math.isfinite(scale) or scale <= 0:
             raise AshlarError(f"a chain column's scale must be positive; received {scale}.")
@@ -151,6 +166,7 @@ def chain_columns(spec) -> tuple[ChainColumn, ...]:
                 bins=None if bins is None else int(bins),
                 classes=None if classes is None else int(classes),
                 scale=scale,
+                monotone=tuple((str(name), int(direction)) for name, direction in monotone.items()),
             )
         )
     if not columns:
@@ -190,6 +206,88 @@ def resolve_columns(columns: tuple[ChainColumn, ...], values) -> tuple[ChainColu
             column = column._replace(scale=spread if spread > 1e-3 else 1.0)
         resolved.append(column)
     return tuple(resolved)
+
+
+def _location_positions(column: ChainColumn) -> tuple[int, ...]:
+    """The outputs of a column's head that move its whole distribution: a location, a log mean, a shift."""
+    from ashlar.effects import location_outputs
+
+    return location_outputs(column.kind, column.width)[0]
+
+
+def chain_targets(columns: tuple[ChainColumn, ...]) -> tuple[list[tuple[int, ...]], list[tuple[int, int | None]]]:
+    """The outputs of the chain head's ``context`` a random effect moves, one target per offset, and what each is.
+
+    A column with a location (every kind but ``histogram``) is one target, its
+    location outputs; a ``categorical`` column is one target per class after
+    the first, that class's logit against the first. The labels are
+    ``(column, class)``, the class ``None`` for a location.
+    """
+    width = max(column.width for column in columns)
+    targets, labels = [], []
+    for index, column in enumerate(columns):
+        base = index * width
+        if column.kind == "histogram":
+            continue
+        if column.kind == "categorical":
+            for code in range(1, int(column.classes)):
+                targets.append((base + code,))
+                labels.append((index, code))
+            continue
+        targets.append(tuple(base + position for position in _location_positions(column)))
+        labels.append((index, None))
+    if not targets:
+        raise AshlarError("random effects move a column's location, and no column of this chain has one.")
+    return targets, labels
+
+
+# Kinds of chain column whose location a monotone term may move: each quantile then moves one way.
+MONOTONE_KINDS = ("gaussian", "student_t", "mixture", "poisson", "negative_binomial", "hurdle", "categorical")
+
+
+def chain_monotone_signs(columns: tuple[ChainColumn, ...], hidden: int, directions: dict) -> tuple[tuple[int, ...], ...]:
+    """``(features, outputs)`` signs of the monotone term on the chain head's ``context``.
+
+    Each column's location rises with a feature of direction ``+1`` in that
+    column (its own ``monotone`` entry, else the model's ``directions``), so,
+    given the columns before it, the column's distribution moves up as the
+    feature rises: a location for a continuous column, every component's
+    location for a ``mixture`` (the weights and widths read only the other
+    features), the log mean of a count, the amount of a ``hurdle`` (its
+    zero's probability reads only the other features), and the logit of the
+    second class of a two-class ``categorical``. Signs are relative to the
+    model's direction, since the term already reads the feature that way.
+    """
+    width = max(column.width for column in columns)
+    total = len(columns) * (width + int(hidden))
+    signs = np.zeros((len(directions), total), dtype=np.int64)
+    names = list(directions)
+    for index, column in enumerate(columns):
+        own = dict(column.monotone)
+        unknown = sorted(set(own) - set(names))
+        if unknown:
+            raise AshlarError(
+                f"column {index} of the chain overrides the monotone direction of {unknown}, which monotone= does not name."
+            )
+        if column.kind not in MONOTONE_KINDS:
+            raise AshlarError(
+                f"monotone constraints move a column's location; column {index} of the chain is {column.kind}, "
+                f"which has none that moves every quantile one way. Chain columns that take them: {', '.join(MONOTONE_KINDS)}."
+            )
+        if column.kind == "categorical":
+            if int(column.classes) != 2:
+                raise AshlarError(
+                    f"column {index} of the chain has {column.classes} classes; a monotone feature can only raise the "
+                    "odds of the second class of two."
+                )
+            positions = (1,)
+        else:
+            positions = _location_positions(column)
+        for number, name in enumerate(names):
+            relative = int(own.get(name, directions[name])) * int(directions[name])
+            for position in positions:
+                signs[number, index * width + position] = relative
+    return tuple(tuple(int(value) for value in row) for row in signs)
 
 
 def column_start(column: ChainColumn, values) -> jax.Array:
@@ -408,7 +506,10 @@ class Chain(Distribution):
 
         A class column whose cell is a range sums over the classes in it, so
         an unknown cause of a censored time, ``interval(-inf, inf)``, scores
-        ``Σ_c p(c) P(T > t | c)``. Every other cell before the last must be
+        ``Σ_c p(c) P(T > t | c)``. Any other cell may be censored or an
+        interval when every cell after it in the row is unknown,
+        ``(-inf, inf)``: a loan still running has a censored time and no loss
+        yet, so its later columns integrate to 1. Every other cell must be
         exact; the estimator refuses a label that is not.
         """
         from ashlar.distributions import _bounds
@@ -420,6 +521,10 @@ class Chain(Distribution):
         lower, upper = jnp.broadcast_to(lower, batch + (d,)), jnp.broadcast_to(upper, batch + (d,))
         context = jnp.broadcast_to(self.context, batch + self.context.shape[-1:])
         exact = lower == upper
+        unknown = jnp.isneginf(lower) & jnp.isposinf(upper)
+        # Per cell: every cell after it in the row is unknown, so a coarse cell here ends what the row says.
+        after = jnp.flip(jnp.cumsum(jnp.flip(~unknown, axis=-1), axis=-1), axis=-1)
+        tail_unknown = jnp.concatenate([after[..., 1:] == 0, jnp.ones(batch + (1,), dtype=bool)], axis=-1)
         # Branches over the classes of earlier class columns: values (branches, ...batch, d), weight (branches, ...batch).
         values = jnp.where(exact, lower, 0.0)[None]
         weight = jnp.zeros((1,) + batch, dtype=jnp.float32)
@@ -443,14 +548,15 @@ class Chain(Distribution):
                 values = values.at[..., index].set(codes.reshape((-1,) + (1,) * (values.ndim - 2)))
                 values = values.reshape((column.classes * branches,) + batch + (d,))
                 continue
-            if last:
-                point = dist.log_prob(jnp.where(exact[..., index], low, 0.0))
-                coarse = dist.log_interval(
-                    jnp.where(exact[..., index], -jnp.inf, low), jnp.where(exact[..., index], jnp.inf, high)
-                )
-                weight = weight + jnp.where(exact[..., index], point, coarse)
-                continue
-            weight = weight + dist.log_prob(values[..., index])
+            point = dist.log_prob(jnp.where(exact[..., index], low, 0.0))
+            coarse = dist.log_interval(
+                jnp.where(exact[..., index], -jnp.inf, low), jnp.where(exact[..., index], jnp.inf, high)
+            )
+            if not last:
+                # A coarse cell before the last counts only where the rest of the row is unknown; elsewhere the
+                # estimator has refused the label, and the cell's placeholder value conditions nothing it scores.
+                coarse = jnp.where(tail_unknown[..., index], coarse, 0.0)
+            weight = weight + jnp.where(exact[..., index], point, coarse)
         return jax.nn.logsumexp(weight, axis=0)
 
     def sample(self, key, sample_shape=()):
