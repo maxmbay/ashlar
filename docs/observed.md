@@ -60,11 +60,15 @@ Intervals are closed at both ends, which is what a count needs: a sold-out stock
 | Label | Heads |
 |---|---|
 | exact, interval, censored, survival, rounded, truncated | `gaussian`, `mixture`, `flow`, `histogram`, `student_t`, `poisson`, `negative_binomial` (zero-inflated or not), `hurdle`, `normal` with one column |
-| noisy | `gaussian`, `mixture`, `normal`, where a normal plus normal noise stays in closed form |
-| group totals | `gaussian`, `normal`, `poisson` without zero inflation, where a sum of independent rows stays in closed form |
+| noisy | `gaussian`, `mixture`, `normal` in closed form; `student_t`, `flow`, `histogram`, `hurdle` by quadrature over the noise |
+| group totals | `gaussian`, `normal`, `poisson` without zero inflation in closed form; `mixture`, `flow`, `histogram`, `student_t`, `negative_binomial`, and zero-inflated `poisson` on a grid |
+| censored or interval times that may never come, `head_kwargs={"cure": True}` | `gaussian`, `mixture`, `flow`, `student_t` |
+| a set of classes, `observed.one_of`, or a range of classes, `observed.interval` | `ASRClassifier`; `ASROrdinalClassifier` with either head |
 | a cell per column, each exact, interval, censored, survival without entry, or rounded | `multivariate_gaussian`, `multivariate_mixture`, `multivariate_flow` (with one block, the default, when any cell is coarse) |
 
-The `quantile` head has no density, so it takes no observed label, and neither do the classifiers. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
+The `quantile` head has no density, so it takes no observed label. Every head computes its interval probabilities in log space, subtracting on the side of the median where the interval lies, so a row far in a tail still has a finite, smooth likelihood. The tests check the normal 40 standard deviations out and a count interval whose probability is 10⁻¹¹⁷. The Student-t's degrees of freedom and the negative binomial's dispersion train through the censored likelihood as well.
+
+A noisy label on a head without a closed form is scored by Gauss-Hermite quadrature: the mean of the head's density, or of its interval probability, over 32 points of the noise. It is exact for a normal to four decimals, and accurate when the noise is no wider than the head's own spread; a narrow peak under much wider noise can fall between the points. A hurdle with noise is a normal at zero for the atom and the noisy amount beside it, so its recorded value may fall below zero, and a row with no noise keeps the mass of its exact zero. On simulated rows with noise of known width from 0.2 to 1.5, telling the `student_t`, `flow`, and `histogram` heads the noise raised the log-likelihood of the true values by 0.15 to 0.22 nats per row against fitting the recorded values as if they were exact.
 
 The `histogram` head has no mass past its edges at ±4 standard deviations, so it reads a bound out there at the middle of its end bin, as its `log_prob` reads a value out there in the end bin. If many bounds fall that far out, use the `mixture` or the `flow`. The `hurdle` head's zero is an exact atom, so `interval(0, 5)` includes it and `interval(0.01, 5)` does not.
 
@@ -115,6 +119,61 @@ Drive failures with delayed entry went the other way. On Backblaze's records of 
 
 [docs/benchmarks.md](benchmarks.md#observed-labels-on-real-data) has every model, with the Cox model and Kaplan-Meier, and the spread across splits.
 
+## Times that may never come
+
+Some events never happen to some rows: a patient is cured, a customer never buys, a machine outlives the study. A survival head reads a row still waiting at the end as a time that would have come later, so it spreads the never-happens share over the far tail. `head_kwargs={"cure": True}` adds a share that never happens, learned per row beside the time's distribution, so the predictive distribution is defective: `cdf(t)` rises to `1 - P(never)` and no further.
+
+```python
+y = observed.survival(np.log(days), converted)
+model = ASRRegressor(task="gaussian", head_kwargs={"cure": True}).fit(X, y)
+
+model.predict_exceedance(X_new, np.inf)             # P(never converts), per row
+model.predict_exceedance(X_new, np.log(30.0))       # P(not converted by day 30), the never-share included
+model.predict_quantiles(X_new, [0.5])               # inf where more than half never convert
+```
+
+A censored row scores `P(never) + P(happens) P(T > t)` and an event `P(happens)` times the density. The cure share starts at 12% and its weight small, so a table with no cure learns a share near zero. A draw is `inf` where it never happens. Cure heads take exact, censored, interval, and truncated times, not noisy labels or totals. The `gaussian` head is the clearest recipe, a log-normal time and a cure share: a `mixture` can put a component far out instead, which comes close on the likelihood inside the follow-up but tells you nothing about who never converts.
+
+From [`examples/benchmark_observed_more.py`](../examples/benchmark_observed_more.py), on 6,000 simulated rows of which 40% never have the event, the share changing with the features, three seeds:
+
+| Head | NLL of held-out censored rows ↓ | Predicted share that never has the event (true 39.7%) | Its error per row ↓ | Error of `P(T > t)` at three times ↓ |
+|---|---:|---:|---:|---:|
+| `gaussian`, `cure=True` | **0.999** | 39.8% | **0.042** | **0.028** |
+| `gaussian` | 1.051 | 0.0% | 0.397 | 0.045 |
+| `mixture` | 1.009 | 0.0% | 0.397 | 0.038 |
+
+## Competing risks
+
+A row may end in one of several ways, a machine by wear or by breakage, a loan by repayment or by default, and a row still running at the end has no cause yet. A [chain](distributions.md#outcomes-of-different-kinds-chained) of a `categorical` cause and a time models `p(cause | x) p(time | cause, x)`. The cause of a censored row is `interval(-inf, inf)`, unknown, and its time censored, so the likelihood sums over the causes it could still have had:
+
+```python
+label = observed.stack([
+    observed.interval(np.where(ended, cause, -np.inf), np.where(ended, cause, np.inf)),
+    observed.censored(np.log(time), ~ended),
+])
+model = ASRRegressor(task="chain", head_kwargs={"columns": ["categorical", "gaussian"]}).fit(X, label)
+
+# The cumulative incidence P(cause = c, T <= t), exactly, as the likelihood of a label that says just that.
+by_then = observed.stack([observed.exact(np.full(n, c)), observed.interval(np.full(n, -np.inf), np.full(n, np.log(t)))])
+np.exp(model.log_prob(X_new, by_then))
+```
+
+The same label takes an event whose cause went unrecorded: its time exact and its cause `interval(-inf, inf)`. The usual workaround, one censored survival model per cause with the other causes as censoring, can only count such an event as censored, and so underestimates every cause.
+
+From [`examples/benchmark_observed_more.py`](../examples/benchmark_observed_more.py), on 6,000 simulated rows with two causes whose times differ, three seeds: the chain's cumulative incidence at three times is off by 0.029 on average, and the cause-specific mixtures' by 0.033. With 30% of the events' causes unrecorded the chain is off by the same 0.029, and the cause-specific fits by 0.051.
+
+## Classes that are partly known
+
+A classifier's label may say only that a row is one of a few classes: an annotator who could tell a bird from a mammal but not which mammal, a survey answer that rules some options out, a coarse code in older records. `observed.one_of` takes a set of classes per row, a single class for a row that is known, and `None` for one that is not; or a boolean array or DataFrame with a column per class. The likelihood is the probability of the set, so the model learns from every row what it rules out:
+
+```python
+y = observed.one_of([{"cat", "dog"}, "bird", "cat", None])
+model = ASRClassifier().fit(X, y)
+model.predict_proba(X_new)                         # columns in model.classes_ order
+```
+
+An ordinal label may be a range, `observed.interval(2, 4)` for a score known to lie from 2 to 4, which works with both of `ASROrdinalClassifier`'s heads. The classes are every class a label names. `class_weight`, `expectation_weight`, and `histogram_variance` need each row's one class, so they are refused with sets, and a model search trial scores by the likelihood, not by accuracy.
+
 ## Daily values from weekly totals
 
 `observed.total(values, group)` says only the sum of each group's rows was recorded, with the sum on every row of the group. Rows are independent given their features, so a sum of normal rows is normal and a sum of Poisson rows is Poisson, and the head learns each row's own distribution from the sums. Each member of an ensemble sums its own rows, as it would score its own row.
@@ -142,6 +201,8 @@ What totals can teach is limited by what varies between groups. If every week ho
 
 Real meter data show both sides. On the daily load of eight electricity clients over three years, a fit to each calendar week's total does not just miss the weekday pattern, it makes one up: every split of a week between its days fits the total equally well, and the one it settles on puts each weekday's load, as a share of the client's mean day, off by 12%. These clients' weekdays differ little, so a fit to each total spread evenly, which learns every weekday the same, is off by only 2.6%, and its daily means are closer. Readings taken at irregular intervals of 2 to 12 days start on any weekday, so they do pin the pattern down: fitted to them with `observed.total`, the head learns the days nearly as well as from the days themselves, with a CRPS of 19.0 MWh against 18.0 and weekday shares off by 2.9% against 2.0%. The same readings spread evenly get the means about right and the spread far too narrow: their 80% interval holds 47% of the held-out days. [docs/benchmarks.md](benchmarks.md#daily-loads-from-meter-readings) has the table.
 
+Heads whose sum has no closed form take totals too: the `mixture`, `flow`, `histogram`, and `student_t` heads, the `negative_binomial`, and a zero-inflated `poisson`. Each row's distribution is put on a grid of 512 bins centred on its mean, 2,048 whole-number bins for a count, the rows of a group are convolved by FFT, and the total's probability is read off the result, so any head with a CDF can learn from sums. A total of up to six rows matches the exact sum of normals to 10⁻³ nats, and a total of one count row is its own mass. A group with a single row uses that row's own likelihood. Truncation divides out as for a single row; noise on a grid total is refused. On 600 simulated weeks of seven negative binomial days, fitted to weekly totals only, the daily means came out with a correlation of 0.98 with the truth.
+
 `fit` keeps each group whole: in one minibatch, with at least two of the largest groups per batch, and on one side of an internal validation split (a temporal split puts a cut group on the side of its first row; a grouped split must already keep each total inside one of its groups). A group's weight is the mean of its rows' weights. Each label records the number of rows its total covers, so a split that cuts a group, such as a shuffled `KFold`, raises instead of scoring part of a sum against the whole total; split with `GroupKFold` on the group ids.
 
 ## Several products that sell out together
@@ -162,6 +223,8 @@ y = observed.stack([observed.exact(price), observed.rounded(volume, 10)])   # a 
 ```
 
 A row's likelihood is the joint density of its exact cells times the probability, given them, that every coarse cell lies in its range. With one coarse cell, that is the interval probability of a conditional normal, or of a mixture of them, so it is closed form. With several, it is the probability of a box under a correlated distribution, which has no closed form, and `log_box` estimates it with the GHK simulator ([Genz 1992](https://doi.org/10.1080/10618600.1992.10477010)). It visits the coarse columns one at a time, multiplies the probability of each one's range given the columns before it, and draws a value inside that range to condition the next. The draws come from fixed quasi-random points, 32 per row in training and 256 when scoring, so the likelihood is smooth in the parameters and the same on every call. On a joint normal with two coarse columns of three, it is within 0.002 of SciPy's log probability at 256 points, and within 0.01 at 32.
+
+Where the dependence itself changes with the row, the joint mixture is worth its cost. On 6,000 simulated rows of two columns whose correlation is +0.9 in one regime and -0.9 in the other, each column censored at its own random limit, the joint mixture fitted to the censored label scored 2.433 nats on the true values against 2.745 for the joint normal, within 0.03 of its own oracle, and its probability that both columns exceed 1 was off by 0.010 per row against 0.018. It took 66 CPU seconds against the joint normal's 25. [docs/benchmarks.md](benchmarks.md#cure-competing-risks-and-regimes) has the tables.
 
 The joint normal runs the simulator as a Kalman update of its low-rank factor, so a point costs `columns × rank²`. It visits the exact columns first and then the coarse ones from the least likely, which leaves the least to the draws. The mixture runs it in each component. The flow runs it in its own column order, through each column's spline, so a coarse cell needs its one block (`depth=1`, the default); a deeper flow trains on joint labels whose cells are all exact. Truncation, noise, and group totals stay one-column, and a joint model calibrates on rows whose cells are all exact.
 
