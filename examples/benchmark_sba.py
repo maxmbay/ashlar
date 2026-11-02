@@ -1,0 +1,338 @@
+"""SBA 7(a) loans: when a loan ends, by default or by payoff, from the books as they stood in 2015.
+
+The SBA publishes every 7(a) loan it has guaranteed since 1991, with its
+status as of the file's date: paid in full (with the date), charged off
+(with the date and the gross amount), or still running. This benchmark
+rebuilds the table as it looked on 30 September 2015. A loan that ended by
+then has a known cause and time; a loan still running then is censored, its
+cause and loss unknown. Every model trains on that view only. The test is
+what happened next: the loans running in 2015, scored on how they ended by
+the file's date in 2026.
+
+Ashlar fits one chain, trained end to end:
+
+    p(cause, log months, loss share | x)
+        = p(cause | x) · p(log months | cause, x) · p(loss share | cause, log months, x)
+
+with the cause two classes (payoff 0, default 1), the time a ``mixture``,
+and the loss a ``hurdle`` (0 on a payoff). A running loan's label is an
+unknown cause, a censored time, and an unknown loss. Lenders and six-digit
+NAICS codes (within two-digit sectors) are pooled with ``random_effects``.
+
+Baselines:
+
+- ``finished``: a LightGBM classifier of default against payoff on the loans
+  that had ended by 2015, the common analysis of this table.
+- ``running_as_paid``: the same classifier with running loans counted as not defaulted.
+- ``hazard``: a LightGBM discrete-time hazard on loan-quarters, three
+  classes (none, default, payoff), the duration a feature: the standard
+  correct treatment of censoring and competing risks with trees.
+- ``aft``: XGBoost AFT on the time to default, payoff and running treated as
+  censored, which ignores that payoff competes with default.
+
+Scores, on loans running in 2015 that were not in the training sample:
+Brier score and AUC of "defaulted within h years of 2015" and "paid off
+within h years" for h = 1, 3, 5, the gap between the mean predicted and
+the observed share, and, for Ashlar and the hazard model, the log-likelihood
+of what was seen by 2026.
+
+Run (on a machine with the files):
+
+    python examples/benchmark_sba.py --data ~/projects/ashlar-data/sba --rows 100000 --out sba-pilot.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+SNAPSHOT = pd.Timestamp("2015-09-30")
+AS_OF = pd.Timestamp("2026-09-30")
+HORIZONS = (1, 3, 5)
+MONTH = 30.4375
+FILES = ("FOIA_7a_FY2000_FY2009_asof_260930.csv", "FOIA_7a_FY2010_FY2019_asof_260930.csv")
+CATEGORICAL = [
+    "fixed_or_variable", "business_type", "business_age", "sector", "state", "revolver", "collateral",
+    "sold", "franchise", "processing", "same_state", "approval_fy",
+]
+
+
+def months_between(later, earlier):
+    return (later - earlier).dt.days / MONTH
+
+
+def load(data: Path, first_fy: int, last_fy: int) -> pd.DataFrame:
+    frames = []
+    for name in FILES:
+        frame = pd.read_csv(data / name, low_memory=False)
+        frames.append(frame[(frame["ApprovalFY"] >= first_fy) & (frame["ApprovalFY"] <= last_fy)])
+    frame = pd.concat(frames, ignore_index=True).drop_duplicates()
+    for column in ("GrossApproval", "SBAGuaranteedApproval", "GrossChargeOffAmount", "TermInMonths",
+                   "InitialInterestRate", "JobsSupported", "NaicsCode", "ApprovalFY"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame[frame["LoanStatus"].isin(["P I F", "CHGOFF", "EXEMPT"])]
+    for column in ("ApprovalDate", "FirstDisbursementDate", "PaidInFullDate", "ChargeOffDate"):
+        frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    frame = frame[frame["FirstDisbursementDate"].notna() & (frame["FirstDisbursementDate"] <= SNAPSHOT)]
+    frame = frame[~((frame["LoanStatus"] == "CHGOFF") & frame["ChargeOffDate"].isna())]
+    end = frame["PaidInFullDate"].fillna(frame["ChargeOffDate"])
+    frame = frame[end.isna() | (end > frame["FirstDisbursementDate"])].copy()
+    frame["end"] = frame["PaidInFullDate"].fillna(frame["ChargeOffDate"])
+    frame["final_cause"] = np.where(frame["LoanStatus"] == "CHGOFF", 1.0, np.where(frame["LoanStatus"] == "P I F", 0.0, np.nan))
+    frame["final_months"] = months_between(frame["end"].fillna(AS_OF), frame["FirstDisbursementDate"])
+    frame["loss_share"] = np.where(
+        frame["LoanStatus"] == "CHGOFF", np.clip(frame["GrossChargeOffAmount"].astype(float) / frame["GrossApproval"].astype(float), 1e-4, 1.5), 0.0
+    )
+    frame["ended_by_snapshot"] = frame["end"].notna() & (frame["end"] <= SNAPSHOT)
+    frame["snapshot_months"] = months_between(pd.Series(SNAPSHOT, index=frame.index), frame["FirstDisbursementDate"])
+    return frame.reset_index(drop=True)
+
+
+def features(frame: pd.DataFrame) -> pd.DataFrame:
+    naics = frame["NaicsCode"].fillna(0).astype(np.int64).astype(str)
+    out = pd.DataFrame(
+        {
+            "log_amount": np.log(frame["GrossApproval"].astype(float).clip(lower=1000)),
+            "guarantee_share": frame["SBAGuaranteedApproval"].astype(float) / frame["GrossApproval"].astype(float),
+            "term": frame["TermInMonths"].astype(float),
+            "rate": frame["InitialInterestRate"].astype(float),
+            "log_jobs": np.log1p(frame["JobsSupported"].fillna(0).clip(lower=0)),
+            "fixed_or_variable": frame["FixedorVariableInterestInd"].fillna("?").astype(str),
+            "business_type": frame["BusinessType"].fillna("?").astype(str),
+            "business_age": frame["BusinessAge"].fillna("?").astype(str),
+            "sector": naics.str[:2],
+            "state": frame["ProjectState"].fillna("?").astype(str),
+            "revolver": frame["RevolverStatus"].fillna(-1).astype(str),
+            "collateral": frame["CollateralInd"].fillna("?").astype(str),
+            "sold": frame["SoldSecMrktInd"].fillna("?").astype(str),
+            "franchise": frame["FranchiseCode"].notna().astype(str),
+            "processing": frame["ProcessingMethod"].fillna("?").astype(str),
+            "same_state": (frame["BankState"] == frame["ProjectState"]).astype(str),
+            "approval_fy": frame["ApprovalFY"].astype(str),
+            "lender": frame["BankName"].fillna("?").astype(str),
+            "naics": naics,
+        }
+    )
+    return out
+
+
+def snapshot_label(frame: pd.DataFrame):
+    """The 2015 view: (cause, log months, loss share) with a running loan's cells coarse."""
+    from ashlar import observed
+
+    ended = frame["ended_by_snapshot"].to_numpy()
+    cause = frame["final_cause"].to_numpy()
+    months = np.where(ended, frame["final_months"].to_numpy(), frame["snapshot_months"].to_numpy())
+    log_months = np.log(months + 1.0)
+    loss = frame["loss_share"].to_numpy()
+    return observed.stack(
+        [
+            observed.interval(np.where(ended, cause, -np.inf), np.where(ended, cause, np.inf)),
+            observed.censored(log_months, ~ended),
+            observed.interval(np.where(ended, loss, -np.inf), np.where(ended, loss, np.inf)),
+        ]
+    )
+
+
+def truth(frame: pd.DataFrame):
+    """For each running loan: did it default, or pay off, within h years of the snapshot."""
+    t0 = frame["snapshot_months"].to_numpy()
+    t = frame["final_months"].to_numpy()
+    cause = frame["final_cause"].to_numpy()
+    out = {}
+    for h in HORIZONS:
+        within = np.isfinite(cause) & (t <= t0 + 12 * h)
+        out[h] = {"default": (within & (cause == 1)).astype(float), "payoff": (within & (cause == 0)).astype(float)}
+    return out
+
+
+def ashlar_cif(model, X, t0, chunk: int = 4000):
+    """P(cause c within h years | running at t0) from the chain's box likelihood, exact."""
+    out = {h: {"default": [], "payoff": []} for h in HORIZONS}
+    for start in range(0, len(t0), chunk):
+        rows = slice(start, start + chunk)
+        dist = model.predict_dist(X.iloc[rows])
+        a = np.log(t0[rows] + 1.0)
+        n = len(a)
+        inf = np.full(n, np.inf, dtype=np.float32)
+
+        def box(lower, upper):
+            return np.asarray(dist.log_box(np.stack(lower, 1).astype(np.float32), np.stack(upper, 1).astype(np.float32)))
+
+        alive = box([-inf, a, -inf], [inf, inf, inf])
+        for h in HORIZONS:
+            b = np.log(t0[rows] + 12 * h + 1.0)
+            for name, code in (("payoff", 0.0), ("default", 1.0)):
+                c = np.full(n, code)
+                out[h][name].append(np.exp(box([c, a, -inf], [c, b, inf]) - alive))
+    return {h: {k: np.concatenate(v) for k, v in parts.items()} for h, parts in out.items()}
+
+
+def quarter_rows(X: pd.DataFrame, label_frame: pd.DataFrame, ended: np.ndarray):
+    """Loan-quarters for the discrete-time hazard, as of the snapshot."""
+    months = np.where(ended, label_frame["final_months"], label_frame["snapshot_months"]).astype(float)
+    quarters = np.floor(months / 3.0).astype(int)
+    index = np.repeat(np.arange(len(X)), quarters + 1)
+    age = np.concatenate([np.arange(q + 1) for q in quarters])
+    event = np.zeros(len(index), dtype=int)
+    last = np.cumsum(quarters + 1) - 1
+    cause = label_frame["final_cause"].to_numpy()
+    event[last[ended]] = np.where(cause[ended] == 1, 1, 2)
+    rows = X.iloc[index].reset_index(drop=True).copy()
+    rows["age"] = age
+    return rows, event
+
+
+def hazard_cif(model, X, t0):
+    start = np.floor(t0 / 3.0).astype(int)
+    cumulative = {h: {"default": np.zeros(len(X)), "payoff": np.zeros(len(X))} for h in HORIZONS}
+    alive = np.ones(len(X))
+    for step in range(4 * max(HORIZONS)):
+        rows = X.copy()
+        rows["age"] = start + step
+        p = model.predict_proba(rows)
+        default, payoff = alive * p[:, 1], alive * p[:, 2]
+        alive = alive * p[:, 0]
+        for h in HORIZONS:
+            if step < 4 * h:
+                cumulative[h]["default"] += default
+                cumulative[h]["payoff"] += payoff
+    return cumulative
+
+
+def scores(pred, true):
+    from sklearn.metrics import roc_auc_score
+
+    out = {}
+    for h in HORIZONS:
+        for name in ("default", "payoff"):
+            if pred[h].get(name) is None:
+                continue
+            p, y = np.clip(pred[h][name], 0, 1), true[h][name]
+            out[f"{name}_{h}y"] = {
+                "brier": float(np.mean((p - y) ** 2)),
+                "auc": float(roc_auc_score(y, p)) if 0 < y.mean() < 1 else None,
+                "mean_pred": float(p.mean()),
+                "observed": float(y.mean()),
+            }
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--rows", type=int, default=100_000)
+    parser.add_argument("--test", type=int, default=50_000)
+    parser.add_argument("--first-fy", type=int, default=2010)
+    parser.add_argument("--last-fy", type=int, default=2015)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--models", default="finished,running_as_paid,hazard,aft,ashlar,ashlar_pooled")
+    parser.add_argument("--out", type=Path, default=Path("sba-pilot.json"))
+    args = parser.parse_args()
+    wanted = set(args.models.split(","))
+
+    frame = load(args.data, args.first_fy, args.last_fy)
+    rng = np.random.default_rng(args.seed)
+    order = rng.permutation(len(frame))
+    train = frame.iloc[order[: args.rows]].reset_index(drop=True)
+    rest = frame.iloc[order[args.rows :]]
+    test = rest[~rest["ended_by_snapshot"]].iloc[: args.test].reset_index(drop=True)
+    X_train, X_test = features(train), features(test)
+    t0 = test["snapshot_months"].to_numpy()
+    true = truth(test)
+    ended = train["ended_by_snapshot"].to_numpy()
+    summary = {
+        "train_loans": len(train), "train_ended": int(ended.sum()), "train_defaults": int((ended & (train["final_cause"] == 1)).sum()),
+        "test_running_loans": len(test), "observed": {f"{h}y": {k: float(v.mean()) for k, v in true[h].items()} for h in HORIZONS},
+    }
+    results = {"summary": summary, "models": {}}
+    print(json.dumps(summary, indent=1))
+    plain = [c for c in X_train.columns if c not in ("lender", "naics")]
+
+    def record(name, pred, seconds, extra=None):
+        results["models"][name] = {"seconds": seconds, "scores": scores(pred, true), **(extra or {})}
+        print(name, json.dumps(results["models"][name]["scores"].get("default_5y")), f"{seconds:.0f}s", flush=True)
+        args.out.write_text(json.dumps(results, indent=1))
+
+    # One categorical coding for the trees, shared by the training and test rows.
+    both = pd.concat([X_train[plain], X_test[plain]], ignore_index=True)
+    for c in CATEGORICAL:
+        both[c] = both[c].astype(str).astype("category")
+    tree_train, tree_test = both.iloc[: len(X_train)].reset_index(drop=True), both.iloc[len(X_train) :].reset_index(drop=True)
+
+    import lightgbm as lgb
+
+    gbm = {"n_estimators": 2000, "learning_rate": 0.05, "num_leaves": 63, "min_child_samples": 50, "verbose": -1}
+    if wanted & {"finished", "running_as_paid"}:
+        Xt, Xs = tree_train, tree_test
+        for name in ("finished", "running_as_paid"):
+            if name not in wanted:
+                continue
+            start = time.time()
+            rows = ended if name == "finished" else np.ones(len(train), bool)
+            y = (train["final_cause"].to_numpy() == 1) & ended
+            fit_rows = np.flatnonzero(rows)
+            valid = rng.random(len(fit_rows)) < 0.1
+            model = lgb.LGBMClassifier(**gbm).fit(
+                Xt.iloc[fit_rows[~valid]], y[fit_rows[~valid]], eval_set=[(Xt.iloc[fit_rows[valid]], y[fit_rows[valid]])],
+                callbacks=[lgb.early_stopping(100, verbose=False)],
+            )
+            p = model.predict_proba(Xs)[:, 1]
+            # A classifier of "ever defaults" has no horizon: the same number at every h, and no payoff.
+            pred = {h: {"default": p, "payoff": None} for h in HORIZONS}
+            record(name, pred, time.time() - start)
+
+    if "hazard" in wanted:
+        start = time.time()
+        rows, event = quarter_rows(tree_train, train, ended)
+        valid = rng.random(len(rows)) < 0.1
+        model = lgb.LGBMClassifier(objective="multiclass", **gbm).fit(
+            rows[~valid], event[~valid], eval_set=[(rows[valid], event[valid])], callbacks=[lgb.early_stopping(100, verbose=False)]
+        )
+        record("hazard", hazard_cif(model, tree_test, t0), time.time() - start, {"quarter_rows": len(rows)})
+
+    if "aft" in wanted:
+        import xgboost as xgb
+
+        start = time.time()
+        dummies = pd.get_dummies(both, dummy_na=False).astype(float)
+        Xt, Xs = dummies.iloc[: len(X_train)], dummies.iloc[len(X_train) :]
+        months = np.where(ended, train["final_months"], train["snapshot_months"]) + 1.0
+        default = ended & (train["final_cause"].to_numpy() == 1)
+        dtrain = xgb.DMatrix(Xt, label_lower_bound=months, label_upper_bound=np.where(default, months, np.inf))
+        params = {"objective": "survival:aft", "aft_loss_distribution": "normal", "aft_loss_distribution_scale": 1.0,
+                  "learning_rate": 0.05, "max_depth": 6, "tree_method": "hist", "eval_metric": "aft-nloglik"}
+        booster = xgb.train(params, dtrain, num_boost_round=600)
+        mu = booster.predict(xgb.DMatrix(Xs), output_margin=True)
+        from scipy.stats import norm
+
+        def surv(m):
+            return norm.sf((np.log(m) - mu) / 1.0)
+
+        pred = {h: {"default": 1 - surv(t0 + 12 * h + 1) / surv(t0 + 1), "payoff": None} for h in HORIZONS}
+        record("aft", pred, time.time() - start)
+
+    from ashlar import ASRRegressor
+
+    label = snapshot_label(train)
+    columns = [{"kind": "categorical", "classes": 2}, "mixture", "hurdle"]
+    for name, effects in (("ashlar", None), ("ashlar_pooled", {"sector": ["intercept", "embedding"],
+                                                               "naics": {"terms": ["intercept", "embedding"], "within": "sector"},
+                                                               "lender": ["intercept", "embedding"]})):
+        if name not in wanted:
+            continue
+        start = time.time()
+        cats = [c for c in CATEGORICAL] + ["lender", "naics"]
+        model = ASRRegressor(task="chain", head_kwargs={"columns": columns}, categorical=cats, random_effects=effects,
+                             max_epochs=args.epochs, random_state=args.seed).fit(X_train, label)
+        record(name, ashlar_cif(model, X_test, t0), time.time() - start, {"epochs": int(getattr(model, "n_epochs_", 0) or 0)})
+
+
+if __name__ == "__main__":
+    main()
