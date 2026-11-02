@@ -1,6 +1,0 @@
-
-[notice] A new release of pip is available: 24.2 -> 26.2.2
-[notice] To update, run: /Users/maxwellbay/ashlar-queue/venv-lss/bin/python3.12 -m pip install --upgrade pip
-venv-lss ok 4.7.0 2.9.1
-at 2dd6705 (claude/project-thread-j36znx)
-/Users/maxwellbay/ashlar-queue/running/P2-202611020928-t1-lss-airline.sh: line 13: 66627 Segmentation fault: 11     GBM_THREADS=6 "$LSS" examples/benchmark_large.py --tables airlines_delay --models lightgbmlss_gaussian lightgbmlss_studentt lightgbmlss_mixture ngboost --seeds 0
