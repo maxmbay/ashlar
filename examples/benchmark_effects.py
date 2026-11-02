@@ -248,15 +248,33 @@ def _gpboost(x, y, train, seed):
     return predict, fixed, noise, tau2
 
 
+def _filled(x, train):
+    """Numeric gaps as the training median, plus an indicator where training rows have gaps: patsy refuses NaN."""
+    out = x.copy()
+    for column in x.columns:
+        if not pd.api.types.is_numeric_dtype(out[column]) or not out[column].isna().any():
+            continue
+        missing = out[column].isna()
+        if missing.to_numpy()[train].any():
+            out[f"{column}_missing"] = missing.astype(float)
+        out[column] = out[column].fillna(float(np.nanmedian(out[column].to_numpy()[train])))
+    return out
+
+
 def _mixedlm(x, y, train):
     import statsmodels.formula.api as smf
 
+    x = _filled(x, train)
     features = [column for column in x.columns if column not in {"store", "product"}]
     frame = x.iloc[train].reset_index(drop=True).assign(y=y[train])
     terms = [column if pd.api.types.is_numeric_dtype(x[column]) else f"C({column})" for column in features]
     result = smf.mixedlm("y ~ " + " + ".join(terms), frame, groups=frame["store"]).fit(method=["lbfgs"])
     noise, tau2 = float(result.scale), float(np.asarray(result.cov_re).reshape(-1)[0])
-    effects = {store: float(np.asarray(value).reshape(-1)[0]) for store, value in result.random_effects.items()}
+    try:
+        effects = {store: float(np.asarray(value).reshape(-1)[0]) for store, value in result.random_effects.items()}
+    except (ValueError, np.linalg.LinAlgError):
+        # The stores' variance was fitted at zero, so every store sits at the population mean.
+        effects, tau2 = {}, 0.0
     counts = frame["store"].value_counts().to_dict()
 
     def fixed(rows):
