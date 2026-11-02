@@ -48,6 +48,7 @@ flights did). ``examples/readme/one_flight.py`` draws the card from the same
 artifacts.
 
     python examples/readme/hero_flights.py compute   # about 40 minutes on a laptop CPU
+    python examples/readme/hero_flights.py baseline  # a minute, after the benchmark's LightGBMLSS run
     python examples/readme/hero_flights.py draw
 """
 
@@ -446,6 +447,93 @@ def compute(out: Path, models: Path, epochs=None) -> None:
         print(f"{path.name}: {path.stat().st_size / 1024:.0f} KB", flush=True)
 
 
+# ---------------------------------------------------------------- the best tree distribution
+
+BASELINE = "lightgbmlss_mixture"  # the best tree distribution on airline delay by CRPS
+EARLY_CUTOFF = -15.0  # minutes: an 80% interval starting earlier than this reaches where 0.1% of flights leave
+
+
+def baseline(out: Path) -> None:
+    """LightGBMLSS's mixture of three normals on the same flights, from the benchmark's saved parameters.
+
+    ``examples/benchmark_large.py --models lightgbmlss_mixture`` keeps each scored row's weights, means, and
+    scales in ``$ASHLAR_BENCH_CACHE/predictions/``. This stage fits nothing: it checks them against the
+    benchmark's scores and writes ``lightgbmlss.json`` (scores on the 100,000 scored flights, P(delay > 60) by
+    bins, the chance of a delay that rounds to zero, and how early its intervals start) and
+    ``lightgbmlss.npz`` (the mixture, quantiles, and P(delay > 60) of every flight in ``pool.npz``).
+    """
+    from scipy.stats import norm
+
+    path = bench.PREDICTIONS / f"{TABLE}-{BASELINE}-seed{SEED}.npz"
+    with np.load(path, allow_pickle=False) as data:
+        saved = data["rows"]
+        weight, loc, scale = (data[key].astype(np.float64) for key in ("weight", "loc", "scale"))
+    _, _, _, _, y_test = bench.splits(TABLE, SEED)
+    rows = bench.dist_rows(len(y_test), SEED)
+    where = np.searchsorted(saved, rows)
+    if np.any(where >= len(saved)) or not np.array_equal(saved[np.minimum(where, len(saved) - 1)], rows):
+        raise SystemExit(f"{path.name} does not hold the benchmark's scored rows")
+    weight, loc, scale = weight[where], loc[where], scale[where]
+    yd = y_test[rows]
+
+    def cdf(value):
+        return np.sum(weight * norm.cdf((value - loc) / scale), axis=1)
+
+    quantiles = bench.mixture_quantiles(weight, loc, scale)
+    p60 = 1.0 - cdf(THRESHOLD)
+    on_minute = cdf(0.5) - cdf(-0.5)
+    late = (yd > THRESHOLD).astype(np.float64)
+    with np.load(out / "pool.npz", allow_pickle=False) as data:
+        pool_rows, is_card = data["row"], data["is_card"]
+        ashlar_parts = (data["weight"].astype(np.float64), data["loc"].astype(np.float64),
+                        data["scale"].astype(np.float64))
+    picked = np.searchsorted(rows, pool_rows)
+    if not np.array_equal(rows[np.minimum(picked, len(rows) - 1)], pool_rows):
+        raise SystemExit("pool.npz holds flights outside the scored rows")
+    random = picked[~is_card]
+    ashlar_on_minute = (mixture_cdf(*ashlar_parts, np.full(len(pool_rows), 0.5))
+                        - mixture_cdf(*ashlar_parts, np.full(len(pool_rows), -0.5)))[~is_card]
+    record = {
+        "model": BASELINE,
+        "seed": SEED,
+        "scored_rows": int(len(yd)),
+        "crps": bench.crps_mixture(weight, loc, scale, yd),
+        "nll": bench.mixture_nll(weight, loc, scale, yd),
+        **bench.interval(quantiles, yd),
+        "brier60": float(np.mean((p60 - late) ** 2)),
+        "p60_bins": _p60_bins(p60, late),
+        "on_minute": {
+            "predicted": float(on_minute.mean()), "observed": float(np.mean(yd == 0)),
+            "pool_predicted": float(on_minute[random].mean()), "pool_observed": float(np.mean(yd[random] == 0)),
+            "pool_ashlar": float(ashlar_on_minute.mean()),
+        },
+        "early": {"cutoff": EARLY_CUTOFF, "pool_share": float(np.mean(quantiles[random, 0] < EARLY_CUTOFF)),
+                  "pool_median_q10": float(np.median(quantiles[random, 0]))},
+    }
+    if bench.OUT.exists():
+        for line in bench.OUT.read_text().splitlines():
+            run = json.loads(line)
+            if (run["table"], run["model"], run["seed"]) == (TABLE, BASELINE, SEED):
+                record["benchmark"] = {key: run.get(key) for key in ("crps", "nll", "coverage80", "width80", "seconds",
+                                                                     "trees")}
+    (out / "lightgbmlss.json").write_text(json.dumps(record, indent=1))
+    np.savez_compressed(
+        out / "lightgbmlss.npz",
+        row=pool_rows.astype(np.int64),
+        weight=weight[picked].astype(np.float32),
+        loc=loc[picked].astype(np.float32),
+        scale=scale[picked].astype(np.float32),
+        q10=quantiles[picked, 0].astype(np.float32),
+        q50=quantiles[picked, 1].astype(np.float32),
+        q90=quantiles[picked, 2].astype(np.float32),
+        p60=p60[picked].astype(np.float32),
+        on_minute=on_minute[picked].astype(np.float32),
+    )
+    print(json.dumps({key: value for key, value in record.items() if key != "p60_bins"}, indent=1), flush=True)
+    for name in ("lightgbmlss.json", "lightgbmlss.npz"):
+        print(f"{name}: {(out / name).stat().st_size / 1024:.0f} KB", flush=True)
+
+
 # ---------------------------------------------------------------- draw
 
 SOFT = 10.0  # minutes: the delay axis is asinh(delay / 10), linear near zero and logarithmic past half an hour
@@ -473,6 +561,13 @@ def load(folder: Path):
         pool = {key: data[key] for key in data.files}
     card = json.loads((folder / "card.json").read_text())
     return summary, pool, card
+
+
+def load_baseline(folder: Path):
+    """LightGBMLSS's mixture on the pool's flights (``lightgbmlss.npz``, in pool order) and its scores."""
+    with np.load(folder / "lightgbmlss.npz", allow_pickle=False) as data:
+        flights = {key: data[key] for key in data.files}
+    return flights, json.loads((folder / "lightgbmlss.json").read_text())
 
 
 def early_share(folder: Path, cutoff: float = EARLY) -> float:
@@ -552,9 +647,11 @@ def draw(folder: Path = ARTIFACTS) -> None:
     import style as k
 
     summary, pool, _card = load(folder)
-    scores = summary["scores"]
-    ours, theirs = scores["ashlar"], scores["catboost_uncertainty"]
-    exact = ours["exact_quantiles"]  # the drawn 80% is predict_quantiles' 0.1 to 0.9
+    other, theirs = load_baseline(folder)
+    if not np.array_equal(other["row"], pool["row"]):
+        raise SystemExit("lightgbmlss.npz is not in pool.npz's order: rerun the baseline stage")
+    ours = summary["scores"]["ashlar"]
+    exact = ours["exact_quantiles"]  # the drawn 80% is predict_quantiles' 0.1 to 0.9, as LightGBMLSS's is
     picks = pick_ridges(pool)
     u = np.linspace(warp(X_LO), warp(X_HI), 1200)
     densities = np.stack([warped_density(pool, i, u) for i in picks])
@@ -565,16 +662,20 @@ def draw(folder: Path = ARTIFACTS) -> None:
         "Every flight gets its own distribution.",
         f"Airline delay: {summary['training_rows'] + summary['test_rows']:,} US flights, schedule only, no weather. "
         "Each ridge is one held-out flight's predicted departure delay from a single ASRRegressor(task=\"mixture\") "
-        "fit, its central 80% solid. Under it, CatBoost RMSEWithUncertainty's 80% interval for the same flight, and "
-        "the delay that happened.",
+        "fit, its central 80% solid. Under it, the 80% interval of LightGBMLSS's mixture of three normals for the "
+        "same flight, the best tree distribution on this table, and the delay that happened.",
         height=11.4,
         footer=3,
     )
-    ax = k.panel(fig, (0.0, 0.0, 1.0, 1.0), head=0.1, tail=0.8, lpad=3.0, rpad=1.95)
+    ax = k.panel(fig, (0.0, 0.0, 1.0, 1.0), head=0.1, tail=0.8, lpad=3.0, rpad=2.0)
     height = 1.5
     bases = k.ridgeline(ax, u, densities, inner=inner, gap=1.0, height=height, color=solid, pale=k.TEAL_PALE,
                         edge=k.TEAL_DARK, lw=1.2, floor=0.0015)
     left, right = u[0], u[-1]
+    # The right margin's two columns of P(delay > 1 h), placed in inches from the axes' right edge.
+    inch = (right - left) / (ax.get_position().width * fig.get_figwidth())
+    ours_x = right + 0.55 * inch
+    theirs_x = ours_x + (0.25 + k.text_width("LightGBMLSS", k.F.small)) * inch
     # The point mass at zero, flights that leave on the minute: a stem from the baseline, its length the probability.
     for row, i in enumerate(picks):
         _, (mass, at) = split_atom(pool, i)
@@ -594,8 +695,7 @@ def draw(folder: Path = ARTIFACTS) -> None:
     for row, i in enumerate(picks):
         base = bases[row]
         y = base - 0.2
-        lo = float(pool["cat_loc"][i] - bench.Z80 * pool["cat_scale"][i])
-        hi = float(pool["cat_loc"][i] + bench.Z80 * pool["cat_scale"][i])
+        lo, hi = float(other["q10"][i]), float(other["q90"][i])
         a, b = max(warp(lo), left), min(warp(hi), right)
         ax.plot([a, b], [y, y], color=k.CARD, lw=5.2, solid_capstyle="butt", zorder=399)
         ax.plot([a, b], [y, y], color=k.CLAY, lw=2.6, solid_capstyle="butt", zorder=400)
@@ -605,13 +705,13 @@ def draw(folder: Path = ARTIFACTS) -> None:
                    lw=1.0, zorder=401, clip_on=False)
         ax.text(left - 0.1, base - 0.08, flight_label(pool, i, summary), fontproperties=k.F.label, color=k.INK,
                 ha="right", va="center")
-        k.value(ax, right + 0.42, base - 0.08, k.pct(float(pool["p60"][i])), k.TEAL, ha="right")
-        k.value(ax, right + 1.12, base - 0.08, k.pct(float(pool["cat_p60"][i])), k.CLAY, ha="right")
+        k.value(ax, ours_x, base - 0.08, k.pct(float(pool["p60"][i])), k.TEAL, ha="right")
+        k.value(ax, theirs_x, base - 0.08, k.pct(float(other["p60"][i])), k.CLAY, ha="right")
     head = bases[-1] + 1.0
-    ax.text(right + 0.77, head + 0.62, P60, fontproperties=k.F.small, color=k.MUTED, ha="center",
-            va="bottom")
-    ax.text(right + 0.42, head, "Ashlar", fontproperties=k.F.small, color=k.TEAL, ha="right", va="bottom")
-    ax.text(right + 1.12, head, "CatBoost", fontproperties=k.F.small, color=k.CLAY, ha="right", va="bottom")
+    ax.text((ours_x - k.text_width("Ashlar", k.F.small) * inch + theirs_x) / 2, head + 0.62, P60,
+            fontproperties=k.F.small, color=k.MUTED, ha="center", va="bottom")
+    ax.text(ours_x, head, "Ashlar", fontproperties=k.F.small, color=k.TEAL, ha="right", va="bottom")
+    ax.text(theirs_x, head, "LightGBMLSS", fontproperties=k.F.small, color=k.CLAY, ha="right", va="bottom")
     k.style(ax, frame="b")
     ax.set_yticks([])
     ax.set_xticks(warp(TICKS))
@@ -624,27 +724,32 @@ def draw(folder: Path = ARTIFACTS) -> None:
 
     legend(fig, k, [("patch", solid, "Ashlar's central 80%"), ("pale", k.TEAL_PALE, "its tails"),
                     ("needle", k.TEAL_DARK, "its chance of leaving on the minute"),
-                    ("bar", k.CLAY, "CatBoost's 80%"), ("dot", k.INK, "what happened")], line=2)
-    k.footnote(fig, f"On {summary['scored_rows']:,} held-out flights, Ashlar's 80% intervals held "
-                    f"{k.pct(exact['coverage80'], 1)} of delays at {exact['width80']:.0f} minutes wide, CatBoost's "
-                    f"{k.pct(theirs['coverage80'], 1)} at {theirs['width80']:.0f}; CRPS {ours['crps']:.2f} against "
-                    f"{theirs['crps']:.2f}. Ashlar's {P60} was within {p60_errors(ours['p60_bins']):.1f} points "
-                    f"of the observed rate in every bin of 1,000 flights or more, CatBoost's off by up to "
-                    f"{p60_errors(theirs['p60_bins']):.1f}.", line=0)
+                    ("bar", k.CLAY, "LightGBMLSS's 80%"), ("dot", k.INK, "what happened")], line=2)
+    minutes = {key: round((value or 0) / 60) for key, value in (("ours", summary["seconds"]["ashlar"]),
+                                                                ("theirs", theirs.get("benchmark", {}).get("seconds")))}
+    k.footnote(fig, f"On {summary['scored_rows']:,} held-out flights, CRPS {ours['crps']:.2f} against LightGBMLSS's "
+                    f"{theirs['crps']:.2f}; 80% intervals held {k.pct(exact['coverage80'], 1)} at "
+                    f"{exact['width80']:.0f} minutes wide against {k.pct(theirs['coverage80'], 1)} at "
+                    f"{theirs['width80']:.0f}; {P60} within {p60_errors(ours['p60_bins']):.1f} points of the observed "
+                    f"rate in every bin of 1,000 flights or more, against {p60_errors(theirs['p60_bins']):.1f}. "
+                    f"One fit took {minutes['ours']} minutes on a laptop CPU, LightGBMLSS's {minutes['theirs']}.",
+               line=0)
     k.save(fig, NAME)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("stage", choices=("compute", "draw"))
+    parser.add_argument("stage", choices=("compute", "baseline", "draw"))
     parser.add_argument("--artifacts", default=str(ARTIFACTS), help="the artifact folder compute writes and draw reads")
     parser.add_argument("--models", default=str(bench.CACHE / "readme" / NAME), help="where the fits are saved")
     parser.add_argument("--smoke", action="store_true", help="a quick check of the pipeline on few epochs, never for the figure")
     args = parser.parse_args()
+    if args.smoke:
+        bench.DIST_ROWS = 4_000
     if args.stage == "compute":
-        if args.smoke:
-            bench.DIST_ROWS = 4_000
         compute(Path(args.artifacts), Path(args.models), epochs=2 if args.smoke else None)
+    elif args.stage == "baseline":
+        baseline(Path(args.artifacts))
     else:
         draw(Path(args.artifacts))
 

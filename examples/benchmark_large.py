@@ -572,14 +572,18 @@ def run_lightgbmlss(family, table, seed):
     return record
 
 
-def run_ngboost(table, seed):
+def run_ngboost(table, seed, overrides=None):
     """NGBoost with a normal, on a 200,000-row sample of the training rows: depth-3 trees on the natural gradient.
 
     Categories become their integer codes (unseen ones -1) and missing numbers the training median, since
-    scikit-learn's trees read only numbers.
+    scikit-learn's trees read only numbers. ``overrides`` may set ``learning_rate`` (0.05, as the trees) and
+    ``min_samples_leaf`` (NGBoost's default tree takes 1). The record keeps the spread of the predicted scales.
     """
     from ngboost import NGBRegressor
     from ngboost.distns import Normal
+    from sklearn.tree import DecisionTreeRegressor
+
+    overrides = overrides or {}
 
     task, x_train, x_test, y_train, y_test = splits(table, seed)
     start = time.time()
@@ -599,7 +603,11 @@ def run_ngboost(table, seed):
 
     sample, sample_y = numbers(frame.iloc[keep]), y_train[keep]
     fit_x, val_x, fit_y, val_y = train_test_split(sample, sample_y, test_size=VALIDATION, random_state=seed)
-    model = NGBRegressor(Dist=Normal, n_estimators=4000, learning_rate=0.05, random_state=seed, verbose=False)
+    # NGBoost's default base learner, with the smallest leaf as an option.
+    tree = DecisionTreeRegressor(criterion="friedman_mse", max_depth=3, random_state=seed,
+                                 min_samples_leaf=int(overrides.get("min_samples_leaf", 1)))
+    model = NGBRegressor(Dist=Normal, Base=tree, n_estimators=4000, learning_rate=float(overrides.get("learning_rate", 0.05)),
+                         random_state=seed, verbose=False)
     model.fit(fit_x, fit_y, X_val=val_x, Y_val=val_y, early_stopping_rounds=100)
     seconds = time.time() - start
     best = getattr(model, "best_val_loss_itr", None)
@@ -613,6 +621,9 @@ def run_ngboost(table, seed):
     record["crps"] = crps_normal(ld, sd, yd)
     record["nll"] = float(np.mean(0.5 * np.log(2 * np.pi * sd**2) + 0.5 * ((yd - ld) / sd) ** 2))
     record.update(interval(ld[:, None] + sd[:, None] * np.array([-Z80, 0.0, Z80]), yd))
+    record["scale_quantiles"] = {str(q): float(np.quantile(sd, q)) for q in (0.5, 0.9, 0.99, 0.999, 1.0)}
+    _save_predictions(table, "ngboost" + ("-" + "-".join(f"{k}{v}" for k, v in sorted(overrides.items())) if overrides else ""),
+                      seed, rows=rows, loc=ld.astype(np.float32), scale=sd.astype(np.float32))
     return record
 
 
@@ -716,7 +727,7 @@ def model_runner(name):
         family = name.split("_", 1)[1]
         return lambda table, seed, overrides: run_lightgbmlss(family, table, seed)
     if name == "ngboost":
-        return lambda table, seed, overrides: run_ngboost(table, seed)
+        return lambda table, seed, overrides: run_ngboost(table, seed, overrides)
     if name == "ashlar":
         return lambda table, seed, overrides: run_ashlar(table, seed, overrides=overrides)
     if name == "ashlar_tabm":
