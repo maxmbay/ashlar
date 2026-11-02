@@ -73,7 +73,7 @@ python examples/benchmark_uncertainty.py --stage report
 
 ## Large tables
 
-Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian.
+Seeds 1 and 2 are still running, so the Splits column says how many random splits each model has finished; a cell over several is the mean ± the standard deviation across them, and a comparison between models with different splits is rough. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian. On airline delay, NGBoost's default scores a CRPS of 90.7 because a few flights get an exploded scale, up to 3.4 × 10⁷ minutes where 99.9% of flights get under 66; its NLL, 4.76, barely notices. With `min_samples_leaf=100` its largest scale is 138 minutes and its CRPS 11.57, near LightGBMLSS's Gaussian. NGBoost ran alone; its scikit-learn trees use one thread.
 
 ### Zurich public transport, delay, 2,000,000 of 5,465,575 rows
 
@@ -102,6 +102,8 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | LightGBMLSS, Gaussian | 1 | 29.14 | 13.91 | 11.49 | 4.753 | 94% | 66.34 | 16 |
 | LightGBMLSS, Student-t | 1 | 30.57 | 11.22 | 9.686 | 3.727 | 76% | 18.99 | 163 |
 | LightGBMLSS, mixture of 3 Gaussians | 1 | 29.16 | 12.79 | 9.144 | 3.076 | 79% | 28.44 | 1201 |
+| NGBoost, normal, 200,000 training rows | 1 | 29.26 | 14.19 | 90.73 | 4.758 | 94% | 935.3 | 44 |
+| NGBoost, normal, 200,000 training rows, `min_samples_leaf=100` | 1 | 29.2 | 14.11 | 11.57 | 4.785 | 94% | 66.61 | 72 |
 
 ### NYC green taxi, tip in $, 581,835 rows
 
@@ -114,6 +116,9 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 48 |
 | CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546† |
 | CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345† |
+| LightGBMLSS, Gaussian | 1 | 1.949 | 0.6637 | 0.4865 | 0.2762 | 84% | 2.053 | 27 |
+| LightGBMLSS, Student-t | 1 | 1.988 | 0.646 | 0.4888 | -1.057 | 77% | 1.699 | 118 |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 1.903 | 0.6011 | 0.4378 | -1.449 | 75% | 1.372 | 1063 |
 | RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044† |
 | TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169† |
 
@@ -169,7 +174,7 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 
 ### The README's airline figure
 
-The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
+The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
 
 | Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
 |---|---:|---:|---:|---:|---:|
@@ -177,10 +182,23 @@ The figure at the top of the README and the one-flight card come from one more f
 | LightGBMLSS, mixture of 3 Gaussians | 9.144 | 3.076 | 78.7% | 28.4 | 0.0391 |
 | CatBoost, `RMSEWithUncertainty` | 11.46 | 4.722 | 93.9% | 66.8 | 0.0392 |
 | LightGBM, normal of one width | 12.20 | 4.813 | 94.3% | 74.9 | 0.0389 |
+| CatBoost, `RMSEWithUncertainty`, σ scaled on 20,000 other flights | 10.51 | — | 80.1% | 28.4 | 0.0410 |
 
-The CRPS is a tie. The NLL is not a comparison here: it turns on how narrow each model makes its spike at zero, and Ashlar's is 2.66 on this split and 3.19 on seed 1 at nearly the same CRPS (9.17 and 9.27). Ashlar's coverage and width are from 200 draws per flight; its 0.1 and 0.9 quantiles from `predict_quantiles`, exact like LightGBMLSS's, hold 80.6% at 33.1 minutes wide. After `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4.
+The CRPS is a tie. The NLL is not a comparison here: it turns on how narrow each model makes its spike at zero, and Ashlar's is 2.66 on this split and 3.19 on seed 1 at nearly the same CRPS (9.17 and 9.27). Ashlar's coverage and width are from 200 draws per flight; its 0.1 and 0.9 quantiles from `predict_quantiles`, exact like LightGBMLSS's, hold 80.6% at 33.1 minutes wide. After `calibrate` on 20,000 other held-out flights, `predict_interval(coverage=0.8)` holds 80.1% at 32.4. The last row scales CatBoost's σ by one factor, 0.426, chosen by the same step on those 20,000 flights, so that its 80% interval holds 80%: its CRPS falls from 11.46 to 10.51, still 15% above Ashlar's, and its Brier score rises from 0.0392 to 0.0410.
 
-- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, Ashlar's is within 0.6 points of the observed rate in every bin of more than 1,000 flights. LightGBMLSS's spreads further and overshoots at the top: it says 13.6% where 10.4% happen and 23.7% where 15.4% do. CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do.
+- **80% intervals at equal coverage.** Raw, Ashlar's interval holds 80.6% and LightGBMLSS's 78.7%, so their widths do not compare. `hero_flights.py coverage` brings all three to 80% with `calibrate`'s step for a density head, the central level whose interval held 80% of held-out flights, cross-fitted on the scored flights: a random half calibrates the other half, then the halves swap. LightGBMLSS's parameters exist only for the scored flights, so this is the calibration all three can share. Coverage is in percent, by scheduled departure and by fifth of each model's own P(delay > 60), calmest first; widths are in minutes.
+
+  | 80% interval | Holds | Mean width | Before 9:00, 9 to 14, 14 to 20, 20:00 on | Fifths of its own risk |
+  |---|---:|---:|---|---|
+  | Ashlar, raw quantiles | 80.6% | 33.1 | 79, 81, 81, 81 | 80, 80, 80, 81, 81 |
+  | Ashlar, cross-fitted | 80.0% | 32.2 | 79, 80, 80, 80 | 80, 79, 80, 80, 81 |
+  | LightGBMLSS, raw | 78.7% | 28.4 | 77, 78, 80, 79 | 76, 77, 77, 79, 85 |
+  | LightGBMLSS, cross-fitted | 80.0% | 30.1 | 78, 80, 82, 80 | 77, 78, 78, 81, 86 |
+  | CatBoost `RMSEWithUncertainty`, raw | 93.9% | 66.8 | 95, 94, 93, 92 | 95, 95, 94, 94, 92 |
+  | CatBoost `RMSEWithUncertainty`, cross-fitted | 80.0% | 28.4 | 87, 82, 76, 70 | 85, 84, 82, 78, 72 |
+
+  At equal coverage Ashlar's interval is the widest: 7% wider than LightGBMLSS's and 13% wider than CatBoost's. It is also the one that holds 80% across flights: 78% to 81% in each of the 17 hours with 1,000 flights or more, and 79% to 81% in every fifth of its predicted risk. On the fifth of flights LightGBMLSS rates riskiest, its interval is 73 minutes wide and holds 86%, where Ashlar's is 56 and holds 79%; on the fifth it rates calmest, its interval is 11 minutes wide and holds 77%, where Ashlar's is 17 and holds 81%. CatBoost's normal, narrowed by one factor, holds 87% of the flights before 9:00 and 70% of those from 20:00 on, and 69% to 89% across those hours: one scale cannot fit a symmetric normal to a skewed target. With the 20,000 other held-out flights as the calibration instead, Ashlar's `calibrate` holds 80.1% at 32.4 minutes and CatBoost's scaled σ (the last row of the table above) 80.1% at 28.4, by hour and by risk as above. Every group is in [`examples/readme/artifacts/hero-coverage/coverage.json`](../examples/readme/artifacts/hero-coverage/coverage.json).
+- **The chance of a delay over an hour.** The Brier scores are close because only 4.1% of flights are that late. Binned by the predicted probability, Ashlar's is within 0.6 points of the observed rate in every bin of more than 1,000 flights. LightGBMLSS's spreads further and overshoots at the top: it says 13.6% where 10.4% happen and 23.7% where 15.4% do. CatBoost's says 0.5% where 2.0% happen and 23.4% where 16.9% do. Scaled to hold 80%, CatBoost's normal gives 97,608 of the 100,000 flights less than a 2% chance, 0.1% on average, and 3.8% of them were an hour late.
 
   | Predicted | Ashlar flights | Ashlar said | Happened | LightGBMLSS flights | LightGBMLSS said | Happened |
   |---|---:|---:|---:|---:|---:|---:|
