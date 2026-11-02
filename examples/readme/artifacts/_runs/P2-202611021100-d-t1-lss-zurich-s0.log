@@ -1,0 +1,3 @@
+at 2dd6705 (claude/project-thread-j36znx)
+{"table": "zurich", "model": "lightgbmlss_gaussian", "variant": "", "seed": 0, "seconds": 84.6, "trees": 844, "rmse": 3.0467637239967016, "mae": 2.5529775443820313, "crps": 1.7421635903814818, "nll": 2.5309521161766795, "pinball": 0.7756901024831998, "coverage80": 0.79792, "width80": 7.7809141867077045}
+{"table": "zurich", "model": "lightgbmlss_studentt", "variant": "", "seed": 0, "seconds": 731.8, "trees": 4000, "rmse": 3.079441050528041, "mae": 2.5161813425645856, "df_median": 3728896.25, "crps": 1.737733195240563, "nll": 2.510595363241167, "pinball": 0.7785941506380136, "coverage80": 0.79318, "width80": 7.393263627611942}
