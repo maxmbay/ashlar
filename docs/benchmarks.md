@@ -22,6 +22,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Entity effects](#entity-effects)
 - [Additive models against R's gamlss](#additive-models-against-rs-gamlss)
 - [Forecast heads](#forecast-heads)
+- [Forecast paths with covariates](#forecast-paths-with-covariates)
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
 - [Hurdle head](#hurdle-head)
@@ -435,7 +436,7 @@ The residual-network rows are Ashlar's default backbone with the same head. Scor
 | Ashlar `mixture`, residual network | 1.938 ± 0.019 | 1.071 ± 0.019 | 80.2% | 4.80 | 3 |
 
 - **On bike rentals the additive models match `gamlss`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the pair, each within a standard error. Ashlar's likelihood is 0.011 nats behind without the pair and 0.008 ahead with it.
-- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds. `gamlss` took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit.
+- **They take a fraction of the time.** An additive Ashlar fit took 8 to 10 seconds. `gamlss` took 110 to 135 seconds without the pair, and 256 to 2,691 with it. The slowest stopped at its limit of 200 cycles without converging (`Algorithm RS has not yet converged`), as did one `BCCGo` fit. R also warned, after each split's `NO` fit, that an inner backfitting loop had stopped at its limit of 30 iterations.
 - **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
 - **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
 - **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
@@ -455,6 +456,67 @@ The residual-network rows are Ashlar's default backbone with the same head. Scor
 | Ashlar, squared error | — | — | — | — | — | 1.746 ± 0.003 | 19 |
 | Ashlar, `quantile` | — | 0.564 ± 0.005 | 84% | 6.309 ± 0.058 | — | 1.779 ± 0.020 | 15 |
 | LightGBM on the same lags | — | 0.573 ± 0.005 | 77% | 5.492 ± 0.058 | — | 1.771 ± 0.014 | — |
+
+## Forecast paths with covariates
+
+From [`examples/benchmark_paths.py`](../examples/benchmark_paths.py), the cheap test of [#43](https://github.com/maxmbay/ashlar/issues/43). The question: with many series, covariates known ahead, and a question about several days at once, does a direct joint head over the horizon give the right answer, and what do the covariates and the dependence between days each add?
+
+**Data.** Rossmann's daily sales, 2013 to July 2015, as the fev benchmark ships them. Each seed draws 300 of the 1,115 stores. `ashlar.horizon.horizon_frame` makes each store at each forecast origin a row: the last 28 days of `log1p` sales; for each of the next 12 days whether the store opens, runs a promotion, or has a state or school holiday, and the weekday; and the store's type, assortment, competition distance, and long-running promotion. The outcome is the next 12 days of `log1p` sales, one joint outcome. Closed days stay in, with no sales, so a path is what the store sells day by day.
+
+**Protocol.** Split by time, with no target day shared: origins up to 16 February 2015 train (every third day), origins from 28 February to 19 May 2015 calibrate (every third day), and every origin from 31 May to 19 July 2015, the last whose 12 days are in the data, is scored: 15,000 paths per seed. Three seeds, each a new sample of stores and a new initialization. Every Ashlar model is `ASRRegressor` with its defaults and the head below, then `calibrate(X_cal, Y_cal, target=[total, peak])`. Scores use 400 draws per path.
+
+**Models.**
+
+- `joint`: `task="multivariate_gaussian"`, rank 4.
+- `joint`'s marginals: the same fitted model with the dependence between days dropped (`Independent(dist.marginals())`), so every day's forecast is `joint`'s and only the dependence differs. Scored raw.
+- `independent`: `multivariate_gaussian` with `rank=0`, trained with no dependence at all.
+- `joint_flow`: `task="multivariate_flow"`, the autoregressive flow over the 12 days.
+- `joint`, lags only: `joint` without the covariates.
+- Chronos-2 (`amazon/chronos-2`), zero-shot, with the known covariates (open, promotion, school and state holiday), from each store's whole history before the origin. It gives quantiles per day, not paths, so it is scored per day only. Rossmann's daily sales are a task of fev-bench, and Chronos-2's authors report that none of fev-bench's data was in its training corpus.
+- DeepAR from GluonTS (PyTorch): an autoregressive recurrent network with a Student-t output, trained on the same stores' `log1p` sales up to the last training target day, with the known days ahead (open, promotion, school and state holiday), GluonTS's own calendar features, and the store's type, assortment, competition distance, and long-running promotion. Its draws are paths, scored raw; it has no `calibrate`. It trained for 500 epochs of 50 batches, until its training loss moved by under 1% over the last 20 epochs on every seed. At 50 epochs, the script's first budget, it was still learning fast and scored 649 a day on seed 0; at 200 epochs it scored within 0.2% of 500 on the daily loss and the total.
+
+**The cap.** Draws of `log1p` sales are capped at twice the largest day of sales in the training rows, 67,000 to 76,000 a day, before they become sales. A normal on log sales can give a row unlike any it trained on a spread so wide that its upper draws are billions a day. In the first run, store 876, which closed for refurbishment in July 2015 after its best weeks, got a standard deviation of 31 on log sales on its first closed days, and its rows alone decided the mean daily loss. The "Without the cap" column keeps every draw.
+
+Daily scores, in sales: the quantile loss is twice the mean pinball loss over levels 0.1 to 0.9, close to the CRPS, averaged over row-days, and its median over row-days; and the share of days inside the central 80% interval. The joint NLL is the log density of the 12-day path of `log1p` sales, in nats per path. Fit seconds are training alone, on one laptop; calibration and drawing the paths took most of each model's time, and Chronos-2 took 19 minutes a seed to forecast on the laptop's CPU. ± is one standard error over the seeds.
+
+| Model | Daily quantile loss | Median row-day | Without the cap | Daily 80% coverage | Joint NLL | Fit seconds |
+|---|---:|---:|---:|---:|---:|---:|
+| `joint` | 477.6 ± 16.3 | 282.9 | 5,821 ± 2,983 | 69.0% | −7.58 | 148 |
+| `joint`'s marginals | 477.9 ± 16.5 | 282.8 | 6,035 ± 3,001 | 68.9% | — | — |
+| `independent` | 484.6 ± 14.5 | 289.4 | 1,263 ± 778 | 65.8% | −1.27 | 129 |
+| `joint_flow` | 481.7 ± 16.6 | 295.1 | 481.7 ± 16.6 | 75.2% | −10.91 | 73 |
+| `joint`, lags only | 1,326.1 ± 37.8 | 707.6 | 121,261 ± 8,923 | 93.4% | 24.75 | 50 |
+| Chronos-2, zero-shot | 467.6 ± 13.9 | 301.4 | — | 76.1% | — | — |
+| DeepAR | 625.0 ± 33.8 | 393.8 | 625.1 ± 33.7 | 81.2% | — | 405 |
+
+Path scores, in sales, for the 12-day total and the peak day: the CRPS, the share of paths inside the central 80% interval and its width, and the Brier score and expected calibration error (10 bins) of an exceedance, P(total > 1.1 × the last 12 days' total) and P(peak > the largest day of the last 28). The total passed its threshold on 19.5% of paths and the peak on 25.0%. A → B is raw from the draws → after `calibrate`.
+
+| Model | Path | CRPS | 80% coverage | 80% width | Brier | Calibration error |
+|---|---|---:|---:|---:|---:|---:|
+| `joint` | total | **2,623 ± 121** | 75.7% → 83.8% | 11,030 → 13,192 | **0.0693** → 0.0690 | **0.026** → 0.029 |
+| `joint`'s marginals | total | 2,782 ± 120 | 51.3% | 6,882 | 0.0714 | 0.043 |
+| `independent` | total | 2,730 ± 106 | 50.0% → 85.0% | 5,837 → 13,256 | 0.0745 → 0.0759 | 0.044 → 0.050 |
+| `joint_flow` | total | 2,751 ± 104 | 75.0% → 79.9% | 10,464 → 11,754 | 0.0733 → 0.0789 | 0.029 → 0.056 |
+| `joint`, lags only | total | 10,996 ± 486 | 95.7% → 85.5% | 68,911 → 50,021 | 0.2093 → 0.1377 | 0.284 → 0.100 |
+| DeepAR | total | 3,881 ± 446 | 66.9% | 12,174 | 0.1023 | 0.053 |
+| `joint` | peak | 935 ± 96 | 62.8% → 69.1% | 3,450 → 3,822 | 0.2183 → 0.2068 | 0.169 → 0.145 |
+| `joint`'s marginals | peak | 941 ± 97 | 59.6% | 3,332 | 0.2221 | 0.175 |
+| `independent` | peak | 841 ± 56 | 59.1% → 72.8% | 2,446 → 3,306 | 0.2216 → 0.2095 | 0.168 → 0.140 |
+| `joint_flow` | peak | **808 ± 38** | 72.8% → 71.3% | 3,067 → 2,944 | 0.2139 → 0.2057 | 0.139 → 0.135 |
+| `joint`, lags only | peak | 6,628 ± 42 | 71.8% → 82.7% | 27,961 → 31,623 | 0.3907 → 0.2591 | 0.410 → 0.207 |
+| DeepAR | peak | 866 ± 50 | 79.5% | 3,900 | **0.1921** | **0.099** |
+
+What holds up:
+
+- **The covariates are most of the forecast.** From the 28 lags alone, the joint normal's daily loss is 2.8 times as large, 1,326 against 478, and its median 2.5 times. It cannot see that a store will be closed on a Sunday or a holiday, or that a promotion starts, so its spread covers both, and its 80% interval holds 93% of days.
+- **For the 12-day total, the dependence between days is worth having.** The joint normal's raw 80% interval for the total holds 75.7% of paths. Its own marginals, made independent, hold 51.3%, and the independent model 50.0%: errors that move together over the days do not cancel in the sum. Its CRPS for the total is 5.7% below its marginals' and 3.9% below the independent model's, lower on every seed, and its P(total > threshold) has the best Brier score and calibration error, raw and calibrated.
+- **For the peak day, much less.** The issue asked whether the joint head gets P(max over 12 days > threshold) right where independent marginals do not. Against its own marginals, the joint normal's dependence moves the peak's scores only slightly: Brier 0.2183 against 0.2221, CRPS 935 against 941. Every model with the covariates overstates that probability, 0.31 to 0.36 on average against 0.25 observed. Of Ashlar's heads, the flow is best on the peak by every raw score.
+- **Calibration fixes the total's coverage, not the peak's.** On the calibration origins, `calibrate` brings every total interval to 80% to 85% on average, the independent model's from 50%. The peak's stays at 69% to 73%, and the exceedance scores barely move. Split conformal's guarantee needs calibration origins exchangeable with the ones forecast, and spring origins are not exchangeable with summer ones. Calibrate on the most recent origins, and recalibrate as the season turns.
+- **A normal on log sales has tails to watch.** Without the cap, the joint normal's mean daily loss is 5,821 ± 2,983 and the independent model's 1,263, because a spread on log sales becomes orders of magnitude in sales. Even capped, the joint normal's mean loss jumps at some steps on two seeds where its median barely moves, and its upper tails make its peak CRPS the worst of the three heads. The flow's quantiles never reached the cap. For sales on a log scale, cap the draws, or use the flow.
+- **Chronos-2, zero-shot, is level day by day.** Its mean daily loss is 467.6 against the joint normal's 477.6, lower on two seeds of three, and its 80% interval holds 76% of days against 69%. The joint normal's median row-day is 6% lower, 282.9 against 301.4, on every seed. Chronos-2 gives quantiles per day, not paths, so it has no answer for the total or the peak.
+- **DeepAR's paths lose on the total and calibrate the peak best.** Trained to convergence, its daily loss is 625, 31% above the joint normal's, and its CRPS for the total 3,881 against 2,623, with 67% of totals inside its 80% interval; the joint normal wins both on every seed. But its peak is the best calibrated of any model: 79.5% inside the 80% interval, a Brier score of 0.192, and a calibration error of 0.099, against 0.206 and 0.135 for the best Ashlar head after `calibrate`. Its days are better calibrated too, 81% inside their 80% interval against 66% to 75% for Ashlar's heads, which is probably why: a peak takes each day's upper tail.
+
+A static correlation on the independent model's residuals, which matched the joint head on [the electricity loads](#joint-demand-across-locations), was not tried here.
 
 ## Calibrated intervals
 

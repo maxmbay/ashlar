@@ -244,7 +244,7 @@ On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM o
 - [docs/additive.md](https://github.com/maxmbay/ashlar/blob/main/docs/additive.md): additive models of the whole distribution, a neural GAMLSS. One shape per column, and per pair you name, on every parameter of any head, read back with `shape_functions`.
 - [docs/effects.md](https://github.com/maxmbay/ashlar/blob/main/docs/effects.md): entity effects. Stores, patients, or products pooled across groups, as offsets and embeddings, nested in broader classes, and updated from a few rows of a new group.
 - [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
-- [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
+- [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call, and many series with covariates as a table of forecast origins, with a joint head over the whole path.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
 - [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
 - [CHANGELOG.md](https://github.com/maxmbay/ashlar/blob/main/CHANGELOG.md): what changed in each release.
