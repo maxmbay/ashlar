@@ -589,6 +589,7 @@ def coverage(out: Path, models: Path) -> None:
     """
     from scipy.stats import norm
 
+    out.mkdir(parents=True, exist_ok=True)  # a folder of its own, which a clean checkout may not have
     task, x_train, x_test, y_train, y_test = bench.splits(TABLE, SEED)
     rows = bench.dist_rows(len(y_test), SEED)
     xd, yd = x_test.iloc[rows].reset_index(drop=True), y_test[rows].astype(np.float64)

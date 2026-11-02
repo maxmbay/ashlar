@@ -114,6 +114,7 @@ Seeds 1 and 2 are still running, so the Splits column says how many random split
 | XGBoost | 3 | 1.951 ± 0.062 | 0.6594 ± 0.011 | 0.7075 ± 0.019 | 2.083 ± 0.024 | 95% | 4.949 ± 0.25 | 48 |
 | CatBoost | 1 | 1.758 | 0.6414 | 0.6633 | 1.995 | 95% | 4.528 | 1546† |
 | CatBoost, `RMSEWithUncertainty` | 1 | 1.745 | 0.6455 | 0.4647 | 0.7008 | 83% | 1.952 | 2345† |
+| LightGBMLSS, mixture of 3 Gaussians | 1 | 1.903 | 0.6011 | 0.4378 | -1.449 | 75% | 1.372 | 1063 |
 | RealMLP (pytabkit) | 1 | 1.934 | 0.892 | — | — | — | — | 4044† |
 | TabM (pytabkit) | 1 | 1.798 | 0.7327 | — | — | — | — | 15169† |
 
