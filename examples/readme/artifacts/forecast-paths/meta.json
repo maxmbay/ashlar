@@ -1,0 +1,741 @@
+{
+ "candidates": [
+  {
+   "k": 0,
+   "origin": "2015-06-01",
+   "store": "966",
+   "store_type": "a"
+  },
+  {
+   "k": 1,
+   "origin": "2015-06-01",
+   "store": "184",
+   "store_type": "d"
+  },
+  {
+   "k": 2,
+   "origin": "2015-06-01",
+   "store": "905",
+   "store_type": "a"
+  },
+  {
+   "k": 3,
+   "origin": "2015-06-02",
+   "store": "273",
+   "store_type": "a"
+  },
+  {
+   "k": 4,
+   "origin": "2015-06-02",
+   "store": "115",
+   "store_type": "d"
+  },
+  {
+   "k": 5,
+   "origin": "2015-06-02",
+   "store": "697",
+   "store_type": "d"
+  }
+ ],
+ "cap_log1p": 11.160655092364143,
+ "cap_sales": 70307.99999999996,
+ "draws": 400,
+ "eligible_note": "candidates in a seeded random order (numpy default_rng(seed)); the figure draws candidate 0",
+ "epochs": null,
+ "fit_seconds": 155.1,
+ "rule": "complete history; 1 to 3 closed days, a promotion day, and a state holiday ahead",
+ "saved": {
+  "chronos2": {
+   "0": {
+    "daily": {
+     "coverage": 0.7589722222222223,
+     "median_loss": 303.96565212673636,
+     "quantile_loss": 470.0461835375826
+    },
+    "seconds": 1180.3013761250768
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.7654444444444445,
+     "median_loss": 295.1871636284722,
+     "quantile_loss": 442.40994255096814
+    },
+    "seconds": 1147.8904225829756
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.7594277777777778,
+     "median_loss": 305.02989366319383,
+     "quantile_loss": 490.2278574838295
+    },
+    "seconds": 1141.8332734580617
+   }
+  },
+  "deepar": {
+   "0": {
+    "daily": {
+     "coverage": 0.82245,
+     "median_loss": 377.5566374074183,
+     "quantile_loss": 593.2683328681038,
+     "uncapped_quantile_loss": 593.2683328681038
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.18633454041666664,
+      "coverage": 0.7974666666666667,
+      "crps": 841.1358697402005,
+      "ece": 0.09680250000000004,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.30388950000000003,
+      "width": 3919.9741031756107
+     },
+     "total": {
+      "brier": 0.09305852125000001,
+      "coverage": 0.6867333333333333,
+      "crps": 3511.2958235966266,
+      "ece": 0.037662166666666656,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.20782549999999997,
+      "width": 11533.13046717627
+     }
+    },
+    "seconds": 408.7840168750845
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.7944222222222223,
+     "median_loss": 382.0485972786588,
+     "quantile_loss": 589.3442282245267,
+     "uncapped_quantile_loss": 589.418596655767
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.19302181708333335,
+      "coverage": 0.7830666666666667,
+      "crps": 793.9465674801093,
+      "ece": 0.09432249999999999,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.2900495,
+      "width": 3448.2663077727298
+     },
+     "total": {
+      "brier": 0.09462438375,
+      "coverage": 0.6758666666666666,
+      "crps": 3362.7099644843033,
+      "ece": 0.04083183333333334,
+      "event_rate": 0.192,
+      "mean_probability": 0.23034016666666665,
+      "width": 11283.442514271233
+     }
+    },
+    "seconds": 402.7497081250185
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.8186166666666667,
+     "median_loss": 421.69866897188945,
+     "quantile_loss": 692.5370222139425,
+     "uncapped_quantile_loss": 692.5370222139425
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.19708571875,
+      "coverage": 0.8053333333333333,
+      "crps": 963.121329866451,
+      "ece": 0.10428183333333334,
+      "event_rate": 0.2552,
+      "mean_probability": 0.3516001666666667,
+      "width": 4330.99121991482
+     },
+     "total": {
+      "brier": 0.11922451499999999,
+      "coverage": 0.6442,
+      "crps": 4768.013945994005,
+      "ece": 0.07895433333333333,
+      "event_rate": 0.1972,
+      "mean_probability": 0.274044,
+      "width": 13705.988763548465
+     }
+    },
+    "seconds": 403.2946778339101
+   }
+  },
+  "independent": {
+   "0": {
+    "daily": {
+     "coverage": 0.6800055555555555,
+     "median_loss": 295.0641646922439,
+     "quantile_loss": 488.9883329546439,
+     "uncapped_quantile_loss": 511.42796372223034
+    },
+    "nll": -7.640975213082632,
+    "paths": {
+     "peak": {
+      "brier": 0.21834074125,
+      "calibrated_brier": 0.20550864324723667,
+      "calibrated_coverage": 0.7428,
+      "calibrated_ece": 0.13470199594964147,
+      "calibrated_mean_probability": 0.31673549860117833,
+      "calibrated_width": 3393.8684245255986,
+      "coverage": 0.5980666666666666,
+      "crps": 817.4730167446685,
+      "ece": 0.16237283333333333,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.31333683333333334,
+      "width": 2482.8781392609885
+     },
+     "total": {
+      "brier": 0.07403028375000001,
+      "calibrated_brier": 0.07441622198630866,
+      "calibrated_coverage": 0.8408,
+      "calibrated_ece": 0.04781277746959171,
+      "calibrated_mean_probability": 0.24049693145877324,
+      "calibrated_width": 12352.603609768565,
+      "coverage": 0.5013333333333333,
+      "crps": 2707.4185920702876,
+      "ece": 0.04454983333333333,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.19899716666666664,
+      "width": 5812.120993924852
+     }
+    },
+    "seconds": 118.71580033306964
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.6666444444444445,
+     "median_loss": 283.432711540651,
+     "quantile_loss": 457.6848012302763,
+     "uncapped_quantile_loss": 457.69044494114127
+    },
+    "nll": -7.587314610608419,
+    "paths": {
+     "peak": {
+      "brier": 0.21225990541666667,
+      "calibrated_brier": 0.20279368353750282,
+      "calibrated_coverage": 0.7503333333333333,
+      "calibrated_ece": 0.1282995320123655,
+      "calibrated_mean_probability": 0.32034465620052066,
+      "calibrated_width": 3287.0734151529946,
+      "coverage": 0.6162,
+      "crps": 758.0735228147898,
+      "ece": 0.15268049999999997,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.31039083333333334,
+      "width": 2425.8422095323153
+     },
+     "total": {
+      "brier": 0.07774381791666667,
+      "calibrated_brier": 0.08211835746593989,
+      "calibrated_coverage": 0.903,
+      "calibrated_ece": 0.06769096687672174,
+      "calibrated_mean_probability": 0.25089096687672174,
+      "calibrated_width": 15005.791965234375,
+      "coverage": 0.5266666666666666,
+      "crps": 2559.5312207084025,
+      "ece": 0.0445455,
+      "event_rate": 0.192,
+      "mean_probability": 0.19282516666666671,
+      "width": 5788.860275517314
+     }
+    },
+    "seconds": 134.64650266605895
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.6285111111111111,
+     "median_loss": 289.6871953995326,
+     "quantile_loss": 507.26760152786755,
+     "uncapped_quantile_loss": 2818.374748959743
+    },
+    "nll": 11.418643941752116,
+    "paths": {
+     "peak": {
+      "brier": 0.234315815,
+      "calibrated_brier": 0.22013234170881976,
+      "calibrated_coverage": 0.6896666666666667,
+      "calibrated_ece": 0.1576213095627633,
+      "calibrated_mean_probability": 0.3220779710425599,
+      "calibrated_width": 3238.2714116306365,
+      "coverage": 0.5598,
+      "crps": 947.7936063649587,
+      "ece": 0.18889066666666668,
+      "event_rate": 0.2552,
+      "mean_probability": 0.3228183333333333,
+      "width": 2429.391982927294
+     },
+     "total": {
+      "brier": 0.0716775375,
+      "calibrated_brier": 0.07122835514897634,
+      "calibrated_coverage": 0.8061333333333334,
+      "calibrated_ece": 0.03496339591994355,
+      "calibrated_mean_probability": 0.22199489789870216,
+      "calibrated_width": 12410.037110890025,
+      "coverage": 0.4726,
+      "crps": 2922.8570451740266,
+      "ece": 0.04173633333333334,
+      "event_rate": 0.1972,
+      "mean_probability": 0.18955333333333332,
+      "width": 5909.54791065616
+     }
+    },
+    "seconds": 133.09459966700524
+   }
+  },
+  "joint": {
+   "0": {
+    "daily": {
+     "coverage": 0.6878666666666666,
+     "median_loss": 283.4980035059132,
+     "quantile_loss": 464.22835953534144,
+     "uncapped_quantile_loss": 1018.4094965576999
+    },
+    "nll": -7.856206420199077,
+    "paths": {
+     "peak": {
+      "brier": 0.21353839000000002,
+      "calibrated_brier": 0.20589027186663442,
+      "calibrated_coverage": 0.6972666666666667,
+      "calibrated_ece": 0.14178751626758865,
+      "calibrated_mean_probability": 0.29811277368028055,
+      "calibrated_width": 2990.679172836256,
+      "coverage": 0.6197333333333334,
+      "crps": 807.0946001851701,
+      "ece": 0.16456433333333334,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.300429,
+      "width": 2545.7921145480855
+     },
+     "total": {
+      "brier": 0.06486517375,
+      "calibrated_brier": 0.06646563838416189,
+      "calibrated_coverage": 0.8541333333333333,
+      "calibrated_ece": 0.04436295237051904,
+      "calibrated_mean_probability": 0.23326418719285327,
+      "calibrated_width": 12734.589102859116,
+      "coverage": 0.7454,
+      "crps": 2470.264693016686,
+      "ece": 0.024388500000000004,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.21854449999999997,
+      "width": 9891.222810597072
+     }
+    },
+    "seconds": 152.49412799999118
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.6937555555555556,
+     "median_loss": 279.0533521968455,
+     "quantile_loss": 458.5892847427477,
+     "uncapped_quantile_loss": 5155.312113971815
+    },
+    "nll": -7.549803458086649,
+    "paths": {
+     "peak": {
+      "brier": 0.2165813145833333,
+      "calibrated_brier": 0.2053995044984251,
+      "calibrated_coverage": 0.7008666666666666,
+      "calibrated_ece": 0.14801331917268923,
+      "calibrated_mean_probability": 0.2511046944288638,
+      "calibrated_width": 3599.6851616861977,
+      "coverage": 0.6401333333333333,
+      "crps": 873.6229802441736,
+      "ece": 0.16507283333333334,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.30319816666666666,
+      "width": 3273.612462675689
+     },
+     "total": {
+      "brier": 0.07418837125,
+      "calibrated_brier": 0.07290178207099837,
+      "calibrated_coverage": 0.8101333333333334,
+      "calibrated_ece": 0.009596280763259024,
+      "calibrated_mean_probability": 0.1980253198507441,
+      "calibrated_width": 11934.908973177084,
+      "coverage": 0.7656,
+      "crps": 2536.4557109860593,
+      "ece": 0.023858833333333333,
+      "event_rate": 0.192,
+      "mean_probability": 0.2128385,
+      "width": 10844.23141101566
+     }
+    },
+    "seconds": 147.82918979099486
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.6883666666666667,
+     "median_loss": 286.2010718766147,
+     "quantile_loss": 510.00438952817916,
+     "uncapped_quantile_loss": 11288.165017022691
+    },
+    "nll": -7.326452309926351,
+    "paths": {
+     "peak": {
+      "brier": 0.22467369125000003,
+      "calibrated_brier": 0.20917124029290982,
+      "calibrated_coverage": 0.6749333333333334,
+      "calibrated_ece": 0.14646834628189678,
+      "calibrated_mean_probability": 0.2598227704979202,
+      "calibrated_width": 4876.980814219586,
+      "coverage": 0.6231333333333333,
+      "crps": 1122.822341943576,
+      "ece": 0.1774875,
+      "event_rate": 0.2552,
+      "mean_probability": 0.31703716666666665,
+      "width": 4529.487150171193
+     },
+     "total": {
+      "brier": 0.06871871166666667,
+      "calibrated_brier": 0.06752131208273679,
+      "calibrated_coverage": 0.8499333333333333,
+      "calibrated_ece": 0.03353667899639288,
+      "calibrated_mean_probability": 0.22057177330160777,
+      "calibrated_width": 14907.565699002695,
+      "coverage": 0.7607333333333334,
+      "crps": 2861.0004081574707,
+      "ece": 0.029076333333333336,
+      "event_rate": 0.1972,
+      "mean_probability": 0.22419266666666668,
+      "width": 12354.02171293396
+     }
+    },
+    "seconds": 143.42638895800337
+   }
+  },
+  "joint_flow": {
+   "0": {
+    "daily": {
+     "coverage": 0.7538944444444444,
+     "median_loss": 298.19846771304435,
+     "quantile_loss": 488.690703719982,
+     "uncapped_quantile_loss": 488.6907037199821
+    },
+    "nll": -11.414462870407105,
+    "paths": {
+     "peak": {
+      "brier": 0.19560538416666667,
+      "calibrated_brier": 0.19385438157145954,
+      "calibrated_coverage": 0.7318666666666667,
+      "calibrated_ece": 0.11165603564493895,
+      "calibrated_mean_probability": 0.298619583155104,
+      "calibrated_width": 2883.133679774332,
+      "coverage": 0.7406666666666667,
+      "crps": 763.5149797905872,
+      "ece": 0.1069466666666667,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.313382,
+      "width": 2979.1742735642283
+     },
+     "total": {
+      "brier": 0.07192837708333333,
+      "calibrated_brier": 0.07199418604324805,
+      "calibrated_coverage": 0.8095333333333333,
+      "calibrated_ece": 0.035378734223476614,
+      "calibrated_mean_probability": 0.23091206755680996,
+      "calibrated_width": 12082.639492347324,
+      "coverage": 0.7471333333333333,
+      "crps": 2765.1480842645356,
+      "ece": 0.026193833333333336,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.18331283333333334,
+      "width": 10439.199900490748
+     }
+    },
+    "seconds": 80.4468980410602
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.7838444444444445,
+     "median_loss": 286.96883004985483,
+     "quantile_loss": 450.11864349968863,
+     "uncapped_quantile_loss": 450.1186434996886
+    },
+    "nll": -11.526300349299113,
+    "paths": {
+     "peak": {
+      "brier": 0.21948446541666666,
+      "calibrated_brier": 0.20677661375724374,
+      "calibrated_coverage": 0.6893333333333334,
+      "calibrated_ece": 0.14024752172134528,
+      "calibrated_mean_probability": 0.34481670152850696,
+      "calibrated_width": 2817.2207498372395,
+      "coverage": 0.7217333333333333,
+      "crps": 776.4583711817046,
+      "ece": 0.15574583333333336,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.39561949999999996,
+      "width": 3055.933892970089
+     },
+     "total": {
+      "brier": 0.07520031500000002,
+      "calibrated_brier": 0.08001288495881657,
+      "calibrated_coverage": 0.8110666666666667,
+      "calibrated_ece": 0.05864049027087514,
+      "calibrated_mean_probability": 0.25064049027087515,
+      "calibrated_width": 11601.769783984375,
+      "coverage": 0.765,
+      "crps": 2563.8196063480636,
+      "ece": 0.033588666666666656,
+      "event_rate": 0.192,
+      "mean_probability": 0.22558866666666666,
+      "width": 10347.505121270902
+     }
+    },
+    "seconds": 70.316890166956
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.7195944444444444,
+     "median_loss": 300.0259546640027,
+     "quantile_loss": 506.4208455655811,
+     "uncapped_quantile_loss": 506.43877523252377
+    },
+    "nll": -9.787901698939006,
+    "paths": {
+     "peak": {
+      "brier": 0.22650371791666665,
+      "calibrated_brier": 0.21648705945248944,
+      "calibrated_coverage": 0.7184666666666667,
+      "calibrated_ece": 0.15250047742421455,
+      "calibrated_mean_probability": 0.3269705204451361,
+      "calibrated_width": 3130.575089554646,
+      "coverage": 0.7229333333333333,
+      "crps": 882.9129766422714,
+      "ece": 0.15501916666666665,
+      "event_rate": 0.2552,
+      "mean_probability": 0.37080783333333334,
+      "width": 3167.104320658426
+     },
+     "total": {
+      "brier": 0.07269502541666666,
+      "calibrated_brier": 0.08476357945872551,
+      "calibrated_coverage": 0.7762,
+      "calibrated_ece": 0.07365505996475141,
+      "calibrated_mean_probability": 0.27085505996475145,
+      "calibrated_width": 11577.635634472656,
+      "coverage": 0.7366666666666667,
+      "crps": 2922.4700462122405,
+      "ece": 0.027131500000000013,
+      "event_rate": 0.1972,
+      "mean_probability": 0.2243315,
+      "width": 10604.005850509722
+     }
+    },
+    "seconds": 67.8941051249858
+   }
+  },
+  "joint_marginals": {
+   "0": {
+    "daily": {
+     "coverage": 0.6871888888888888,
+     "median_loss": 283.2215129651643,
+     "quantile_loss": 464.4126872010567,
+     "uncapped_quantile_loss": 1125.8681849987527
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.21700339000000005,
+      "coverage": 0.5900666666666666,
+      "crps": 812.590962529205,
+      "ece": 0.1680426666666667,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.30930766666666665,
+      "width": 2428.976498870361
+     },
+     "total": {
+      "brier": 0.06734544333333334,
+      "coverage": 0.5067333333333334,
+      "crps": 2632.860885675106,
+      "ece": 0.038889999999999994,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.207866,
+      "width": 5829.26092040392
+     }
+    }
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.6932333333333334,
+     "median_loss": 278.997996347657,
+     "quantile_loss": 458.6918719938827,
+     "uncapped_quantile_loss": 5499.873638884162
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.2203317879166667,
+      "coverage": 0.6070666666666666,
+      "crps": 877.9387491269509,
+      "ece": 0.1714505,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.31249449999999995,
+      "width": 3151.0485429112664
+     },
+     "total": {
+      "brier": 0.07717479958333333,
+      "coverage": 0.5148,
+      "crps": 2695.776439344896,
+      "ece": 0.0475375,
+      "event_rate": 0.192,
+      "mean_probability": 0.1993051666666667,
+      "width": 6569.770359753112
+     }
+    }
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.68795,
+     "median_loss": 286.17798608972953,
+     "quantile_loss": 510.65961216017934,
+     "uncapped_quantile_loss": 11479.149939374036
+    },
+    "paths": {
+     "peak": {
+      "brier": 0.22898534458333333,
+      "coverage": 0.5894666666666667,
+      "crps": 1131.7673324549735,
+      "ece": 0.18489283333333337,
+      "event_rate": 0.2552,
+      "mean_probability": 0.3265611666666666,
+      "width": 4415.4362370711215
+     },
+     "total": {
+      "brier": 0.06980906958333333,
+      "coverage": 0.5180666666666667,
+      "crps": 3018.5763972057775,
+      "ece": 0.043356833333333344,
+      "event_rate": 0.1972,
+      "mean_probability": 0.21106816666666667,
+      "width": 8247.510309918585
+     }
+    }
+   }
+  },
+  "no_covariates": {
+   "0": {
+    "daily": {
+     "coverage": 0.9423388888888888,
+     "median_loss": 698.3550021448326,
+     "quantile_loss": 1283.994348660122,
+     "uncapped_quantile_loss": 137185.3270151221
+    },
+    "nll": 21.961875695896147,
+    "paths": {
+     "peak": {
+      "brier": 0.39653129583333335,
+      "calibrated_brier": 0.26142075232072026,
+      "calibrated_coverage": 0.8288666666666666,
+      "calibrated_ece": 0.20849009466858814,
+      "calibrated_mean_probability": 0.387334304126884,
+      "calibrated_width": 30964.24960263672,
+      "coverage": 0.6976,
+      "crps": 6545.0720622072995,
+      "ece": 0.41384533333333334,
+      "event_rate": 0.24266666666666667,
+      "mean_probability": 0.6562966666666668,
+      "width": 26267.939228218223
+     },
+     "total": {
+      "brier": 0.19039494708333332,
+      "calibrated_brier": 0.12790388319294718,
+      "calibrated_coverage": 0.8592666666666666,
+      "calibrated_ece": 0.08155366829465259,
+      "calibrated_mean_probability": 0.27708700162798594,
+      "calibrated_width": 50177.77328867187,
+      "coverage": 0.949,
+      "crps": 10497.971359195477,
+      "ece": 0.25344583333333337,
+      "event_rate": 0.19553333333333334,
+      "mean_probability": 0.44897916666666665,
+      "width": 63988.28344872201
+     }
+    },
+    "seconds": 48.95394545793533
+   },
+   "1": {
+    "daily": {
+     "coverage": 0.9359888888888889,
+     "median_loss": 704.899378408843,
+     "quantile_loss": 1292.805130843417,
+     "uncapped_quantile_loss": 120275.06094341163
+    },
+    "nll": 25.165845021692913,
+    "paths": {
+     "peak": {
+      "brier": 0.3718027729166667,
+      "calibrated_brier": 0.2519572048866996,
+      "calibrated_coverage": 0.8595333333333334,
+      "calibrated_ece": 0.1957317987504855,
+      "calibrated_mean_probability": 0.3929790135480641,
+      "calibrated_width": 33198.41136424154,
+      "coverage": 0.7796666666666666,
+      "crps": 6677.120346991341,
+      "ece": 0.39504316666666667,
+      "event_rate": 0.25233333333333335,
+      "mean_probability": 0.6442711666666667,
+      "width": 30048.43203431685
+     },
+     "total": {
+      "brier": 0.20165766124999998,
+      "calibrated_brier": 0.13434656087946198,
+      "calibrated_coverage": 0.8503333333333334,
+      "calibrated_ece": 0.1113288100504632,
+      "calibrated_mean_probability": 0.30106336975576137,
+      "calibrated_width": 44886.68452096354,
+      "coverage": 0.9803333333333333,
+      "crps": 10520.671907320893,
+      "ece": 0.28735083333333333,
+      "event_rate": 0.192,
+      "mean_probability": 0.4793508333333334,
+      "width": 72359.9519832188
+     }
+    },
+    "seconds": 50.917360250023194
+   },
+   "2": {
+    "daily": {
+     "coverage": 0.9227555555555556,
+     "median_loss": 719.5031429792289,
+     "quantile_loss": 1401.4433929980228,
+     "uncapped_quantile_loss": 106322.72302001045
+    },
+    "nll": 27.120233547878264,
+    "paths": {
+     "peak": {
+      "brier": 0.4038669979166667,
+      "calibrated_brier": 0.26398817398371904,
+      "calibrated_coverage": 0.7940666666666667,
+      "calibrated_ece": 0.21789376319925446,
+      "calibrated_mean_probability": 0.4183588805260508,
+      "calibrated_width": 30705.240521443684,
+      "coverage": 0.6757333333333333,
+      "crps": 6662.336691200336,
+      "ece": 0.42009183333333333,
+      "event_rate": 0.2552,
+      "mean_probability": 0.6752918333333333,
+      "width": 27567.954688784605
+     },
+     "total": {
+      "brier": 0.23585824,
+      "calibrated_brier": 0.15090956135309558,
+      "calibrated_coverage": 0.855,
+      "calibrated_ece": 0.1080782310378547,
+      "calibrated_mean_probability": 0.30527823103785473,
+      "calibrated_width": 54997.1308436849,
+      "coverage": 0.9422666666666667,
+      "crps": 11968.401102047213,
+      "ece": 0.312469,
+      "event_rate": 0.1972,
+      "mean_probability": 0.509669,
+      "width": 70385.9094879277
+     }
+    },
+    "seconds": 50.13446208310779
+   }
+  }
+ },
+ "seconds": 157.3,
+ "seed": 0,
+ "stores": 300
+}

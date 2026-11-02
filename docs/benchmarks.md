@@ -405,6 +405,24 @@ The methods, all with a normal head on log sales:
 - **Finishing the posteriors.** Before `fit` set each store's offsets exactly after training, the variational posteriors scored 0.1061 (offsets plus embeddings) and 0.1108 (offsets) at 1 to 5 rows on Rossmann. Finishing takes them to 0.0963 and 0.1013 and moves every larger bucket by under 0.002. The posteriors are now as narrow as the model says, so the raw 80% interval of those stores holds 72% of their rows instead of 75%. Calibrate on held-out rows when coverage matters.
 - **Reading the store in context loses to the exact update.** This is the amortized, neural-process view of a mixed model. It loses to offsets plus embeddings on CRPS in every column on both tables. On FreshRetailNet it loses even to leaving the store out. On Rossmann it beats the ordinary embedding at 1 to 5 rows and on unseen stores, and GPBoost everywhere, and its unseen interval is the best calibrated of Ashlar's, at 78.9%. A set encoder over binned tokens is a cruder reader of the rows than a dedicated numeric one could be. Even so, it would have to beat `with_context`, which is exact for the offset, so the variant was not built into the library.
 
+### The README's pooling figure
+
+From [`examples/readme/store_pooling.py`](../examples/readme/store_pooling.py). It refits offsets plus embeddings on the first split (seed 0) and reproduces that split's saved CRPS in every bucket. Loading the table and fitting took 68 seconds on the laptop, and the fitted `tau` is 0.278. The figure's left panel is that fit, and its right panel the three splits above. After five rows of a new store, over the three splits, the raw 80% interval of its scored rows holds:
+
+| Method | CRPS, unseen, 5 rows | 80% coverage | 80% width |
+|---|---:|---:|---:|
+| pooled | 0.0926 | 75.4% | 0.369 |
+| pooled + embedding | **0.0906** | 69.7% | 0.304 |
+| nested | 0.0913 | 69.8% | 0.306 |
+| in context | 0.1045 | 73.9% | 0.409 |
+| GPBoost | 0.1106 | 77.7% | 0.438 |
+| mixed model | 0.1224 | 83.5% | 0.578 |
+
+- **One row moves a store most of the way to its own mean.** A seen store's pooled effect is on average 0.84 times its own mean residual from the population at 1 training row, 0.89 at 2 to 3, 0.96 at 4 to 10, and 0.98 to 1.00 above that: least-squares slopes through zero, over 63, 132, 181, and 516 stores. The stores' spread, `tau` 0.278 on log sales, is large beside the noise of a typical day, about 0.10, so the pull towards the average store is strongest at one row and nearly gone by ten.
+- **A new store's offset narrows faster than it learns.** For each of the split's 223 unseen stores, `with_context` reads its first 1, 2, 3, 5, 10, 20, and 35 rows (its 5 context rows, then its scored rows), each time from the prior, as the left panel draws for store 342. Against the store's level, its mean residual over all its 606 to 942 days, the offset's 80% interval holds 72%, 69%, 71%, 69%, 68%, 65%, and 66% of the stores. The prior alone holds 76%, and a plain mean of the same 35 rows with its own standard error holds 80%.
+- **Probably because a new store's days scatter more than the head says.** The update is exact for a normal head: it weights each day by the head's precision and reads the days as independent around one offset. That precision was learned on stores whose embeddings fit them, and a new store's embedding stays at the average. Its days scatter about its level 1.26 times as widely as the head's spread says (the median over stores), and the head's weights do not suit them: after 35 rows the offset is 0.030 from the level (root mean square) where its posterior sd says 0.017, while the plain mean of the same rows is 0.024 from it. Offsets alone, whose head had no embedding to fit a store's own pattern, hold 75.4% of a new store's rows after five rows against 69.7% with the embedding. This is a reading of the numbers, not a tested cause.
+- **GPBoost's and the mixed model's intervals are nearer 80% after five rows,** 77.7% and 83.5%, at a CRPS 22% and 35% higher. In this split's refit, the offsets plus embeddings' interval holds 70.7% of the rows from `predict_interval` and 70.1% from 400 draws. Calibrate on held-out rows of new stores when their coverage matters.
+
 ## Additive models against R's gamlss
 
 From [`examples/benchmark_additive.py`](../examples/benchmark_additive.py), the protocol of [#42](https://github.com/maxmbay/ashlar/issues/42). Every parameter of an additive model of a distribution is a sum of one shape per column. R's `gamlss` 5.4.22 fits each shape as a penalized B-spline (`pb`) by backfitting. `backbone="additive"` fits each as a small network, trained by gradient descent with the head. Two tables, with three random 80/20 splits each:
@@ -440,6 +458,25 @@ The residual-network rows are Ashlar's default backbone with the same head. Scor
 - **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
 - **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
 - **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
+
+### The README's additive figure
+
+From [`examples/readme/additive_gamlss.py`](../examples/readme/additive_gamlss.py), which runs the `terms` stage of [`examples/benchmark_additive.py`](../examples/benchmark_additive.py). It refits Ashlar's additive negative binomial and `gamlss`'s `NBI`, each with the hour × working day pair, on split 0, the split whose saved `gamlss` pair fit was fastest, and reads every term on a grid of its column: Ashlar's from `shape_functions` on the 13,903 training hours, `gamlss`'s from `predict(type = "terms")` on the same hours. Ashlar's refit scored the saved test CRPS, 24.033, in 10 seconds. `gamlss` converged in 38 cycles and 260 seconds, and its terms add back to its fitted linear predictor within 1.1e-5 on the log mean and 5e-11 on the log dispersion. Without the pair, its log-dispersion terms miss its linear predictor by up to 0.24 on some hours, so the figure draws the pair models only.
+
+`NBI`'s sigma is Ashlar's dispersion: both make the variance the mean plus the dispersion times the mean squared. Ashlar's dispersion is `softplus(raw) + 1e-4`, so each of its raw dispersion terms is drawn as the change in log dispersion it makes at the average hour, `log(softplus(b + f) + 1e-4) − log(softplus(b) + 1e-4)`, where `b` is the intercept. Every curve is centred on the training hours. The hour's panel sums, for each day type, every term the hour or the working day enters (the hour, the working day, and the pair), centred on its 24 hours, since each tool splits that level between the three terms in its own way. The temperature's panel adds the terms of the temperature and the felt temperature, which move together.
+
+| Term | Log mean, mean gap | `gamlss`'s span | Log dispersion, mean gap | `gamlss`'s span |
+|---|---:|---:|---:|---:|
+| Hour, working days | 0.009 | 4.61 | 0.179 | 2.16 |
+| Hour, other days | 0.018 | 3.74 | 0.131 | 1.51 |
+| Temperature | 0.009 | 0.88 | 0.063 | 1.27 |
+| Humidity | 0.008 | 0.24 | 0.055 | 1.02 |
+
+The gap is the mean absolute difference between the two curves: over the 24 hours for the hour, and over the training hours for temperature and humidity. The span is the range of `gamlss`'s curve over the 24 hours, or over the middle 98% of the training hours.
+
+- **The log means agree.** The curves differ by 0.008 to 0.018 on average, against spans of 0.24 to 4.61.
+- **The dispersions agree less, and `gamlss`'s hour is rougher.** The gaps are 0.055 to 0.179, 5% to 9% of their spans: a dispersion is learned from the scatter of the counts, not their level, so neither tool pins it down as well. `gamlss` reads the hour as a factor, 24 levels fitted without a penalty, as it reads the season, year, month, holiday, weekday, working day, and weather. Its hour curves on the dispersion are rougher than Ashlar's: their root mean square second difference is 0.59 and 0.34 against Ashlar's 0.23 and 0.16.
+- **Where the data are sparse, the curves part.** Below 20% humidity, 63 of the 13,903 training hours, the two humidity curves differ by up to 0.59 on the log mean and 1.01 on the log dispersion. Above it, they differ by at most 0.031 and 0.26.
 
 ## Forecast heads
 
@@ -517,6 +554,12 @@ What holds up:
 - **DeepAR's paths lose on the total and calibrate the peak best.** Trained to convergence, its daily loss is 625, 31% above the joint normal's, and its CRPS for the total 3,881 against 2,623, with 67% of totals inside its 80% interval; the joint normal wins both on every seed. But its peak is the best calibrated of any model: 79.5% inside the 80% interval, a Brier score of 0.192, and a calibration error of 0.099, against 0.206 and 0.135 for the best Ashlar head after `calibrate`. Its days are better calibrated too, 81% inside their 80% interval against 66% to 75% for Ashlar's heads, which is probably why: a peak takes each day's upper tail.
 
 A static correlation on the independent model's residuals, which matched the joint head on [the electricity loads](#joint-demand-across-locations), was not tried here.
+
+### The README's forecast figure
+
+From [`examples/readme/forecast_paths.py`](../examples/readme/forecast_paths.py). It refits `joint` on seed 0, 155 seconds on the laptop with building the frames, and draws 400 paths from it and 400 from its marginals with the dependence dropped, for test rows chosen by a fixed rule: a complete 28-day history, and 1 to 3 closed days, a promotion day, and a state holiday in the 12 days ahead. The candidates are taken in a seeded random order, and the figure draws the first, store 966 from 1 June 2015. Its realized 12-day total, 50,117, sits inside the joint's raw 80% interval, 46,040 to 50,869, and outside its marginals', 46,928 to 49,908. The title's coverage and the footer's scores are the three-seed means from the tables above; the intervals printed under the totals are this store's.
+
+On the peak day, always saying 25% scores a Brier of 0.1875 over the three seeds (0.1838, 0.1887, and 0.1901 on each, where the peak passed its threshold on 24.3%, 25.2%, and 25.5% of paths). That is below DeepAR's 0.1921 and below the best Ashlar head after `calibrate`, `joint_flow`'s 0.2057, on every seed: no model's probability for the peak is yet worth more than its base rate.
 
 ## Calibrated intervals
 
