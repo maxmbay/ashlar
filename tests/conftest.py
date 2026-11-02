@@ -11,6 +11,10 @@ import gc
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# scikit-learn's histogram trees spin up an OpenMP thread per core. Beside JAX in
+# every pytest-xdist worker, those threads fight for the cores: one 0.4 s test
+# took 100 s that way.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 if "xla_backend_optimization_level" not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " --xla_backend_optimization_level=1").strip()
 
