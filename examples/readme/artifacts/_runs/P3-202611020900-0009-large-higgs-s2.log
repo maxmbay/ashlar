@@ -1,0 +1,5 @@
+at d14b3d8 (dev)
+{"table": "higgs", "model": "ashlar", "variant": "v3", "seed": 2, "seconds": 322.9, "epochs": 20, "accuracy": 0.7626625, "log_loss": 0.48093104362487793, "auc": 0.84721366005435}
+{"table": "higgs", "model": "lightgbm", "variant": "", "seed": 2, "seconds": 50.8, "trees": 3992, "accuracy": 0.7506, "log_loss": 0.49813978543721, "auc": 0.8338463009620263}
+{"table": "higgs", "model": "xgboost", "variant": "", "seed": 2, "seconds": 68.5, "trees": 3999, "accuracy": 0.752415, "log_loss": 0.4950205981731415, "auc": 0.8361507291675723}
+{"table": "higgs", "model": "catboost", "variant": "", "seed": 2, "seconds": 156.6, "trees": 4000, "accuracy": 0.7508725, "log_loss": 0.4985622653080378, "auc": 0.8338317988181072}
