@@ -161,7 +161,7 @@ def ashlar_cif(model, X, t0, chunk: int = 4000):
         n = len(a)
         inf = np.full(n, np.inf, dtype=np.float32)
 
-        def box(lower, upper):
+        def box(lower, upper, dist=dist):
             return np.asarray(dist.log_box(np.stack(lower, 1).astype(np.float32), np.stack(upper, 1).astype(np.float32)))
 
         alive = box([-inf, a, -inf], [inf, inf, inf])
