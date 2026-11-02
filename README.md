@@ -241,6 +241,7 @@ On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM o
 - [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits, calibrated intervals, and member uncertainty.
 - [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md): the one distribution object every head returns, its shapes, and JAX transforms.
 - [docs/observed.md](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md): censored, interval, survival, rounded, truncated, noisy, and total labels, and which heads take them.
+- [docs/effects.md](https://github.com/maxmbay/ashlar/blob/main/docs/effects.md): entity effects. Stores, patients, or products pooled across groups, as offsets and embeddings, nested in broader classes, and updated from a few rows of a new group.
 - [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
 - [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
 - [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.

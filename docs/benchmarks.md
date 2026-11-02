@@ -19,6 +19,7 @@ python examples/benchmark_uncertainty.py --stage report
 - [Point accuracy on small tables](#point-accuracy)
 - [Distributions on smaller tables](#distributions-on-smaller-tables)
 - [Learned embeddings](#learned-embeddings)
+- [Entity effects](#entity-effects)
 - [Forecast heads](#forecast-heads)
 - [Calibrated intervals](#calibrated-intervals)
 - [Count heads](#count-heads)
@@ -350,6 +351,57 @@ The `flow` rows here and under [Forecast heads](#forecast-heads) were rerun on t
 | Ashlar, one-hot, longer | 0.580 ± 0.017 | 14 |
 | LightGBM, early-stopped | 0.520 ± 0.003 | 0.4 |
 | XGBoost, early-stopped | 0.580 ± 0.002 | 1.0 |
+
+## Entity effects
+
+From [`examples/benchmark_effects.py`](../examples/benchmark_effects.py), the protocol of [#41](https://github.com/maxmbay/ashlar/issues/41). Every store is an entity. In each of three random splits, a fifth of the stores are held out whole, and each gives 5 rows of context and 30 rows to score. Every other store trains on a log-uniform 1 to 300 of its rows and scores 30 others, so its test rows fall in a bucket by how many rows it trained on. The score is the CRPS of log sales, lower is better: from 400 draws for Ashlar, and in closed form for the normal predictions of GPBoost and the mixed model. Coverage is the share of rows inside the raw 80% interval. The tables give means over the three splits. The gaps discussed below are several times the spread between splits.
+
+The methods, all with a normal head on log sales:
+
+- **embedding**: the store as an ordinary learned embedding, Ashlar's default for a categorical column.
+- **dropped**: no store column.
+- **pooled**: `random_effects={"store": "intercept"}`.
+- **pooled + embedding**: `random_effects={"store": ["intercept", "embedding"]}`.
+- **nested**: the same, with the store nested in its type (Rossmann) or city (FreshRetailNet), which has an offset and embedding of its own.
+- **in context**: no store column. Each row instead carries up to 32 other rows of its store, through the existing set encoder, as two set features: their binned outcomes, and their binned outcomes by promotion (Rossmann) or activity (FreshRetailNet). The set's size is a feature too. A training row's set leaves the row out and has a random size. A seen store's test row reads the store's training rows. An unseen store's row reads its 5 context rows, or nothing.
+- **GPBoost**: tree boosting with a grouped random intercept, early-stopped.
+- **mixed model**: a statsmodels linear mixed model with a random intercept, linear in every feature but the store and product.
+
+"Unseen, 5 rows" reads each unseen store's 5 context rows. The pooled models use `with_context`, GPBoost and the mixed model the conjugate update with their fitted variances, and the in-context model the rows as its set. `tau` is the fitted spread of the store offsets.
+
+### Rossmann, log daily sales, 1,115 stores, 844,338 open days
+
+| Method | 1-5 rows | 6-20 | 21-100 | 101-300 | Unseen | Unseen, 5 rows | Coverage, unseen | Coverage, 1-5 | `tau` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| embedding | 0.1198 | 0.0815 | 0.0646 | 0.0620 | 0.2213 | | 35.7% | 46.9% | |
+| dropped | 0.2318 | 0.1913 | 0.1298 | 0.0846 | 0.2589 | | 42.0% | 47.4% | |
+| pooled | 0.1013 | 0.0870 | 0.0820 | 0.0740 | 0.1905 | 0.0926 | 78.0% | 75.7% | 0.285 |
+| pooled + embedding | **0.0963** | **0.0751** | **0.0614** | **0.0567** | **0.1890** | **0.0906** | 75.4% | 72.4% | 0.274 |
+| nested | 0.0964 | 0.0757 | **0.0614** | 0.0573 | 0.1895 | 0.0913 | 76.0% | 73.0% | 0.278 |
+| in context | 0.1165 | 0.0915 | 0.0820 | 0.0753 | 0.1951 | 0.1045 | 78.9% | 75.1% | |
+| GPBoost | 0.1246 | 0.1044 | 0.0961 | 0.0886 | 0.2032 | 0.1106 | 80.8% | 79.3% | 0.315 |
+| mixed model | 0.1313 | 0.1176 | 0.1125 | 0.1139 | 0.2055 | 0.1224 | 81.8% | 83.9% | 0.307 |
+
+### FreshRetailNet-50K, log1p daily sales of store and product pairs, 898 stores, 4,500,000 rows
+
+| Method | 1-5 rows | 6-20 | 21-100 | 101-300 | Unseen | Unseen, 5 rows | Coverage, unseen | Coverage, 1-5 | `tau` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| embedding | 0.1651 | 0.1502 | 0.1418 | 0.1378 | 0.1516 | | 75.6% | 65.3% | |
+| dropped | 0.1454 | 0.1447 | 0.1443 | 0.1407 | 0.1455 | | 78.6% | 78.6% | |
+| pooled | 0.1428 | 0.1398 | 0.1359 | 0.1321 | 0.1442 | **0.1418** | 79.8% | 78.8% | 0.093 |
+| pooled + embedding | **0.1424** | **0.1386** | **0.1347** | **0.1303** | **0.1441** | **0.1418** | 79.0% | 78.1% | 0.086 |
+| nested | **0.1424** | 0.1391 | 0.1349 | 0.1307 | **0.1441** | **0.1418** | 79.2% | 78.4% | 0.086 |
+| in context | 0.1480 | 0.1455 | 0.1452 | 0.1414 | 0.1477 | 0.1471 | 77.1% | 77.0% | |
+| GPBoost | 0.1525 | 0.1495 | 0.1439 | 0.1393 | 0.1513 | 0.1496 | 67.1% | 64.4% | 0.084 |
+| mixed model | 0.1744 | 0.1704 | 0.1710 | 0.1685 | 0.1749 | 0.1743 | 82.1% | 82.2% | 0.062 |
+
+- **Stores with few rows gain the most.** On Rossmann stores with 1 to 5 training rows, offsets plus embeddings score 0.0963. That compares with 0.1198 for the ordinary embedding, 0.2318 with no store column, 0.1246 for GPBoost, and 0.1313 for the mixed model. On FreshRetailNet the store matters less, since products differ far more than stores (`tau` 0.09 against 0.27 to 0.29). Pooling still beats both the embedding and leaving the store out there.
+- **An unseen store gets an honest interval.** The ordinary embedding reads a category it never trained as a confident store. Its 80% interval holds 36% of an unseen Rossmann store's rows. Pooling's interval widens by the spread between stores and holds 75% to 78%.
+- **The embedding adds to the offset.** With the interaction, offsets plus embeddings beat offsets alone in every bucket of seen stores on both tables: by 5% at 1 to 5 rows and 23% at 101 to 300 on Rossmann. Nesting the store in its type or city added nothing on either table, within 0.001.
+- **Five rows of a new store halve its CRPS.** With `with_context`, an unseen Rossmann store goes from 0.1890 to 0.0906.
+- **Ashlar's pooled models beat GPBoost and the mixed model on CRPS in every column on both tables.** Their intervals are nearer 80% on Rossmann, 79% to 84%, but on seen stores their CRPS is 29% to 101% worse than offsets plus embeddings.
+- **Finishing the posteriors.** Before `fit` set each store's offsets exactly after training, the variational posteriors scored 0.1061 (offsets plus embeddings) and 0.1108 (offsets) at 1 to 5 rows on Rossmann. Finishing takes them to 0.0963 and 0.1013 and moves every larger bucket by under 0.002. The posteriors are now as narrow as the model says, so the raw 80% interval of those stores holds 72% of their rows instead of 75%. Calibrate on held-out rows when coverage matters.
+- **Reading the store in context loses to the exact update.** This is the amortized, neural-process view of a mixed model. It loses to offsets plus embeddings on CRPS in every column on both tables. On FreshRetailNet it loses even to leaving the store out. On Rossmann it beats the ordinary embedding at 1 to 5 rows and on unseen stores, and GPBoost everywhere, and its unseen interval is the best calibrated of Ashlar's, at 78.9%. A set encoder over binned tokens is a cruder reader of the rows than a dedicated numeric one could be. Even so, it would have to beat `with_context`, which is exact for the offset, so the variant was not built into the library.
 
 ## Forecast heads
 
