@@ -1,6 +1,6 @@
 # Forecast heads
 
-[Ashlar](../README.md)'s two forecasters read one series at a time. `ASRForecaster` reads a window of `lookback` steps and emits the next `horizon` values. The default lookback is 48 and the default horizon is 12. The default head is `mse`. For many series, covariates known ahead, and the joint path, make each forecast origin a row of a table instead: [many series, covariates, and paths](#many-series-covariates-and-paths).
+[Ashlar](../README.md)'s two forecasters read one series at a time. `ASRForecaster` reads a window of `lookback` steps and emits the next `horizon` values. The default lookback is 48 and the default horizon is 12. The default head is `mse`. A single series can also be a table of lags with every tabular head: [one series as a table of lags](#one-series-as-a-table-of-lags). For many series, covariates known ahead, and the joint path, make each forecast origin a row of a table instead: [many series, covariates, and paths](#many-series-covariates-and-paths).
 
 `fit(series)` holds out the last 10% of that series, on the clock, and uses it only to choose the epoch. It then starts again from the same initialization and trains that many epochs on every window in the series you passed. `predict` reads the last `lookback` observations and returns one point per horizon step, on the original scale.
 
@@ -76,6 +76,21 @@ model = ASRForecaster.load("models/demand")
 ```
 
 Both forecasters save their settings as JSON and their weights with Equinox, never with pickle. Load with the class that saved: `ASRHistoryForecaster.load` for the full-history model.
+
+## One series as a table of lags
+
+A series can also arrive as a table already: one row per step, with its lags and calendar columns, and then every tabular head applies to it. `cyclical=` turns a calendar column into a sine and a cosine, so hour 23 sits beside hour 0 and days near each other in the year share what the model learns about them:
+
+```python
+from ashlar import tabm_piecewise
+
+model = tabm_piecewise(task="mixture", cyclical={"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25})
+model.fit(lags, pickups)
+```
+
+![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](images/forecast-fan.png)
+
+Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours. [`examples/readme_figures.py`](../examples/readme_figures.py) writes the figure (`python examples/readme_figures.py fan`).
 
 ## Many series, covariates, and paths
 

@@ -405,6 +405,24 @@ The methods, all with a normal head on log sales:
 - **Finishing the posteriors.** Before `fit` set each store's offsets exactly after training, the variational posteriors scored 0.1061 (offsets plus embeddings) and 0.1108 (offsets) at 1 to 5 rows on Rossmann. Finishing takes them to 0.0963 and 0.1013 and moves every larger bucket by under 0.002. The posteriors are now as narrow as the model says, so the raw 80% interval of those stores holds 72% of their rows instead of 75%. Calibrate on held-out rows when coverage matters.
 - **Reading the store in context loses to the exact update.** This is the amortized, neural-process view of a mixed model. It loses to offsets plus embeddings on CRPS in every column on both tables. On FreshRetailNet it loses even to leaving the store out. On Rossmann it beats the ordinary embedding at 1 to 5 rows and on unseen stores, and GPBoost everywhere, and its unseen interval is the best calibrated of Ashlar's, at 78.9%. A set encoder over binned tokens is a cruder reader of the rows than a dedicated numeric one could be. Even so, it would have to beat `with_context`, which is exact for the offset, so the variant was not built into the library.
 
+### The README's pooling figure
+
+From [`examples/readme/store_pooling.py`](../examples/readme/store_pooling.py). It refits offsets plus embeddings on the first split (seed 0) and reproduces that split's saved CRPS in every bucket. Loading the table and fitting took 68 seconds on the laptop, and the fitted `tau` is 0.278. The figure's left panel is that fit, and its right panel the three splits above. After five rows of a new store, over the three splits, the raw 80% interval of its scored rows holds:
+
+| Method | CRPS, unseen, 5 rows | 80% coverage | 80% width |
+|---|---:|---:|---:|
+| pooled | 0.0926 | 75.4% | 0.369 |
+| pooled + embedding | **0.0906** | 69.7% | 0.304 |
+| nested | 0.0913 | 69.8% | 0.306 |
+| in context | 0.1045 | 73.9% | 0.409 |
+| GPBoost | 0.1106 | 77.7% | 0.438 |
+| mixed model | 0.1224 | 83.5% | 0.578 |
+
+- **One row moves a store most of the way to its own mean.** A seen store's pooled effect is on average 0.84 times its own mean residual from the population at 1 training row, 0.89 at 2 to 3, 0.96 at 4 to 10, and 0.98 to 1.00 above that: least-squares slopes through zero, over 63, 132, 181, and 516 stores. The stores' spread, `tau` 0.278 on log sales, is large beside the noise of a typical day, about 0.10, so the pull towards the average store is strongest at one row and nearly gone by ten.
+- **A new store's offset narrows faster than it learns.** For each of the split's 223 unseen stores, `with_context` reads its first 1, 2, 3, 5, 10, 20, and 35 rows (its 5 context rows, then its scored rows), each time from the prior, as the left panel draws for store 342. Against the store's level, its mean residual over all its 606 to 942 days, the offset's 80% interval holds 72%, 69%, 71%, 69%, 68%, 65%, and 66% of the stores. The prior alone holds 76%, and a plain mean of the same 35 rows with its own standard error holds 80%.
+- **Probably because a new store's days scatter more than the head says.** The update is exact for a normal head: it weights each day by the head's precision and reads the days as independent around one offset. That precision was learned on stores whose embeddings fit them, and a new store's embedding stays at the average. Its days scatter about its level 1.26 times as widely as the head's spread says (the median over stores), and the head's weights do not suit them: after 35 rows the offset is 0.030 from the level (root mean square) where its posterior sd says 0.017, while the plain mean of the same rows is 0.024 from it. Offsets alone, whose head had no embedding to fit a store's own pattern, hold 75.4% of a new store's rows after five rows against 69.7% with the embedding. This is a reading of the numbers, not a tested cause.
+- **GPBoost's and the mixed model's intervals are nearer 80% after five rows,** 77.7% and 83.5%, at a CRPS 22% and 35% higher. In this split's refit, the offsets plus embeddings' interval holds 70.7% of the rows from `predict_interval` and 70.1% from 400 draws. Calibrate on held-out rows of new stores when their coverage matters.
+
 ## Additive models against R's gamlss
 
 From [`examples/benchmark_additive.py`](../examples/benchmark_additive.py), the protocol of [#42](https://github.com/maxmbay/ashlar/issues/42). Every parameter of an additive model of a distribution is a sum of one shape per column. R's `gamlss` 5.4.22 fits each shape as a penalized B-spline (`pb`) by backfitting. `backbone="additive"` fits each as a small network, trained by gradient descent with the head. Two tables, with three random 80/20 splits each:
@@ -440,6 +458,25 @@ The residual-network rows are Ashlar's default backbone with the same head. Scor
 - **The pair is worth 0.33 nats an hour.** Rentals on working days peak at 8 am and again at 5 to 6 pm, and on other days rise to one plateau, which no single shape of the hour can draw. The pair cuts the CRPS by 44%.
 - **What additivity costs.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the best additive model. On abalone, the additive `mixture` comes within 0.011 nats of the residual network's.
 - **On abalone, `gamlss`'s normal beats Ashlar's additive `gaussian`.** CRPS is 1.115 against 1.156, and NLL 2.135 against 2.193, the largest gap in `gamlss`'s favor. With 3,341 training rows, its penalized splines fit the mean and spread better than one network per column. Ashlar's additive `mixture` beats `gamlss`'s `BCCGo`, CRPS 1.085 against 1.096 and NLL 1.949 against 1.982. Most gaps on abalone are within one or two standard errors.
+
+### The README's additive figure
+
+From [`examples/readme/additive_gamlss.py`](../examples/readme/additive_gamlss.py), which runs the `terms` stage of [`examples/benchmark_additive.py`](../examples/benchmark_additive.py). It refits Ashlar's additive negative binomial and `gamlss`'s `NBI`, each with the hour × working day pair, on split 0, the split whose saved `gamlss` pair fit was fastest, and reads every term on a grid of its column: Ashlar's from `shape_functions` on the 13,903 training hours, `gamlss`'s from `predict(type = "terms")` on the same hours. Ashlar's refit scored the saved test CRPS, 24.033, in 10 seconds. `gamlss` converged in 38 cycles and 260 seconds, and its terms add back to its fitted linear predictor within 1.1e-5 on the log mean and 5e-11 on the log dispersion. Without the pair, its log-dispersion terms miss its linear predictor by up to 0.24 on some hours, so the figure draws the pair models only.
+
+`NBI`'s sigma is Ashlar's dispersion: both make the variance the mean plus the dispersion times the mean squared. Ashlar's dispersion is `softplus(raw) + 1e-4`, so each of its raw dispersion terms is drawn as the change in log dispersion it makes at the average hour, `log(softplus(b + f) + 1e-4) − log(softplus(b) + 1e-4)`, where `b` is the intercept. Every curve is centred on the training hours. The hour's panel sums, for each day type, every term the hour or the working day enters (the hour, the working day, and the pair), centred on its 24 hours, since each tool splits that level between the three terms in its own way. The temperature's panel adds the terms of the temperature and the felt temperature, which move together.
+
+| Term | Log mean, mean gap | `gamlss`'s span | Log dispersion, mean gap | `gamlss`'s span |
+|---|---:|---:|---:|---:|
+| Hour, working days | 0.009 | 4.61 | 0.179 | 2.16 |
+| Hour, other days | 0.018 | 3.74 | 0.131 | 1.51 |
+| Temperature | 0.009 | 0.88 | 0.063 | 1.27 |
+| Humidity | 0.008 | 0.24 | 0.055 | 1.02 |
+
+The gap is the mean absolute difference between the two curves: over the 24 hours for the hour, and over the training hours for temperature and humidity. The span is the range of `gamlss`'s curve over the 24 hours, or over the middle 98% of the training hours.
+
+- **The log means agree.** The curves differ by 0.008 to 0.018 on average, against spans of 0.24 to 4.61.
+- **The dispersions agree less, and `gamlss`'s hour is rougher.** The gaps are 0.055 to 0.179, 5% to 9% of their spans: a dispersion is learned from the scatter of the counts, not their level, so neither tool pins it down as well. `gamlss` reads the hour as a factor, 24 levels fitted without a penalty, as it reads the season, year, month, holiday, weekday, working day, and weather. Its hour curves on the dispersion are rougher than Ashlar's: their root mean square second difference is 0.59 and 0.34 against Ashlar's 0.23 and 0.16.
+- **Where the data are sparse, the curves part.** Below 20% humidity, 63 of the 13,903 training hours, the two humidity curves differ by up to 0.59 on the log mean and 1.01 on the log dispersion. Above it, they differ by at most 0.031 and 0.26.
 
 ## Forecast heads
 
@@ -518,6 +555,12 @@ What holds up:
 
 A static correlation on the independent model's residuals, which matched the joint head on [the electricity loads](#joint-demand-across-locations), was not tried here.
 
+### The README's forecast figure
+
+From [`examples/readme/forecast_paths.py`](../examples/readme/forecast_paths.py). It refits `joint` on seed 0, 155 seconds on the laptop with building the frames, and draws 400 paths from it and 400 from its marginals with the dependence dropped, for test rows chosen by a fixed rule: a complete 28-day history, and 1 to 3 closed days, a promotion day, and a state holiday in the 12 days ahead. The candidates are taken in a seeded random order, and the figure draws the first, store 966 from 1 June 2015. Its realized 12-day total, 50,117, sits inside the joint's raw 80% interval, 46,040 to 50,869, and outside its marginals', 46,928 to 49,908. The title's coverage and the footer's scores are the three-seed means from the tables above; the intervals printed under the totals are this store's.
+
+On the peak day, always saying 25% scores a Brier of 0.1875 over the three seeds (0.1838, 0.1887, and 0.1901 on each, where the peak passed its threshold on 24.3%, 25.2%, and 25.5% of paths). That is below DeepAR's 0.1921 and below the best Ashlar head after `calibrate`, `joint_flow`'s 0.2057, on every seed: no model's probability for the peak is yet worth more than its base rate.
+
 ## Calibrated intervals
 
 From [`examples/benchmark_uncertainty.py`](../examples/benchmark_uncertainty.py), stage `calibration`. This script and its three sections ran on a 4-core Linux VM with 15 GB, CPU only, LightGBM 4.7.0 on one thread, not on the laptop above. Each table is split 60% train, 20% calibration, 20% test, three times (seeds 0, 1, 2). Ashlar is `ASRRegressor(task="mixture")` or `ASRRegressor(task="quantile")` with no other arguments, then `calibrate(X_cal, y_cal)`. LightGBM is two early-stopped quantile models at 0.1 and 0.9 on the same training rows, then the same conformal step on the same calibration rows (conformalized quantile regression). Each cell is the test coverage of a nominal 80% interval, mean over three splits, before → after. The mixture's quantiles are read exactly from its CDF and calibrated from each calibration row's CDF value; until the unified distributions they came from 1,000 draws, and rerunning with exact quantiles moved the mixture column by at most 0.9 points.
@@ -536,6 +579,8 @@ Conformal calibration is not Ashlar's alone: the same step brings LightGBM's qua
 
 A smaller table gives a noisier calibration: with 835 calibration rows on abalone the calibrated mixture covers between 77.6% and 82.2% on single splits.
 
+Rerun for the README's figure in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026, like the run above (`python examples/readme/intervals.py compute`): every coverage and width in this section came out the same at the digits shown. As a share of CQR's width at the same coverage, the calibrated mixture's 80% interval is 94% on California, 98% on diamonds, 85% on bike rentals, and 102% on abalone.
+
 ### Coverage within groups
 
 One calibration holds 80% over all rows, not necessarily within each kind of row. From the same script, stage `groups`, on the same tables and splits, with one column of each table as the groups: California by distance to the ocean, diamonds by cut, abalone by sex, taxi tips by the taxi's color (yellow or green), and bike rentals by hour of day. The column is also a feature of each table. The model is `ASRRegressor(task="mixture", random_state=seed)`, scored within each group with at least 50 test rows before calibration, after one calibration of every calibration row, and after `calibrate(X_cal, y_cal, groups=column)`, which gives each group with at least 100 calibration rows a table of its own. Calibration and test rows are each 20% of the table, so a group has about as many of one as of the other. A group's coverage is its mean over the three splits; the last column is the group furthest from 80% on each split, averaged over the splits. Unlike the rest of this script, this stage ran on the M3 Pro laptop of [How it was run](#how-it-was-run), beside other jobs.
@@ -552,6 +597,24 @@ One calibration holds 80% over all rows, not necessarily within each kind of row
 - **Hour of day on bike rentals is the exception.** One calibration leaves the night hours too wide (85.1% at 3:00 and 86.6% at 4:00) and some busy hours too narrow (72.8% at 14:00, 73.9% at 7:00), with 5 of the 24 hours outside 75% to 85%. A table per hour brings those four to 80.3%, 81.0%, 75.1%, and 78.7%, and leaves 1 hour outside: 23:00, at 72.0% both ways, which moves by 7 points from split to split.
 - **A table per group is noisier, since it has fewer rows.** Each hour has about 145 calibration rows, so its own conformal level misses by about 3 points either way, and on a single split the furthest hour is 13.1 points from 80% after calibrating per hour, against 8.8 after one calibration. Averaged over the three splits, the hours are 3.6 points from 80% (root mean square) after one calibration, more than the 1.9 that 145 test rows per hour explain, and 2.7 after one per hour, which their calibration and test rows explain by chance alone. A group needs several hundred calibration rows before its table is reliably closer than one table of every row on a single split, unless one calibration is far off for it; `min_group_rows` (100 by default) is the floor below which a group reads the table of every row.
 - Calibrating per group widens an interval only where a group needed it: the bike rentals' 80% interval goes from 72.4 to 74.8 rentals on average, and the other four tables' widths change by under 1%. Over all rows the per-group tables hold 79.0% to 80.6%, as one calibration does (78.6% to 80.3%).
+
+### Per hour, beside LightGBM CQR
+
+The README's figure puts LightGBM beside the bike-rentals row above: the same stage, splits, and mixture, and LightGBM's early-stopped 0.1 and 0.9 quantile models from [Calibrated intervals](#calibrated-intervals), conformalized on the same calibration rows three ways. One margin for every row is CQR. One margin on the score divided by each row's own 0.1-to-0.9 width stretches the interval where the trees' spread is wide. A margin per hour from that hour's calibration rows is Mondrian CQR, with the same floor of 100 rows as `min_group_rows`. It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026 (`python examples/readme/intervals.py compute`), not on the laptop, and its mixture fits differ from the laptop's: one calibration leaves 3 hours outside 75% to 85%, not 5, and a table per hour also leaves 3 (12:00, 16:00, and 23:00), not 1. An hour's coverage is its mean over the three splits; the RMS is over the 24 hours; the furthest hour is the one furthest from 80% on each split, averaged over the splits.
+
+| Method | Hours outside 75% to 85% | Hourly coverage, lowest to highest | RMS points from 80% | Furthest hour on a split | All rows | 80% width, rentals |
+|---|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture`, raw | 8 | 70.8% to 84.9% | 4.7 | 11.4 | – | – |
+| Ashlar, one calibration | 3 | 73.5% to 86.5% | 2.9 | 10.4 | 79.5% | 73.5 |
+| Ashlar, a table per hour | 3 | 72.6% to 84.8% | 3.4 | 11.9 | 79.7% | 75.4 |
+| LightGBM 0.1 and 0.9 models, raw | 24 | 56.1% to 72.0% | 15.3 | 27.4 | – | – |
+| LightGBM CQR, one margin | 14 | 71.0% to 97.9% | 7.8 | 17.9 | 79.3% | 86.8 |
+| LightGBM CQR, margin scaled by width | 6 | 70.0% to 89.6% | 4.5 | 13.8 | 79.0% | 99.2 |
+| LightGBM CQR, a margin per hour | 2 | 72.1% to 86.3% | 2.8 | 10.0 | 79.6% | 92.3 |
+
+- **One calibration holds hour by hour for Ashlar's mixture and not for LightGBM's quantile models.** Both cover 79% to 80% of all rows. The mixture keeps 21 of the 24 hours inside 75% to 85%. CQR's one margin keeps 10: it is too wide at night (89.8% to 97.9% from 1:00 to 5:00, when few bikes are out) and too narrow in the day (71.0% at 14:00).
+- **The trees need the conditioning spelled out, and it costs width.** A margin per hour brings CQR to 22 of 24 hours, at 92.3 rentals wide against the mixture's 73.5 after one calibration, 26% wider. Scaling the margin by each row's width reaches 18 of 24 at 99.2 rentals, 35% wider.
+- **On this run a table per hour does not help the mixture.** It leaves 3 hours outside either way and moves the RMS from 2.9 to 3.4 points, the noise of about 145 calibration rows an hour described above; it widens the interval from 73.5 to 75.4 rentals.
 
 ## Count heads
 
@@ -597,6 +660,21 @@ Bold is the best in its column per target; NLL ties within 0.01.
 - **On abalone the count heads lose.** Rings vary less than their mean once the shell measurements are known, and neither a Poisson nor a negative binomial can be narrower than a Poisson. Their 80% intervals hold 96% of rings and are 70% wider than the mixture's. Use `gaussian` or `mixture` for an underdispersed count.
 - **Zero inflation helps only where there are zeros.** It ties the plain negative binomial on log mass everywhere and helps CRPS only on the casual counts.
 
+### Against a negative binomial around LightGBM's mean
+
+The fix a LightGBM user would reach for when the Poisson is too narrow: keep the Poisson objective's mean and put a negative binomial around it, with one dispersion `d` (variance = mean + d × mean²) fitted by maximum likelihood on the early-stopping slice. It comes out at 0.042 on bike rentals and 0.0034 on taxi pickups. From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py), stage `counts`, on the same three splits, scored the same way.
+
+| Target | Model | CRPS ↓ | NLL ↓ | 80% coverage | 80% width |
+|---|---|---:|---:|---:|---:|
+| Bike rentals, all | Ashlar `negative_binomial` | **16.56 ± 0.52** | **4.50** | 80% | 71 |
+| | LightGBM Poisson mean, one negative binomial dispersion | 18.28 ± 0.11 | 4.63 | 86% | 104 |
+| | LightGBM, Poisson objective | 18.42 ± 0.23 | 6.52 | 54% | 31 |
+| Taxi pickups | Ashlar `negative_binomial` | **314.7 ± 5.5** | **7.83** | 76% | 1,231 |
+| | LightGBM Poisson mean, one negative binomial dispersion | 362.3 ± 14.8 | 8.26 | 88% | 2,234 |
+| | LightGBM, Poisson objective | 397.8 ± 5.9 | 21.12 | 24% | 304 |
+
+One dispersion closes most of the gap in log mass, 4.63 against the head's 4.50 on bike rentals and 8.26 against 7.83 on pickups, and less of the gap in CRPS, 18.28 against 16.56 and 362.3 against 314.7. Its intervals now miss the other way: they hold 86% and 88% of counts and are 46% and 81% wider than the head's, since one dispersion has to serve every hour, steady or not. The head fits a dispersion for every row.
+
 ## Hurdle head
 
 From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi tips from the seaborn `taxis` table, 6,383 trips, 35.8% with no tip, payment type and total dropped. Five random 80/20 splits, seeds 0 to 4, mean ± standard error. Every model is `ASRRegressor(task=...)` with no other arguments. CRPS is from 2,000 draws of `predict_dist`; `P(no tip)` is `cdf(0)`, which for a smooth head is the mass it puts at or below zero; the interval is the uncalibrated 80% one.
@@ -609,6 +687,90 @@ From [`examples/benchmark_hurdle.py`](../examples/benchmark_hurdle.py). NYC taxi
 | `hurdle`, gamma | 0.867 ± 0.015 | **0.204 ± 0.003** | 93.2% | 4.00 |
 
 The hurdle answers "will this trip be tipped at all" best, with a Brier score 15% below the mixture's, because it is the only head that puts a real atom at zero. On the whole distribution it ties the mixture: the gamma hurdle's CRPS is within a standard error of it. Its 80% intervals hold 93% to 95% of tips, because every interval that starts at zero contains all the zeros; read the hurdle's intervals as at least their coverage, and ask for `dist.cdf(0)` when the zero is the question.
+
+### Against LightGBM's two-model hurdle
+
+A LightGBM user builds a hurdle from two models: a classifier for P(tip > 0), and a regressor on the tipped trips, either with a gamma objective and one shape fitted on the early-stopping slice, or on the log tip with a constant normal. Composed, they give a distribution with an exact zero. From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py), stage `zero`, on the same five splits, mean ± standard error. The NLL is the negative log of the mass at $0 for an untipped trip and of the density for a tipped one.
+
+| Model | CRPS, $ ↓ | Brier of P(no tip) ↓ | NLL ↓ | 80% interval holds | Width, $ |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `hurdle`, gamma | 0.867 ± 0.015 | 0.204 ± 0.003 | 1.489 ± 0.012 | 93.2% | 4.00 |
+| Ashlar `hurdle`, lognormal | 0.892 ± 0.017 | 0.207 ± 0.002 | 1.648 ± 0.038 | 94.5% | 4.13 |
+| Ashlar `mixture` | 0.863 ± 0.022 | 0.239 ± 0.005 | — | 84.8% | 3.59 |
+| LightGBM classifier + gamma regressor | **0.856 ± 0.009** | **0.200 ± 0.003** | **1.487 ± 0.011** | 93.3% | 4.01 |
+| LightGBM classifier + log-tip regressor | 0.879 ± 0.009 | **0.200 ± 0.003** | 1.643 ± 0.023 | 95.0% | 4.43 |
+| LightGBM mean + constant normal | 0.982 ± 0.017 | 0.238 ± 0.006 | — | 86.6% | 4.70 |
+
+**The trees' hurdle ties Ashlar's.** With a gamma for the amount in both, the pair's CRPS is 0.856 against 0.867 and its Brier score 0.200 against 0.204, differences about the size of their standard errors, and the NLL is level at 1.487 against 1.489. What the head saves is the assembly: one model, one `predict_dist`, and draws and quantiles with the zero in them. A mean with a normal cannot say "no tip" at all; its P(no tip) is the mass it puts below zero, with a Brier score of 0.238.
+
+## Spikes, caps, and skew
+
+From [`examples/benchmark_shapes.py`](../examples/benchmark_shapes.py). Four targets whose shape a tree's normal cannot take, each against LightGBM's mean with a constant normal (its scale the residual standard deviation on the early-stopping slice) and CatBoost `RMSEWithUncertainty` (a mean and a variance per row, early-stopped on the same slice); on the claim costs, also LightGBM with a gamma objective. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments except the histogram's 48 bins. CRPS is from 2,000 draws per row; the 80% intervals are uncalibrated; mean ± standard deviation over the splits.
+
+```bash
+pip install lightgbm xgboost catboost pyreadr
+JAX_PLATFORMS=cpu python examples/benchmark_shapes.py --stage all
+python examples/benchmark_shapes.py --stage report
+```
+
+### freMTPL2 cost per claim, at four fixed amounts
+
+The 24,944 claims of French motor insurance on the three splits of [Monotone constraints on freMTPL2](#monotone-constraints-on-fremtpl2), the log of the average cost per claim from the policy's features. 41.5% of claims sit at four amounts, €1,128.00, €1,128.12, €1,172.00, and €1,204.00, and 18.2% within 1% of €1,204 alone. The last two columns are the mass each model puts within 1% of €1,204 and between the four amounts widened by 1%.
+
+| Model | NLL of the log cost ↓ | CRPS of the log cost ↓ | 80% interval holds | Width | Within 1% of €1,204 | At the four amounts |
+|---|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.6761 ± 0.0053** | **0.5383 ± 0.0047** | 80.0% | 2.543 | 7.6% | 32.9% |
+| Ashlar `gaussian` | 1.4999 ± 0.0139 | 0.5791 ± 0.0052 | 83.5% | 2.818 | 0.7% | 3.1% |
+| LightGBM, gamma objective on the cost | 1.7458 ± 0.0329 | 0.6151 ± 0.0228 | 88.3% | 3.701 | 0.6% | 2.5% |
+| LightGBM on the log cost + constant normal | 1.5206 ± 0.0070 | 0.5841 ± 0.0046 | 83.2% | 2.828 | 0.7% | 3.0% |
+| CatBoost `RMSEWithUncertainty` on the log cost | 1.5011 ± 0.0139 | 0.5763 ± 0.0050 | 82.4% | 2.691 | 0.8% | 3.2% |
+
+The mixture puts a third of its mass at the four amounts, where 41.5% of the claims are; every smooth distribution puts about 3% there. Its NLL is 0.676 against 1.501 for CatBoost, the best of the trees, and its CRPS 0.538 against 0.576. LightGBM's gamma objective, with one shape for every claim, scores worst.
+
+### California housing, capped at $500,001
+
+The 20,640 block groups of the 1990 census, median house value in $100,000 from the other columns, three random 80/20 splits. The table caps the value at $500,001: 4.7% of block groups sit at the cap, and 45.9% of the 1,199 with a median income of $70,000 or more. The Brier score is for P(within $10,000 of the cap or above) against whether the block group is at the cap; "past the cap" is the mass more than $10,000 above it, where no block group is.
+
+| Model | CRPS ↓ | NLL ↓ | 80% holds | Width | Brier, at the cap ↓ | Past the cap | Income ≥ $70k: CRPS ↓ | Brier ↓ | Past the cap |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.2061 ± 0.0025** | 0.081 ± 0.060 | 75.9% | 0.814 | **0.0186 ± 0.0003** | 0.09% | **0.203 ± 0.015** | **0.092 ± 0.007** | 0.6% |
+| Ashlar `flow` | 0.2109 ± 0.0021 | **0.034 ± 0.016** | 77.1% | 0.860 | 0.0199 ± 0.0004 | 0.11% | 0.215 ± 0.023 | 0.102 ± 0.010 | 0.1% |
+| Ashlar `histogram`, 48 bins | 0.2200 ± 0.0030 | 0.298 ± 0.014 | 81.3% | 0.934 | 0.0200 ± 0.0008 | 1.42% | 0.251 ± 0.016 | 0.105 ± 0.004 | 14.0% |
+| LightGBM mean + constant normal | 0.2357 ± 0.0028 | 0.638 ± 0.020 | 86.7% | 1.178 | 0.0250 ± 0.0016 | 1.34% | 0.273 ± 0.012 | 0.153 ± 0.008 | 18.6% |
+| CatBoost `RMSEWithUncertainty` | 0.2467 ± 0.0022 | 0.579 ± 0.025 | 78.3% | 0.985 | 0.0264 ± 0.0023 | 1.29% | 0.282 ± 0.013 | 0.169 ± 0.015 | 16.9% |
+
+A normal is symmetric, so where the cap binds it spills past it. In the block groups earning $70,000 or more, LightGBM's normal puts 18.6% of its mass more than $10,000 above the cap and CatBoost's 16.9%; the mixture puts 0.6% there and stacks the rest at the cap, with a Brier score of 0.092 against 0.153 for whether a block group sits there. The histogram's fixed bins spill too (14.0%). LightGBM's constant width beats CatBoost's per-row variance on this table, 0.236 against 0.247 in CRPS. The mixture's uncalibrated 80% interval holds 75.9%; [`calibrate`](heads.md#calibrated-intervals) takes it to 80.6% on this table ([calibrated intervals](#calibrated-intervals)).
+
+### Diamonds, price in $1,000
+
+The 12,000-row sample of [Distributions on smaller tables](#diamonds-price-in-1000-12000-row-sample), three random 80/20 splits. The last column is the mass each model puts below $0 for the cheapest quarter of stones.
+
+| Model | CRPS ↓ | NLL ↓ | 80% holds | Width | Below $0, cheapest quarter |
+|---|---:|---:|---:|---:|---:|
+| Ashlar `mixture` | **0.2042 ± 0.0078** | **-0.081 ± 0.057** | 80.5% | 0.915 | 0.0% |
+| Ashlar `flow` | 0.2119 ± 0.0236 | -0.060 ± 0.106 | 79.0% | 0.897 | 0.2% |
+| LightGBM mean + constant normal | 0.2849 ± 0.0118 | 0.914 ± 0.077 | 90.4% | 1.607 | 13.7% |
+| CatBoost `RMSEWithUncertainty` | 0.2250 ± 0.0064 | 0.113 ± 0.055 | 77.5% | 0.915 | 0.0% |
+
+Here CatBoost's per-row variance does most of the work: it narrows the normal for cheap stones, puts no mass below zero, and trails the mixture by 10% in CRPS. The constant width is what hurts the plain LightGBM normal, which puts 13.7% of a cheap stone's mass below $0.
+
+### NYC taxi fares, at the $52 flat fare
+
+The seaborn `taxis` table, 6,383 trips with zones; the fare from the zones, boroughs, hour, weekday, passengers, and cab colour, with distance, tolls, tip, and total left out. Every trip between JFK and Manhattan, 110 of them, ran at the $52 flat fare. Three random 80/20 splits; the last three columns are on the 20 to 27 JFK trips in each test set.
+
+| Model | CRPS, $ ↓ | NLL ↓ | 80% interval holds | Width, $ | Within $0.50 of $52 | Within $2 of $52 | CRPS on JFK trips, $ ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Ashlar `histogram`, 48 bins | 3.837 ± 0.033 | 3.075 ± 0.006 | 80.1% | 16.32 | 14.6% | 36.2% | 7.15 ± 2.35 |
+| Ashlar `mixture` | 2.961 ± 0.175 | **2.931 ± 0.095** | 74.0% | 9.82 | 7.5% | 29.1% | **2.19 ± 0.29** |
+| Ashlar `flow` | 3.824 ± 0.093 | 3.128 ± 0.029 | 73.3% | 13.61 | 7.9% | 30.3% | 2.69 ± 0.32 |
+| LightGBM mean + constant normal | 3.146 ± 0.061 | 3.275 ± 0.024 | 90.9% | 18.04 | 4.9% | 19.4% | 2.54 ± 0.35 |
+| CatBoost `RMSEWithUncertainty` | **2.762 ± 0.082** | 3.032 ± 0.023 | 82.1% | 11.35 | 5.2% | 20.7% | 2.50 ± 0.45 |
+
+**CatBoost wins this one.** Its per-row variance has the best CRPS over all trips, 2.76 against the mixture's 2.96, and no model learns the flat fare: on trips that all paid exactly $52, the histogram puts the most mass within 50 cents of it, 14.6%, against about 5% for the trees. With 83 to 90 JFK trips in a training set, the zones do not pin the fare down. The mixture is closest on those trips, CRPS 2.19 against 2.50, and has the best log likelihood overall.
+
+### The README's shapes figure
+
+[`examples/readme/shapes.py`](../examples/readme/shapes.py) refits split 0 of three of these runs and draws one held-out slice of each: the 256 hours LightGBM's Poisson puts at 350 to 450 bike rentals, every held-out claim, and the 235 block groups earning $70,000 or more. A model's line is its CDF across each bin averaged over the slice's rows; the numbers over the tiles are the three-split means above.
 
 ## Chained claim counts and costs
 
@@ -790,7 +952,7 @@ Two columns whose correlation is +0.9 in one regime and -0.9 in the other, the r
 
 From [`examples/benchmark_observed_real.py`](../examples/benchmark_observed_real.py): the questions of [the section above](#labels-that-say-what-was-observed), asked of real tables. The clinical tables and the drives carry their own censoring. For the sold-out shelves and the meter readings, the censoring or the grouping is applied to values that were recorded exactly, so every fit can still be scored against them. Each stage ran alone on the M3 Pro laptop of [How it was run](#how-it-was-run), beside a macOS background process that used up to one core, because two jobs at once make XGBoost's threads spin and multiply its CPU seconds. CPU seconds count every thread of the process. XGBoost 3.4.1, LightGBM 4.7.0, scikit-survival 0.28.0, pycox 0.3.0 on torch 2.15.0, and JAX 0.12. Every Ashlar model is `ASRRegressor(task=...)` with no other arguments but a seed, and for the meter readings the weekday and the day of the year marked as cyclical.
 
-In short: censored sales and irregular meter readings teach the model nearly what the true values would have, as in the simulations, while weekly totals cannot place the load within the week. On survival, the `mixture` head, untuned, has a better likelihood than tuned XGBoost AFT on two clinical tables of three and ties on the third, but on drive failures with delayed entry the usual workaround of fitting the days watched, with the age as a feature, beats Ashlar's truncated likelihood.
+In short: censored sales and irregular meter readings teach the model nearly what the true values would have, as in the simulations, while weekly totals cannot place the load within the week. On the sold-out shelves, though, XGBoost's AFT model fitted to the same censored sales is ahead of every Ashlar fit, its orders costing 4.7% less than those of Ashlar's fit to the true demand. On survival, the `mixture` head, untuned, has a better likelihood than tuned XGBoost AFT on two clinical tables of three and ties on the third, but on drive failures with delayed entry the usual workaround of fitting the days watched, with the age as a feature, beats Ashlar's truncated likelihood.
 
 ### Survival on three clinical tables
 
@@ -829,6 +991,12 @@ XGBoost's CPU seconds are for its grid of 42 fits. One fit at the setting the gr
 - **A single log-normal does not fit SUPPORT.** The `gaussian` head passes D-calibration on no split there, and neither does AFT, whose one error family with one spread for every row is less flexible still. The mixture passes on 4 of 5. On METABRIC and GBSG every uncalibrated model passes on at least 4 splits of 5. Cox and Kaplan-Meier, whose baseline curves assume no shape, pass everywhere.
 - **Calibrating on 15% of the training rows helps D-calibration only where the head was wrong.** On SUPPORT it brings the `gaussian` from a D-calibration χ² of 65.9 to 13.9; on METABRIC and GBSG, with 230 to 270 calibration rows, it fails more splits than the uncalibrated head (2 and 3 passing of 5, against 5 and 4).
 - **Ashlar's one fit costs less than tuning AFT, and more than AFT once tuned.** Its 5 to 14 CPU seconds per fit are a quarter to a half of AFT's grid, and 10 to 25 times one AFT fit at the chosen setting. Without its grid AFT has no setting: its likelihood depends on the error family and the spread, which it does not learn.
+
+#### The README's survival figure
+
+[`examples/readme/survival.py`](../examples/readme/survival.py) reruns the five SUPPORT splits for the README's figure on the current code, in a cloud container with 4 CPUs: the `mixture` head and XGBoost AFT on its 42-fit grid, split and scored as above. The results match the table. The mixture's NLL of the log time is 1.733 ± 0.018 against AFT's 1.874 ± 0.010, its concordance 0.623 ± 0.009 against 0.623 ± 0.010, and its integrated Brier score 0.1998 ± 0.0033 against 0.2049 ± 0.0033. It passes D-calibration on 4 of 5 splits, with a χ² of 12.8 ± 5.1, against 0 of 5 and 46.9 ± 12.0 for AFT.
+
+On the first split the script also reads every test patient's survival curve over five years. The mixture's curves cross, each lying at least 0.02 above the other somewhere, for 38% of the pairs among 400 test patients. AFT's never cross: each patient's curve is the same error family with the same spread, shifted along log time, so one patient's risk is above another's at every time or at none.
 
 ### Drive failures with delayed entry
 
@@ -870,6 +1038,20 @@ The `mixture` and `hurdle` heads are each fitted four ways, as in the simulation
 - **Fitting sales learns demand that is too low**, as in the simulation: the 90% quantile of a fit to sales is above the true demand on 68% to 72% of days, and LightGBM's on 67%.
 - **Every fit holds less of the last 20 days than it promises, the oracle included.** The oracle's 90% quantile holds 82% to 85% of the test days, and its 80% interval, calibrated on days 60 to 69, holds 73%, so the last 20 days differ from the 70 before them. The censored fits track the oracle there (81% to 88%, and 71% to 76% after calibration); the other fits stay 13 to 15 points below it after calibration, since they are calibrated on capped sales.
 - **Censoring costs about what the oracle's fit costs**: 111 to 119 CPU seconds against 109 to 113.
+
+#### XGBoost AFT on the censored sales
+
+XGBoost's accelerated failure time model reads a censored label as a lower and an upper bound per row, so it can fit the sold-out days as censored too: `[sales + shift, sales + shift]` on a day that kept stock, `[sales + shift, inf)` on one that sold out. AFT models the log of its label and demand can be zero, hence the shift: 1, which makes the label the log of one plus the demand, or a tenth of the mean training sales. A shift leaves the label's density unchanged, so the likelihoods of the two are comparable. Its grid is the two shifts, the three error families, depths 3 and 6, and eleven spreads from 0.1 to 3: 132 fits, each early stopped on the censored sales of days 60 to 69, which also choose the fit with the best likelihood. It is scored as above, on the same three seeds, and its order cost is above the cost of the `mixture` fitted to the true demand.
+
+| Model | Trained on | NLL ↓ | CRPS ↓ | Below the 90% quantile | Order cost above the oracle's ↓ | CPU seconds |
+|---|---|---:|---:|---:|---:|---:|
+| XGBoost AFT | censored | 5.285 ± 0.028 | 0.273 ± 0.007 | 87.8% ± 0.7% | −4.7% ± 1.4% | 565 |
+
+The grid chose a shift of 1, normal errors, and a spread of 0.2 on every seed, with depth 3 on two seeds and 6 on the third. One fit at its choice took 4.5 CPU seconds of the grid's 565.
+
+- **The one tree that reads censoring is ahead on this table.** Its orders cost 4.7% less than the mixture oracle's, less on every seed (3.6% to 6.3%), against 4.0% more for the censored `mixture` and 5.2% more for the censored `hurdle` on the same yardstick. Its CRPS is 7% below the censored mixture's, and its 90% quantile is above the true demand on 87.8% of days against 81.3%. Its NLL, 5.285, is level with the censored `hurdle`'s 5.280 and 0.09 nats ahead of the censored mixture's.
+- **The gap is not the censoring.** XGBoost's censored fit also beats Ashlar's fits to the true demand, whose CRPS is 0.283 to 0.284, so on these features its trees predict demand better than Ashlar's default network does, censored or not. Reading the sold-out days as censored is what both need: every fit that reads them as demand, or drops them, orders at a cost 12% to 19% above its oracle's.
+- **Its grid costs about five Ashlar fits, and one tuned fit costs a twenty-fifth of one**: 565 CPU seconds for 132 fits, against 111 to 119 for each censored Ashlar fit, and 4.5 for one fit at the setting the grid chose.
 
 ### Daily loads from meter readings
 
@@ -1148,6 +1330,50 @@ Seeds 0 to 2, 80/20 split, the `mixture` head. Cost against the likelihood fit's
 
 The hybrid is a little cheaper at every ratio but never by 1%. LightGBM's quantile regression, fitted per ratio, costs 6% to 23% more than the mixture's plug-in order, and more the further into the tail the order sits.
 
+### Hourly bike rentals, eight cost ratios from one fit
+
+`examples/benchmark_decide.py sweep`, for the README's figure. One `mixture` fit per split (60 epochs, `cyclical={"hr": 24}`) is read at eight critical ratios with `predict_order(X, under, over)`, a unit over costing 1 and a unit short `level / (1 - level)`. LightGBM's quantile regression is refitted at every ratio two ways: the four-ratio table's 400 trees at learning rate 0.05 with season and weather as numbers, and early-stopped (learning rate 0.05, up to 4,000 trees, 100 rounds of patience on 20% of the training rows, native categories). Seeds 0 to 2, 80/20 splits; each cell is LightGBM's newsvendor cost on the held-out hours above the one fit's, mean ± standard deviation, then each method's service level (the share of hours with demand at or below the order). It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026.
+
+| level | costs (short:over) | LightGBM, 400 trees | LightGBM, early-stopped | early-stopped trees | service: Ashlar | 400 trees | early-stopped |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.50 | 1:1 | +6.4% ± 2.3 | +0.9% ± 0.9 | 1,975 to 3,978 | 49.4% | 49.6% | 49.9% |
+| 0.60 | 1.5:1 | +8.2% ± 2.1 | +2.8% ± 1.3 | 2,068 to 3,152 | 58.7% | 58.9% | 57.4% |
+| 0.70 | 2.3:1 | +8.0% ± 1.8 | +4.3% ± 0.7 | 1,984 to 3,511 | 68.1% | 67.5% | 64.2% |
+| 0.75 | 3:1 | +7.8% ± 2.0 | +4.7% ± 1.2 | 1,449 to 2,417 | 72.9% | 71.3% | 69.1% |
+| 0.80 | 4:1 | +8.0% ± 0.3 | +6.2% ± 0.5 | 1,540 to 2,250 | 77.5% | 76.4% | 72.7% |
+| 0.85 | 5.7:1 | +8.5% ± 0.2 | +8.9% ± 1.5 | 725 to 1,235 | 82.5% | 81.6% | 78.9% |
+| 0.90 | 9:1 | +12.1% ± 1.8 | +13.4% ± 2.5 | 761 to 1,017 | 87.8% | 86.6% | 83.9% |
+| 0.95 | 19:1 | +22.8% ± 3.6 | +28.4% ± 5.3 | 466 to 670 | 93.4% | 92.0% | 90.3% |
+
+The 400-tree column reproduces the four-ratio table (+6.1%, +7.5%, +12.2%, and +22.6% there). Early stopping closes most of the gap near the median, where LightGBM is level with the one fit (+0.9% ± 0.9 at 1:1), but not in the tail: it stops earlier there and costs 28% more at 19:1. Taking LightGBM's better setting at each ratio, it costs 1% to 23% more than reading the one fit, more the further into the tail, and needs a model for every ratio. The early-stopped models also order too little in the tail: 90.3% service at 0.95 against the one fit's 93.4%.
+
+## Explanations beside SHAP
+
+`examples/benchmark_explain.py`. On hourly bike rentals, seeds 0 to 2, 80/20 splits, a `mixture` head (40 epochs) is fitted and `explain` attributes four numbers of each of 2,000 held-out hours to the features: the mean, the median, the width of the 80% interval, and P(rentals > 500), with 2,000 training rows as the background. Beside it is the gradient-boosting way, SHAP's `TreeExplainer` on early-stopped LightGBM (learning rate 0.05, up to 4,000 trees, 100 rounds of patience): an L2 model for the mean; SHAP of a 0.9 quantile model minus SHAP of a 0.1 quantile model for the width, since SHAP values add; and a classifier of rentals > 500, in probability, interventional against training rows. It ran in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026. Each `explain` call took 15 to 26 seconds on the 2,000 rows at 256 steps; SHAP on the four LightGBM models took about 30 seconds.
+
+There is no true attribution to score against, so this shows what each method can attribute, not a score. Each cell is a feature's mean absolute attribution, mean over the splits, in rentals (mean and width) or probability (P(rentals > 500)), with its share of the column in brackets. The median's column is left out: it matches the mean's (Spearman 1.00).
+
+| feature | mean: LightGBM SHAP | mean: Ashlar | 80% width: LightGBM SHAP of 0.9 − 0.1 | 80% width: Ashlar | P(rentals > 500): LightGBM classifier SHAP | P(rentals > 500): Ashlar |
+|---|---:|---:|---:|---:|---:|---:|
+| hour | 104 (40%) | 104 (34%) | 42.2 (37%) | 41.5 (29%) | 0.069 (45%) | 0.130 (41%) |
+| year | 42.3 (16%) | 51.7 (17%) | 17.9 (16%) | 14.9 (10%) | 0.029 (19%) | 0.051 (16%) |
+| working day | 19.6 (8%) | 33.2 (11%) | 10.6 (9%) | 24.6 (17%) | 0.011 (7%) | 0.038 (12%) |
+| temperature | 27.3 (11%) | 27 (9%) | 5.78 (5%) | 9.33 (7%) | 0.009 (6%) | 0.020 (6%) |
+| weather | 8.7 (3%) | 18.7 (6%) | 3.94 (3%) | 16.1 (11%) | 0.003 (2%) | 0.014 (4%) |
+| humidity | 11.6 (4%) | 16.9 (6%) | 11.4 (10%) | 8.49 (6%) | 0.007 (4%) | 0.014 (4%) |
+| month | 8.16 (3%) | 14.4 (5%) | 5.6 (5%) | 5.86 (4%) | 0.005 (3%) | 0.012 (4%) |
+| season | 13.2 (5%) | 13 (4%) | 2.74 (2%) | 5.35 (4%) | 0.003 (2%) | 0.011 (4%) |
+| weekday | 8.23 (3%) | 11.7 (4%) | 3.61 (3%) | 8.12 (6%) | 0.005 (3%) | 0.011 (4%) |
+| feels-like temperature | 11.9 (5%) | 10.4 (3%) | 8 (7%) | 4.87 (3%) | 0.009 (6%) | 0.011 (3%) |
+| wind speed | 3.21 (1%) | 4.29 (1%) | 1.6 (1%) | 1.98 (1%) | 0.001 (1%) | 0.003 (1%) |
+| holiday | 0.767 (0%) | 1.17 (0%) | 0.992 (1%) | 0.696 (0%) | 0.000 (0%) | 0.001 (0%) |
+
+- **Both put hour first, and year second in every column but Ashlar's width, where working day is second.** On the mean they agree closely (Spearman 0.85 between the two columns, averaged over the splits) and give hour the same 104 rentals; on P(rentals > 500) the Spearman is 0.80.
+- **The width ranks the features differently from the mean.** In Ashlar's explanation working day takes 17% of the width against 11% of the mean, and weather 11% against 6%, while year falls from 17% to 10%. SHAP of LightGBM's quantile models ranks the width differently again (Spearman 0.73 with Ashlar's): humidity third and weather eighth.
+- **LightGBM needs a model per question.** The width takes two quantile models, and the 0.9 model fell below the 0.1 model on 0.35% of the held-out hours (0.29% to 0.43% by split); the tail takes a classifier for each threshold. Ashlar reads all of them off one fit.
+- **Two settings of `explain` matter here.** The hour enters both models as a plain number. With `cyclical={"hr": 24}` the baseline of its sine and cosine columns is their separate medians, near the centre of the circle, an hour the network never saw; on a first run that way, one split gave hour twice the attribution of the mean that the other two did (231 rentals against 114 and 133). And `steps=256`: the straight path from the baseline hour (12:00) to a row's hour crosses the rush-hour peaks, and at the default 32 steps the integral missed 43% of how far P(rentals > 500) moved from the baseline on one split. At 256 steps the gap (`numeric_gap()`) is 0.8% to 4.5% of that move.
+- The two kinds of attribution stand on different footings. SHAP's are against the average prediction over the background; `explain`'s are against the row with every numeric feature at its median, and each categorical column (season, weather) is set to every reference category in turn, with equal weight.
+
 ## Missing and noisy inputs
 
 `examples/benchmark_inputs.py`, issue #35's test. A `mixture` head with default settings is fitted on 64% of the rows and calibrated on 11% (complete rows), then tested on 25%. Seeds 0 to 2, means. Run on an M3 Pro laptop, CPU only, in 3.5 minutes. "Median" is the default fill; "draws" is `with_uncertain_inputs(32)`.
@@ -1168,6 +1394,32 @@ A share of the test rows' numeric cells is masked at random.
 | bike rentals | 50% | 48.3% | 74.8 | 6.328 | 83.5% | 187 | 5.148 |
 
 The median's interval keeps its width and loses its coverage, down to 38% on California at half the cells. The draws' interval widens with the share missing and holds 81% to 84%, a little over, since the copula of the numeric features does not see the categorical ones. At 30% missing on California, the issue's target number, the draws cover 82.4%, against 48.3% for the median.
+
+### Masked cells beside LightGBM
+
+The README's figure reruns the masked cells with LightGBM beside them, in a 4-core Linux container with 15 GB, CPU only, on November 2, 2026 (`python examples/benchmark_inputs.py mask --seeds 0 1 2`), so its Ashlar numbers differ a little from the laptop's above (California at 30%: 82.9% against 50.5% for the median fill, there 82.4% against 48.3%). LightGBM is two early-stopped quantile models at 0.1 and 0.9 with CQR, two ways. Given NaN: fitted and calibrated on the same complete rows as Ashlar, then given NaN for a blank cell at test time. Trained with blanks: fitted and calibrated with the same share of its own rows' numeric cells blanked at random, refitted for each share. Each cell is the 80% interval's coverage · its mean width · the pinball loss averaged over the 0.1, 0.5, and 0.9 quantiles, mean of seeds 0 to 2. California's width is in $100k.
+
+California:
+
+| blank cells | median fill | `with_uncertain_inputs(32)` | LightGBM given NaN | LightGBM trained with blanks |
+|---:|---:|---:|---:|---:|
+| 0% | 80.2% · 0.94 · 0.098 | 80.3% · 0.94 · 0.097 | 80.4% · 1.01 · 0.101 | – |
+| 10% | 66.9% · 1.04 · 0.177 | 81.3% · 1.23 · 0.116 | 73.6% · 1.22 · 0.179 | 79.3% · 1.14 · 0.116 |
+| 30% | 50.5% · 1.19 · 0.288 | 82.9% · 1.78 · 0.155 | 68.0% · 1.55 · 0.262 | 79.7% · 1.41 · 0.141 |
+| 50% | 40.6% · 1.28 · 0.362 | 83.3% · 2.31 · 0.196 | 66.8% · 1.75 · 0.302 | 79.9% · 1.69 · 0.167 |
+
+Bike rentals:
+
+| blank cells | median fill | `with_uncertain_inputs(32)` | LightGBM given NaN | LightGBM trained with blanks |
+|---:|---:|---:|---:|---:|
+| 0% | 80.2% · 74 · 7.8 | 80.2% · 74 · 7.8 | 80.9% · 87 · 8.4 | – |
+| 10% | 72.4% · 74 · 10.8 | 81.6% · 98 · 9.6 | 66.9% · 84 · 14.8 | 80.4% · 111 · 10.5 |
+| 30% | 58.7% · 74 · 17.5 | 82.8% · 143 · 13.2 | 48.0% · 77 · 26.9 | 79.6% · 140 · 13.3 |
+| 50% | 48.3% · 74 · 24.0 | 83.1% · 186 · 17.0 | 36.4% · 68 · 38.4 | 80.8% · 168 · 16.0 |
+
+- **LightGBM given NaN does not hold.** A feature with no blanks in training has no learned direction for a missing value, so LightGBM reads NaN as zero. Its coverage falls to 68% on California and 48% on bike rentals at 30% blank.
+- **LightGBM trained with blanks holds about 80% at every share, and on California it is narrower.** At 30% blank its interval is 1.41 wide against 1.78 for the draws, with a lower pinball loss (0.141 against 0.155). On bike rentals the two are level (140 against 143 rentals, pinball 13.3 against 13.2). It needs the share of blanks in advance and a fit for each share, and it drifts below 80% on the rows with the most blanks: at 10% blank, California rows with three or more blank cells are covered 77.3% of the time, against 81.4% by the draws.
+- `with_uncertain_inputs(32)` needs no refit and covers 81% to 83% at every share, a little over 80% for the reason above.
 
 ### Noisy cells
 

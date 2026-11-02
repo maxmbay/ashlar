@@ -10,8 +10,17 @@ the predictive distributions of the completions.
 ``mixture`` head with default settings is fitted on 64% of the rows,
 calibrated on 11% (complete rows, as a user would), and tested on 25%,
 where 0, 10, 30, and 50% of the numeric cells are masked at random.
-Scored: coverage of the calibrated 80% interval, its mean width, and the
-NLL of the test target, with median imputation and with 32 draws.
+Scored: coverage of the calibrated 80% interval, its mean width, the
+pinball loss over the 0.1, 0.5, and 0.9 levels, and the NLL of the test
+target, with median imputation and with 32 draws. Beside them, the tree's
+way (``lightgbm``): early-stopped LightGBM quantile models at 0.1, 0.5,
+and 0.9 fitted on the same rows, the 80% interval conformalized on the
+same calibration rows (CQR), and NaN in the masked cells, which LightGBM
+routes itself. And the tree's best case (``lightgbm_masked``): the same
+models fitted and conformalized on rows with the same share of cells
+masked at random, so every split learns where a blank goes, one fit per
+share. Coverage and width are also kept by the number of blank cells in
+the row.
 
 **noise** (same tables and splits). Gaussian noise with a standard
 deviation of 0.25, 0.5, and 1 times the column's own is added at test time to
@@ -46,8 +55,8 @@ from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from benchmark_readme import california
-from benchmark_uncertainty import bike
+from benchmark_readme import _align_categories, _fit_gbt, california
+from benchmark_uncertainty import _conformal, bike
 
 from ashlar import ASRRegressor
 
@@ -55,6 +64,9 @@ RATES = (0.0, 0.1, 0.3, 0.5)
 NOISE = (0.25, 0.5, 1.0)
 DRAWS = 32
 EPOCHS = 60
+LEVELS = (0.1, 0.5, 0.9)
+# Rows are also scored by how many of their numeric cells are blank: 0, 1, 2, and 3 or more.
+BLANKS = (0, 1, 2, 3)
 TABLES = {
     "california": (california, "median_income", {}),
     "bike": (lambda: bike("cnt"), "temp", {"cyclical": {"hr": 24}}),
@@ -68,25 +80,88 @@ def _split(X, y, seed):
 
 
 def _fit(table, seed):
+    model, (X_fit, _, X_test, y_fit, _, y_test), seconds = _fit_split(table, seed)
+    return model, X_fit, X_test, y_test, seconds
+
+
+def _fit_split(table, seed):
+    """The calibrated mixture, the six parts of the split, and the seconds the fit and calibration took."""
     loader, _, extra = TABLES[table]
     X, y = loader()
-    X_fit, X_cal, X_test, y_fit, y_cal, y_test = _split(X, y, seed)
+    parts = _split(X, y, seed)
+    X_fit, X_cal, _, y_fit, y_cal, _ = parts
     start = time.time()
     model = ASRRegressor(task="mixture", max_epochs=EPOCHS, random_state=seed, **extra).fit(X_fit, y_fit)
     model.calibrate(X_cal, y_cal)
-    return model, X_fit, X_test, y_test, time.time() - start
+    return model, parts, time.time() - start
 
 
 def _numeric(model):
     return [column.name for column in model.encoder_.columns if column.role == "numeric"]
 
 
-def _score(model, X, y):
+def _masked(frame, numeric, uniform, rate):
+    """``frame`` with the numeric cells whose ``uniform`` draw is below ``rate`` blank, and the blanks per row."""
+    out = frame.copy()
+    for k, name in enumerate(numeric):
+        out.loc[uniform[:, k] < rate, name] = np.nan
+    return out, (uniform < rate).sum(axis=1)
+
+
+def _pinball(quantiles, y):
+    """The quantile loss of ``quantiles`` (rows, levels) at ``LEVELS``, averaged over rows and levels."""
+    diff = np.asarray(y, dtype=np.float64)[:, None] - quantiles
+    tau = np.asarray(LEVELS)[None, :]
+    return float(np.mean(np.maximum(tau * diff, (tau - 1.0) * diff)))
+
+
+def _interval_scores(lower, upper, y, blanks):
+    inside = (y >= lower) & (y <= upper)
+    out = {"coverage": float(np.mean(inside)), "width": float(np.mean(upper - lower)), "by_blanks": {}}
+    for count in BLANKS:
+        rows = blanks >= count if count == BLANKS[-1] else blanks == count
+        if rows.any():
+            out["by_blanks"][str(count)] = {
+                "coverage": float(np.mean(inside[rows])),
+                "width": float(np.mean((upper - lower)[rows])),
+                "rows": int(rows.sum()),
+            }
+    return out
+
+
+def _score(model, X, y, blanks=None):
+    blanks = np.zeros(len(y), dtype=int) if blanks is None else blanks
     lower, upper = model.predict_interval(X, 0.8).T
     return {
-        "coverage": float(np.mean((y >= lower) & (y <= upper))),
-        "width": float(np.mean(upper - lower)),
+        **_interval_scores(lower, upper, y, blanks),
+        "pinball": _pinball(model.predict_quantiles(X, LEVELS), y),
         "nll": -float(np.mean(model.log_prob(X, y))),
+    }
+
+
+def _lightgbm(X_fit, y_fit, X_cal, y_cal, seed):
+    """Early-stopped LightGBM quantile models at ``LEVELS`` and the conformal margin of their 80% interval (CQR)."""
+    models = []
+    for tau in LEVELS:
+        model, frame = _fit_gbt("lightgbm", "regression", True, seed, X_fit, y_fit, objective="quantile", alpha=tau)
+        models.append(model)
+
+    def predict(X):
+        return np.stack([model.predict(_align_categories(frame, X)) for model in models], axis=1)
+
+    levels = predict(X_cal)
+    margin = _conformal(np.maximum(levels[:, 0] - y_cal, y_cal - levels[:, -1]), 0.8)
+    return predict, margin
+
+
+def _score_cqr(predict, margin, X, y, blanks):
+    levels = predict(X)
+    lower, upper = levels[:, 0] - margin, levels[:, -1] + margin
+    return {
+        **_interval_scores(lower, upper, y, blanks),
+        "pinball": _pinball(np.stack([lower, levels[:, 1], upper], axis=1), y),
+        "pinball_raw": _pinball(levels, y),
+        "margin": float(margin),
     }
 
 
@@ -94,23 +169,39 @@ def mask(seeds, out):
     rows = []
     for table in TABLES:
         for seed in seeds:
-            model, _, X_test, y_test, seconds = _fit(table, seed)
+            model, (X_fit, X_cal, X_test, y_fit, y_cal, y_test), seconds = _fit_split(table, seed)
             rng = np.random.default_rng(seed)
             numeric = [name for name in _numeric(model) if name in X_test.columns]
             uniform = rng.random((len(X_test), len(numeric)))
+            # The tree's own rows are masked by draws of their own, nested across shares as the test rows' are.
+            own = np.random.default_rng(1000 + seed)
+            uniform_fit, uniform_cal = own.random((len(X_fit), len(numeric))), own.random((len(X_cal), len(numeric)))
+            start = time.time()
+            trees = _lightgbm(X_fit, y_fit, X_cal, y_cal, seed)
+            tree_seconds = time.time() - start
             for rate in RATES:
-                masked = X_test.copy()
-                for k, name in enumerate(numeric):
-                    masked.loc[uniform[:, k] < rate, name] = np.nan
+                masked, blanks = _masked(X_test, numeric, uniform, rate)
                 for method, view in (("median", model), ("draws", model.with_uncertain_inputs(DRAWS, seed=seed))):
                     start = time.time()
-                    row = {"table": table, "seed": seed, "rate": rate, "method": method, **_score(view, masked, y_test)}
+                    row = {"table": table, "seed": seed, "rate": rate, "method": method, **_score(view, masked, y_test, blanks)}
                     row["seconds"] = time.time() - start
                     row["fit_seconds"] = seconds
                     rows.append(row)
-                    print(json.dumps(row), flush=True)
+                    print(json.dumps({k: v for k, v in row.items() if k != "by_blanks"}), flush=True)
+                fits = {"lightgbm": (trees, tree_seconds)}
+                if rate > 0:
+                    start = time.time()
+                    fit_masked, _ = _masked(X_fit, numeric, uniform_fit, rate)
+                    cal_masked, _ = _masked(X_cal, numeric, uniform_cal, rate)
+                    fits["lightgbm_masked"] = (_lightgbm(fit_masked, y_fit, cal_masked, y_cal, seed), time.time() - start)
+                for method, ((predict, margin), fit_seconds) in fits.items():
+                    row = {"table": table, "seed": seed, "rate": rate, "method": method,
+                           **_score_cqr(predict, margin, masked, y_test, blanks), "fit_seconds": fit_seconds}
+                    rows.append(row)
+                    print(json.dumps({k: v for k, v in row.items() if k != "by_blanks"}), flush=True)
     _save(out, "mask", rows)
-    _table(rows, "rate", "masked cells", lambda v: f"{100 * v:.0f}%")
+    _table(rows, "rate", "masked cells", lambda v: f"{100 * v:.0f}%", ("coverage", "width", "pinball", "nll"))
+    _blank_table(rows)
 
 
 def noise(seeds, out):
@@ -154,22 +245,45 @@ def shift(seeds, out):
     print(f"auc_log_density: {np.mean(values):.3f} ± {np.std(values):.3f}")
 
 
-def _table(rows, key, label, fmt):
-    methods = sorted({row["method"] for row in rows}, key=lambda m: m not in ("median", "ignored"))
-    print(f"\n| table | {label} | " + " | ".join(f"{m}: 80% coverage | {m}: width | {m}: NLL" for m in methods) + " |")
-    print("|---|---:|" + "---:|" * (3 * len(methods)))
+METRICS = {
+    "coverage": ("80% coverage", lambda v: f"{100 * v:.1f}%"),
+    "width": ("width", lambda v: f"{v:.3g}"),
+    "pinball": ("pinball", lambda v: f"{v:.3g}"),
+    "nll": ("NLL", lambda v: f"{v:.3f}"),
+}
+ORDER = ("median", "ignored", "draws", "declared", "lightgbm", "lightgbm_masked")
+
+
+def _table(rows, key, label, fmt, metrics=("coverage", "width", "nll")):
+    methods = sorted({row["method"] for row in rows}, key=ORDER.index)
+    print(f"\n| table | {label} | " + " | ".join(f"{m}: {METRICS[k][0]}" for m in methods for k in metrics) + " |")
+    print("|---|---:|" + "---:|" * (len(metrics) * len(methods)))
     for table in TABLES:
         for value in sorted({row[key] for row in rows}):
             cells = []
             for method in methods:
                 group = [r for r in rows if r["table"] == table and r[key] == value and r["method"] == method]
-                if not group:
-                    cells += ["–"] * 3
-                    continue
-                cells.append(f"{100 * np.mean([r['coverage'] for r in group]):.1f}%")
-                cells.append(f"{np.mean([r['width'] for r in group]):.3g}")
-                cells.append(f"{np.mean([r['nll'] for r in group]):.3f}")
+                for metric in metrics:
+                    values = [r[metric] for r in group if metric in r]
+                    cells.append(METRICS[metric][1](np.mean(values)) if values else "–")
             print(f"| {table} | {fmt(value)} | " + " | ".join(cells) + " |")
+
+
+def _blank_table(rows):
+    """Coverage within the rows that have 0, 1, 2, and 3 or more blank cells, at each share masked."""
+    methods = sorted({row["method"] for row in rows}, key=ORDER.index)
+    print("\n| table | masked cells | method | " + " | ".join(f"{c}{'+' if c == BLANKS[-1] else ''} blank" for c in BLANKS) + " |")
+    print("|---|---:|---|" + "---:|" * len(BLANKS))
+    for table in TABLES:
+        for rate in sorted({row["rate"] for row in rows if row["rate"] > 0}):
+            for method in methods:
+                group = [r for r in rows if r["table"] == table and r["rate"] == rate and r["method"] == method]
+                cells = []
+                for count in BLANKS:
+                    values = [r["by_blanks"][str(count)]["coverage"] for r in group if str(count) in r.get("by_blanks", {})]
+                    cells.append(f"{100 * np.mean(values):.1f}%" if values else "–")
+                if group:
+                    print(f"| {table} | {100 * rate:.0f}% | {method} | " + " | ".join(cells) + " |")
 
 
 def _save(out, stage, rows):
