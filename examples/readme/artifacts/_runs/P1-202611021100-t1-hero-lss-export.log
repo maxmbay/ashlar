@@ -1,0 +1,34 @@
+at 072960a (claude/project-thread-j36znx)
+{
+ "model": "lightgbmlss_mixture",
+ "seed": 0,
+ "scored_rows": 100000,
+ "crps": 9.143768607817638,
+ "nll": 3.0758235106251286,
+ "pinball": 4.348470108332725,
+ "coverage80": 0.78725,
+ "width80": 28.443351422426826,
+ "brier60": 0.039051153219617,
+ "on_minute": {
+  "predicted": 0.15478924968124125,
+  "observed": 0.18635,
+  "pool_predicted": 0.1511871323074903,
+  "pool_observed": 0.18533333333333332,
+  "pool_ashlar": 0.22977552996715042
+ },
+ "early": {
+  "cutoff": -15.0,
+  "pool_share": 0.0026666666666666666,
+  "pool_median_q10": -5.3513325805153285
+ },
+ "benchmark": {
+  "crps": 9.143768608116252,
+  "nll": 3.075823508542109,
+  "coverage80": 0.78725,
+  "width80": 28.443351398060532,
+  "seconds": 1201.1,
+  "trees": 734
+ }
+}
+lightgbmlss.json: 2 KB
+lightgbmlss.npz: 81 KB
