@@ -876,6 +876,37 @@ Each cell is a mean over the three splits. The last two columns score each bin o
 - **Scaling by the member spread trades coverage in range for coverage above it.** Above the range the scaled interval covers 77.2% of California's rows, with an interval 1.7 times as wide as one calibration's, and 74.3% of bike rentals'. In range it still covers 80% on average, but only 59.8% to 64.9% of the rows the members agree on most and 91.6% to 93.9% of those they disagree on most. In range most of the error is noise, which the member spread does not measure (the ranking table above), so an interval sized by the spread alone is too narrow where the members agree and too wide where they do not. Ashlar does not ship it.
 - **On diamonds nothing reaches the rows above the range.** The scaled interval, twice as wide as one calibration's, covers 18.6% of them. The members drift apart there, but the error grows far more (the RMSE 21 times, the member spread 4 times, in the shift table above), so no interval sized by their disagreement holds it. Use the spread to flag those rows, as above.
 
+### Spread past the training range
+
+Does the encoder hide the rows past the training range from the members? `numeric_scaling="robust"` ends in a smooth clip at ±3 interquartile ranges, and the quantile maps stop at the edge of the training rows, so a row far past the range reads as a row on its edge, and the members agree there. From the same script, stage `extrapolate` ([#34](https://github.com/maxmbay/ashlar/issues/34)): the splits of `localize` above, once per way of scaling the numeric columns, three times (seeds 0, 1, 2), with `tabm_piecewise(task="gaussian")`:
+
+- *quantile, clipped*: the recipe's quantile map, which stops at the edge of the training rows.
+- *quantile, linear*: `numeric_clip=None`, the same map continued past its outermost knots on a straight line. Inside the range it is the same map, so the fit is the same model up to early stopping; only the rows past the edge read differently.
+- *robust, linear*: `numeric_scaling="robust", numeric_clip=None`, the median and the interquartile range with no clip.
+- *standard*: `numeric_scaling="standard"`, the mean and the standard deviation, which never clip.
+
+Each cell is a mean over the three splits. *Growth ratio* is how many times the mean epistemic part grows above the range, divided by how many times the RMSE grows: 1 means the members' spread keeps pace with the error. The coverage columns score the 80% interval on the rows above the range, raw and after one calibration (`calibrate(X_cal, y_cal)`), and the last column the calibrated interval in range. It ran on the M3 Pro laptop of [How it was run](#how-it-was-run).
+
+| Table, shift column | Scaling | RMSE in → above | Epistemic in → above | Growth ratio | Above range, raw | Above range, calibrated | Width above, calibrated | In range, calibrated |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| California, $100k, median income | quantile, clipped | 0.461 → 0.891 | 0.090 → 0.227 | 1.31 | 64.5% | 59.0% | 1.275 | 81.3% |
+| | quantile, linear | 0.463 → 0.914 | 0.091 → 0.284 | 1.58 | 64.7% | 58.7% | 1.313 | 81.3% |
+| | robust, linear | 0.464 → 1.449 | 0.086 → 0.353 | 1.31 | 46.5% | 40.9% | 1.457 | 81.1% |
+| | standard | 0.466 → 1.374 | 0.086 → 0.430 | 1.70 | 52.1% | 45.1% | 1.538 | 81.2% |
+| Diamonds, $1,000, carat | quantile, clipped | 0.273 → 5.967 | 0.057 → 0.284 | 0.23 | 15.8% | 11.7% | 1.151 | 80.3% |
+| | quantile, linear | 0.365 → 4.693 | 0.089 → 0.493 | 0.43 | 34.9% | 24.6% | 1.833 | 80.4% |
+| | robust, linear | 0.305 → 4.525 | 0.063 → 0.562 | 0.60 | 26.5% | 18.8% | 1.674 | 79.8% |
+| | standard | 0.289 → 3.907 | 0.058 → 0.752 | 0.96 | 26.8% | 19.3% | 1.985 | 79.8% |
+| Bike rentals per hour, temperature | quantile, clipped | 41.1 → 62.3 | 9.36 → 14.96 | 1.05 | 79.9% | 70.8% | 99.0 | 80.3% |
+| | quantile, linear | 41.1 → 67.2 | 9.36 → 16.89 | 1.10 | 77.2% | 68.2% | 100.5 | 80.3% |
+| | robust, linear | 40.8 → 80.6 | 9.00 → 17.54 | 0.99 | 70.9% | 61.5% | 108.6 | 80.0% |
+| | standard | 40.4 → 84.4 | 9.30 → 19.97 | 1.03 | 68.8% | 59.3% | 105.8 | 79.5% |
+
+- **Without the clip the members spread further past the range.** On diamonds the growth ratio rises from 0.23 with the clip, where the error grows 22 times and the spread 5, to 0.60 with robust scaling and 0.96 with standard scaling. On California and bike rentals the spread already kept pace with the error under the clip, at 1.31 and 1.05, and it still does.
+- **Coverage past the range improves only where the trend goes on.** Diamonds' price keeps rising with carat past the training rows, and a model that keeps moving with carat follows it: with standard scaling the error above the range falls from 5.97 to 3.91 thousand dollars, and the 80% interval holds 26.8% of those rows instead of 15.8%, or 19.3% instead of 11.7% after calibration. California's values are capped at $500,000, and bike rentals fall in the hottest hours, so carrying the trend on overshoots: the error above the range grows by 29% to 63%, and the interval holds 12 to 18 points fewer of those rows on California and 9 to 12 fewer on bike rentals. The quantile map continued on a straight line changes least, as its slope past the edge is gentle: it stays within 3 points of the clip on California and bike rentals.
+- **Without the clip, a wild value in any column moves the model too.** Diamonds lists one 0.51-carat stone as 31.8 mm deep (`z`), 29 interquartile ranges from the median: a data error. On the third split it fell among the rows each fit holds out to stop early. Clipped, it reads as the edge of the range; unclipped, it reads as far past it, and on that split, and only there, the three unclipped fits stopped training early. Robust and standard scaling lost little, but the straight-line quantile map's fit has twice the error in range of its other two splits (0.54 against 0.28), and its wider interval is why its mean coverage above the range, 34.9%, is the highest in the table.
+- **The issue's test was a 10-point gain in that coverage.** One table of three passes it, before calibration only, and the other two lose about as much, so the clip stays the default, and the distance-aware members (SNGP, DUE) and the engression objective the issue proposed were not built. `numeric_clip=None` is there for a target known to keep its trend past the data, on features without wild values. A row past the range is better flagged than trusted: `input_log_density` ranks such rows below the test rows (see [Rows outside the training range](#rows-outside-the-training-range)).
+
 ## Decisions from the distribution
 
 `examples/benchmark_decide.py`, issue #32's test of training through a decision's cost. A newsvendor orders before demand is known; a unit short costs `under`, a unit over costs `over`, and the best order is the `under / (under + over)` quantile. Each head is trained on its likelihood (`nll`, then the plug-in order), on its likelihood plus the newsvendor cost of its own order (`hybrid`, weights 1 and 1), and on the cost alone (`cost`). Run on an M3 Pro laptop, CPU only, in 7 minutes.

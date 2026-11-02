@@ -14,7 +14,7 @@ One numeric column, a few epochs, then `predict` on a grid. The line is the fit.
 
 `fit(X, y)` with no other arguments does the following.
 
-Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. An integer column stays numeric unless you name it as a category.
+Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. `numeric_clip` sets the clip's size, and `numeric_clip=None` turns it off, along with the stop at the edge of the training range in the quantile maps, so a value past the range keeps moving the model instead of reading as the edge. That helps where a trend continues past the data and hurts where it bends or stops; [docs/benchmarks.md](benchmarks.md#spread-past-the-training-range) has both. An integer column stays numeric unless you name it as a category.
 
 Regression labels are z-scored on the training rows. `predict` maps them back. `standardize_target=False` leaves `y` alone. Classification and ordinal labels stay on their original scale.
 
