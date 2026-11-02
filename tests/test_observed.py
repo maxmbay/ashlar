@@ -380,7 +380,7 @@ def test_tasks_and_labels_that_cannot_be_scored_are_refused():
         with pytest.raises(AshlarError):
             ASRRegressor(task=task, max_epochs=1).fit(x, label)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="flow", max_epochs=1).fit(x, observed.noisy(sales, 1.0))
+        ASRRegressor(task="poisson", max_epochs=1).fit(x, observed.noisy(sales, 1.0))
     with pytest.raises(AshlarError):
         ASRRegressor(task="poisson", max_epochs=1).fit(x, observed.interval(sales - 0.5, sales + 0.5))
     model = ASRRegressor(task="poisson", max_epochs=1).fit(x, label)
@@ -550,9 +550,8 @@ def test_totals_that_cannot_be_trained_are_refused():
     x, y, week, _mean, _spread = _weekly(n_weeks=40, seed=13)
     label = observed.total(np.bincount(week, weights=y)[week], week)
     for kwargs in (
-        {"task": "mixture"},
-        {"task": "negative_binomial"},
-        {"task": "poisson", "head_kwargs": {"zero_inflated": True}},
+        {"task": "hurdle"},
+        {"task": "quantile"},
         {"task": "gaussian", "learning_rate_schedule": "surface"},
     ):
         with pytest.raises(AshlarError):
