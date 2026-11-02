@@ -6,7 +6,7 @@ This page has the benchmark results on eight large tables and detailed examples 
 - [Distribution heads](#distribution-heads)
 - [Survival analysis](#survival-analysis)
 - [Partially observed labels](#partially-observed-labels)
-- [Several outcomes in one model](#several-outcomes-in-one-model)
+- [Multivariate targets](#multivariate-targets)
 - [Random effects](#random-effects)
 - [Additive models](#additive-models)
 - [Calibrated intervals and missing inputs](#calibrated-intervals-and-missing-inputs)
@@ -123,9 +123,9 @@ loads = observed.total(reading, period)                 # a reading covers sever
 
 [Sold-out products on FreshRetailNet-50K](benchmarks.md#sold-out-shelves-on-freshretailnet-50k) · [Daily loads from meter readings](benchmarks.md#daily-loads-from-meter-readings) · [Several products that sell out together](benchmarks.md#several-products-that-sell-out-together) · [Label types](observed.md)
 
-## Several outcomes in one model
+## Multivariate targets
 
-A model can predict several outcomes jointly. With `task="chain"`, each outcome gets its own head, and each head is conditioned on the outcomes before it, so the model has a single likelihood for all of them. The first example is motor insurance, where the outcomes are the number of claims a policy makes in a year and the average cost per claim.
+A model can predict several targets jointly. With `task="chain"`, each target gets its own head, and each head is conditioned on the targets before it, so the model has a single likelihood for all of them. The first example is motor insurance, where the targets are the number of claims a policy makes in a year and the average cost per claim.
 
 ![Left: for one French motor insurance policy, the chained model's probabilities of 0 to 4 claims as bars, and for each count of one or more, the predicted distribution of the cost per claim, whose mean rises from €1,311 for one claim to €1,858 for four. Right: the share of 135,599 held-out policies whose total cost for the year is above each amount from €1 to €1M, on log axes, observed and from three models: the chained model, a count model and a cost model built by hand, and LightGBM with a Poisson and a gamma objective. All three model curves are close to the observed one, and the hand-built curve is almost on top of the chained model's.](images/readme/claims-chain.png)
 

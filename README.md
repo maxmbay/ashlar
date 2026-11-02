@@ -12,7 +12,7 @@
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-147a72"></a>
 </p>
 
-Ashlar is a Python library for regression and classification on tabular data. It trains neural networks with JAX, and for regression it predicts a probability distribution for each row instead of a single value. You choose the distribution family to suit the target, for example a negative binomial for counts, a mixture of normals for skewed or multimodal targets, or a hurdle model for targets with many zeros. Labels do not have to be exact. A survival time can be censored, a day's sales can be capped by a stock-out, and a value can be known only as a range or as a total over several rows.
+Ashlar is a Python library for regression and classification on tabular data. It trains neural networks with JAX, and for regression it predicts a probability distribution for each row instead of a single value. You choose the distribution family to suit the target, for example a negative binomial for counts, a mixture of normals for skewed or multimodal targets, or a hurdle model for targets with many zeros. Labels do not have to be exact. A survival time can be censored, a day's sales can be capped by a stock-out, and a value can be known only as a range or as a total over several rows. A model can also predict several targets at once, with a joint distribution over them.
 
 The estimators follow the scikit-learn API and take NumPy arrays or pandas and Polars data frames. On eight public tables with half a million to two million rows, Ashlar's point predictions are within 0.3% of the best of LightGBM, XGBoost, and CatBoost on three tables, better on two, and worse on three; the largest shortfall is an 11% higher RMSE on taxi tips. On the four regression tables, its predicted distributions were also compared with LightGBMLSS, the best tree-based distributional model on these tables. By CRPS, Ashlar is better on song release years (by 3.5%) and Zurich transport (1.7%), slightly worse on airline delays (0.2%), and much worse on taxi tips (27%).
 
@@ -99,6 +99,28 @@ All of these are computed from the same predicted distribution, so they are cons
 
 The figure shows what these calls, and `explain`, return for one test flight, using the model from the first figure.
 
+## Multivariate targets
+
+A joint head predicts one distribution over several targets, given as the columns of `y`, including how the targets vary together. `task="multivariate_gaussian"` predicts a normal distribution whose covariance changes from row to row, and `"multivariate_mixture"` and `"multivariate_flow"` allow other shapes. Questions about several targets at once, such as the distribution of their total or the chance that all of them are high, depend on how the targets vary together, which separate models for each target do not estimate. For targets of different kinds, `task="chain"` gives each one its own head, conditioned on the targets before it, such as a claim count followed by the cost per claim.
+
+```python
+from ashlar import ASRRegressor
+
+# Y has one column per target, for example casual and registered riders
+model = ASRRegressor(task="multivariate_gaussian").fit(X, Y)
+
+model.predict(X_new)                                       # the mean of each target
+model.sample(X_new, n=1000)                                # joint samples
+model.log_prob(X_new, Y_new)                               # joint log-likelihood
+model.calibrate(X_holdout, Y_holdout)                      # each target and their sum
+model.predict_interval(X_new, coverage=0.8, target="sum")  # 80% interval for the total
+model.predict_exceedance(X_new, 500, target="sum")         # P(total > 500) per row
+```
+
+On hourly bike rentals, with casual and registered riders as the two targets, the joint model's 80% interval for the total contains 81% of held-out hours. An Ashlar model that treats the two as independent contains 78%, and LightGBM quantile regression on the total 68%. After calibration on hours set aside, all three contain 80%, and the intervals are 80 riders wide for the joint model, 79 for the independent model, and 85 for LightGBM with conformalized quantile regression. So the dependence gives the right coverage without calibration, but not a narrower interval after it. In a simulation of four products that often sell out on the same days, joint models fitted to the censored sales predict that all four sell out on 9% to 12% of days, against 11.1% observed, and separate censored models for each product predict 0.7%.
+
+[docs/showcase.md](docs/showcase.md#multivariate-targets) has the bike-rental example in full and a chained model of insurance claims, and [docs/benchmarks.md](docs/benchmarks.md#several-products-that-sell-out-together) has the sell-out simulation.
+
 ## Benchmarks on eight large tables
 
 ![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
@@ -116,7 +138,7 @@ Each example compares Ashlar with a tool commonly used for the same task: a grad
     <td align="center" valign="top" width="33%"><a href="docs/showcase.md#partially-observed-labels"><img src="docs/images/readme/thumbs/observed.png" alt="Partially observed labels"></a><br><a href="docs/showcase.md#partially-observed-labels"><b>Partially observed labels</b></a><br><sub>Days when four products all sell out (simulated): 11.4% predicted, 11.1% observed, 0.7% from separate models</sub></td>
   </tr>
   <tr>
-    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#several-outcomes-in-one-model"><img src="docs/images/readme/thumbs/outcomes.png" alt="Several outcomes in one model"></a><br><a href="docs/showcase.md#several-outcomes-in-one-model"><b>Several outcomes</b></a><br><sub>Calibrated 80% intervals for hourly bike rentals: 80 riders wide, LightGBM with CQR 85</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#multivariate-targets"><img src="docs/images/readme/thumbs/outcomes.png" alt="Multivariate targets"></a><br><a href="docs/showcase.md#multivariate-targets"><b>Multivariate targets</b></a><br><sub>Calibrated 80% intervals for hourly bike rentals: 80 riders wide, LightGBM with CQR 85</sub></td>
     <td align="center" valign="top" width="33%"><a href="docs/showcase.md#random-effects"><img src="docs/images/readme/thumbs/pooling.png" alt="Random effects"></a><br><a href="docs/showcase.md#random-effects"><b>Random effects</b></a><br><sub>CRPS for stores with 1 to 5 days of data: 0.096, GPBoost 0.125</sub></td>
     <td align="center" valign="top" width="33%"><a href="docs/showcase.md#additive-models"><img src="docs/images/readme/thumbs/additive.png" alt="Additive models"></a><br><a href="docs/showcase.md#additive-models"><b>Additive models</b></a><br><sub>Same terms as R's gamlss; 10 seconds per fit on 12 cores, gamlss 4 to 6 minutes on one thread</sub></td>
   </tr>
