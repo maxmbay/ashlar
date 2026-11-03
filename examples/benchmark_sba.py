@@ -36,9 +36,38 @@ within h years" for h = 1, 3, 5, the gap between the mean predicted and
 the observed share, and, for Ashlar and the hazard model, the log-likelihood
 of what was seen by 2026.
 
-Run (on a machine with the files):
+Run (on a machine with the files), one fold of five:
 
-    python examples/benchmark_sba.py --data ~/projects/ashlar-data/sba --rows 100000 --out sba-pilot.json
+    python examples/benchmark_sba.py --data ~/projects/ashlar-data/sba --first-fy 2000 \
+        --folds 5 --fold 0 --out sba-fold0.json --preds sba-fold0.csv
+
+Results (Nov 2026, files as of 30 Sep 2026, Apple laptop). Training used
+every FY2000-2015 loan outside the test fold (about 818k loans). The test set
+was the 192,751 FY2010-2015 loans running at the 2015 snapshot, split into
+five folds. Means over the folds:
+
+    model            default Brier 1y / 3y / 5y    AUC 1y / 3y / 5y      5y loss MSE   s/fold
+    ashlar_pooled    0.00825 / 0.0213 / 0.0277     0.973 / 0.967 / 0.967   0.0161       1459
+    ashlar           0.00859 / 0.0221 / 0.0289     0.969 / 0.961 / 0.962   0.0168        402
+    hazard           0.00896 / 0.0228 / 0.0290     0.966 / 0.963 / 0.966   0.0170        108
+    aft              0.00968 / 0.0269 / 0.0366     0.955 / 0.942 / 0.937   -              16
+    finished         0.0370  / 0.0353 / 0.0354     0.948 / 0.952 / 0.957   -              23
+
+- ``ashlar_pooled`` had the lowest default Brier at every horizon in all five
+  folds. Its 5-year AUC tied the hazard model (it won three folds, the hazard
+  model two).
+- Calibration (fold 0, ``--preds``): ``ashlar_pooled`` predicted 5.85% of
+  loans defaulting within 5 years against 5.06% observed; plain ``ashlar``
+  5.66%, the hazard model 5.0%. The excess was largest on the oldest and
+  newest vintages and a few large lenders. The hazard model stayed within
+  about one point in nearly every vintage, loan age and lender segment.
+  After shifting each model's logit so its mean matched the observed rate,
+  the Brier ranking was unchanged.
+- At a 2012 snapshot (``--snapshot 2012-09-30 --last-fy 2012
+  --test-first-fy 2007``, four folds), every model under-predicted the
+  2012-2017 default rate (about 9.5%), and which model won changed from fold to fold.
+  Ashlar's mean 5-year prediction moved between 6.7% and 8.8% across folds,
+  the hazard model's between 8.5% and 8.8%.
 """
 
 from __future__ import annotations
