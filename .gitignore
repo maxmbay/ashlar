@@ -9,3 +9,5 @@ dist/
 catboost_info/
 rtdl_checkpoints/
 .jax-cache/
+examples/tabarena/experiments/
+examples/tabarena/eval/
