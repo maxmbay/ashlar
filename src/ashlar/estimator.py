@@ -441,6 +441,9 @@ def _thresholds(threshold, shape) -> np.ndarray:
     return values
 
 
+_STOPPING_METRICS = (None, "loss", "accuracy", "roc_auc")
+
+
 class ASRModel(BaseEstimator):
     """Generic estimator. Architecture and task are constructor arguments.
 
@@ -590,9 +593,23 @@ class ASRModel(BaseEstimator):
         group with the prior, the population answer. For
         ``regression``, ``gaussian``, ``mixture``, ``flow``, ``student_t``,
         ``quantile``, ``quantile_spline``, ``poisson``,
-        ``negative_binomial``, and ``hurdle``, and ``chain``, which gives
-        every column with a location an offset of its own. See
+        ``negative_binomial``, and ``hurdle``, ``classification``, which
+        gives every class after the first an offset on its logit, and
+        ``chain``, which gives every column with a location an offset of its
+        own. See
         ``ashlar.effects``, ``random_effects_``, and ``with_context``.
+    weight_average:
+        ``None`` (default) keeps the trained weights as they are. A decay in
+        ``[0, 1)`` keeps a running average of the weights at each epoch end,
+        ``decay * average + (1 - decay) * weights``. Validation, early
+        stopping, and the fitted model use the average, which is usually
+        smoother than any single epoch. ``0.9`` averages roughly the last ten
+        epochs.
+    early_stopping_metric:
+        What picks the checkpoint and stops training. ``None`` or ``loss``
+        (default) is the validation loss. For classification, ``accuracy``
+        or ``roc_auc`` (two classes) score the whole validation partition
+        instead, which matters when a model is judged on that metric.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -657,6 +674,8 @@ class ASRModel(BaseEstimator):
         tree: dict | None = None,
         monotone: dict | None = None,
         random_effects: dict | None = None,
+        weight_average: float | None = None,
+        early_stopping_metric: str | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -703,6 +722,8 @@ class ASRModel(BaseEstimator):
         self.cyclical = cyclical
         self.random_state = random_state
         self.tree = tree
+        self.weight_average = weight_average
+        self.early_stopping_metric = early_stopping_metric
 
     def _check_config(self):
         if check_monotone(self.monotone):
@@ -737,6 +758,12 @@ class ASRModel(BaseEstimator):
                 raise AshlarError(f"{name} must be a positive integer or 'auto'.")
         if self.patience < 0:
             raise AshlarError("patience must be non-negative.")
+        if self.weight_average is not None and not 0.0 <= float(self.weight_average) < 1.0:
+            raise AshlarError("weight_average is a per-epoch decay in [0, 1), or None.")
+        if self.early_stopping_metric not in _STOPPING_METRICS:
+            raise AshlarError("early_stopping_metric must be None, 'loss', 'accuracy', or 'roc_auc'.")
+        if self.early_stopping_metric in {"accuracy", "roc_auc"} and self.task != "classification":
+            raise AshlarError(f"early_stopping_metric={self.early_stopping_metric!r} is for classification.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
         if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
@@ -1206,6 +1233,8 @@ class ASRModel(BaseEstimator):
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
             units=units,
+            weight_average=None if self.weight_average is None else float(self.weight_average),
+            validation_score=self._validation_score(validation, n_classes),
         )
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
@@ -1395,9 +1424,9 @@ class ASRModel(BaseEstimator):
         effects = check_random_effects(self.random_effects)
         if not effects:
             return
-        if self.task not in (*RANDOM_EFFECT_TASKS, "chain"):
+        if self.task not in (*RANDOM_EFFECT_TASKS, "chain", "classification"):
             raise AshlarError(
-                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, or chain, "
+                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, classification, or chain, "
                 f"not {self.task!r}."
             )
         if not (self.head is None or isinstance(self.head, str)) or self._cure():
@@ -1766,6 +1795,13 @@ class ASRModel(BaseEstimator):
             # One offset per column with a location, and per class after the first of a categorical column.
             targets, _ = chain_targets(head.columns)
             locations, scales = [position for target in targets for position in target], None
+        elif self.task == "classification":
+            # One offset per class after the first: that class's logit against the first, as in a chain's categorical column.
+            shape = jax.eval_shape(
+                lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+            )
+            targets = [(position,) for position in range(1, int(shape.shape[-1]))]
+            locations, scales = [position for (position,) in targets], None
         else:
             shape = jax.eval_shape(
                 lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
@@ -1818,6 +1854,40 @@ class ASRModel(BaseEstimator):
         if self.task != "ordinal":
             raise AshlarError("soft_stages is an ordinal leaf histogram. It does not apply to other tasks.")
         return int(value)
+
+    def _validation_score(self, validation, n_classes):
+        """``early_stopping_metric`` as a whole-partition score of a core, higher is better, or ``None`` for the loss."""
+        metric = self.early_stopping_metric
+        if metric in (None, "loss") or validation is None:
+            return None
+        if metric == "roc_auc" and n_classes != 2:
+            raise AshlarError("early_stopping_metric='roc_auc' needs two classes; use 'loss' (log loss) for more.")
+        *features, y_val, w_val = validation
+        y_np = np.asarray(y_val).astype(np.int64)
+        w_np = np.asarray(w_val, dtype=np.float64)
+        policy = self._policy()
+        import equinox as eqx
+
+        @eqx.filter_jit
+        def probabilities(core, *chunk):
+            return _point_from_raw("classification", policy, core(*chunk, key=None), None)
+
+        def score(core):
+            n_rows = int(y_np.shape[0])
+            parts = [
+                np.asarray(probabilities(core, *(array[start : start + EVAL_CHUNK_ROWS] for array in features)))
+                for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+            ]
+            proba = np.concatenate(parts, axis=0)
+            if metric == "accuracy":
+                return float(np.sum(w_np * (np.argmax(proba, axis=1) == y_np)) / np.sum(w_np))
+            from sklearn.metrics import roc_auc_score
+
+            if len(np.unique(y_np[w_np > 0])) < 2:
+                return 0.0
+            return float(roc_auc_score(y_np, proba[:, 1], sample_weight=w_np))
+
+        return score
 
     def _numeric_embeddings(self, encoder: FeatureEncoder) -> str | None:
         """``num_embeddings``, or ``None`` when there are no numeric columns to embed.
@@ -2480,6 +2550,9 @@ class ASRModel(BaseEstimator):
         """
         module = getattr(self.core_, "random_effects", None)
         if module is None or not module.has_offsets or self.task == "regression" or self._observing():
+            return
+        if self.task == "classification" and len(module.targets) > 1:
+            # One offset per class after the first: the update reads one offset per row, so the variational posteriors stay.
             return
         rows = np.asarray(train_idx)
         if val_idx is not None and len(val_idx):
@@ -3767,6 +3840,8 @@ class ASRModel(BaseEstimator):
             "learning_rate_schedule": self.learning_rate_schedule,
             "standardize_target": bool(self.standardize_target),
             "share_training_batches": bool(self.share_training_batches),
+            "weight_average": None if self.weight_average is None else float(self.weight_average),
+            "early_stopping_metric": self.early_stopping_metric,
             "bottleneck": self._bottleneck_width(),
             "histogram_variance": None if self.histogram_variance is None else float(self.histogram_variance),
             "expectation_weight": self._expectation_weight(),
@@ -3842,6 +3917,8 @@ class ASRModel(BaseEstimator):
             learning_rate_schedule=payload.get("learning_rate_schedule", "constant"),
             standardize_target=bool(payload.get("standardize_target", False)),
             share_training_batches=bool(payload.get("share_training_batches", True)),
+            weight_average=payload.get("weight_average"),
+            early_stopping_metric=payload.get("early_stopping_metric"),
             bottleneck=payload.get("bottleneck"),
             histogram_variance=payload.get("histogram_variance"),
             expectation_weight=payload.get("expectation_weight"),

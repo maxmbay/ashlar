@@ -136,7 +136,7 @@ def test_laplace_is_the_conjugate_update_for_a_normal():
 def test_the_estimator_refuses_what_it_cannot_pool():
     frame, y, _, _ = _stores(groups=8)
     with pytest.raises(AshlarError, match="location"):
-        ASRModel(task="classification", random_effects={"store": "intercept"}).fit(frame, y > 0)
+        ASRModel(task="ordinal", random_effects={"store": "intercept"}).fit(frame, (y > 0).astype(int))
     with pytest.raises(AshlarError, match="monotone"):
         _small(monotone={"x0": 1}, random_effects={"store": ["intercept", "x0"]}).fit(frame, y)
     with pytest.raises(AshlarError, match="numeric"):

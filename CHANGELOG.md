@@ -4,6 +4,12 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ## Unreleased
 
+### Added
+
+- `random_effects` on `ASRClassifier`: each class after the first gets a pooled offset on its logit per group, shrunk toward the average group, as a chain's categorical column already did. Useful for high-cardinality ID columns.
+- `early_stopping_metric="roc_auc"` (or `"accuracy"`) picks the checkpoint and stops training on that metric over the whole validation partition, instead of the validation loss.
+- `weight_average=` keeps a running average of the weights at each epoch end and validates, stops, and predicts with it.
+
 ### Fixed
 
 - A table with only categorical columns no longer raises on the default `num_embeddings` or on `numeric_scaling="quantile"`. Both have nothing to act on there and are skipped; the categorical columns are still embedded. Saving and loading such a model works too.

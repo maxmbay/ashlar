@@ -1230,3 +1230,53 @@ def test_all_categorical_table_ignores_numeric_settings(tmp_path):
     assert np.isfinite(pred).all()
     model.save(tmp_path / "m")
     assert np.allclose(ASRModel.load(tmp_path / "m").predict(X), pred)
+
+
+def test_weight_average_trains_saves_and_validates(tmp_path):
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(96, 3))
+    y = X[:, 0] - X[:, 1] + rng.normal(scale=0.1, size=96)
+    plain = ASRRegressor(max_epochs=4, batch_size=16).fit(X, y)
+    averaged = ASRRegressor(max_epochs=4, batch_size=16, weight_average=0.5).fit(X, y)
+    assert not np.allclose(plain.predict(X), averaged.predict(X))
+    assert ASRRegressor(max_epochs=4, batch_size=16, weight_average=0.0).fit(X, y).predict(X) == pytest.approx(plain.predict(X))
+    averaged.save(tmp_path / "m")
+    loaded = ASRModel.load(tmp_path / "m")
+    assert loaded.weight_average == 0.5
+    assert np.allclose(loaded.predict(X), averaged.predict(X))
+    with pytest.raises(AshlarError):
+        ASRRegressor(weight_average=1.0).fit(X, y)
+
+
+def test_early_stopping_metric_roc_auc_picks_a_checkpoint(tmp_path):
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(160, 3))
+    y = (X[:, 0] + 0.5 * rng.normal(size=160) > 0).astype(int)
+    model = ASRClassifier(max_epochs=4, batch_size=32, early_stopping_metric="roc_auc").fit(X, y)
+    assert len(model.history_["val_score"]) == len(model.history_["val_loss"])
+    assert 0.5 < max(model.history_["val_score"]) <= 1.0
+    model.save(tmp_path / "m")
+    assert ASRModel.load(tmp_path / "m").early_stopping_metric == "roc_auc"
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", early_stopping_metric="roc_auc").fit(X, y.astype(float))
+
+
+@pytest.mark.parametrize("n_classes", [2, 3])
+def test_classification_random_effects_pool_groups(n_classes, tmp_path):
+    import pandas as pd
+
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(4)
+    X = pd.DataFrame({"g": rng.integers(0, 12, 120).astype(str), "x": rng.normal(size=120)})
+    y = rng.integers(0, n_classes, 120)
+    model = ASRClassifier(random_effects={"g": ["intercept", "embedding"]}, max_epochs=2, batch_size=32).fit(X, y)
+    proba = model.predict_proba(X)
+    assert proba.shape == (120, n_classes)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict_proba(X), proba)

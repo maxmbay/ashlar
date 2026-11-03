@@ -23,6 +23,14 @@ import numpy as np
 import pandas as pd
 from autogluon.core.models import AbstractModel
 
+def _tabm_batch_size(n_train: int) -> int:
+    """TabArena TabM's batch size rule (tabm_utils.get_tabm_auto_batch_size)."""
+    for limit, size in ((2_800, 32), (4_500, 64), (6_400, 128), (32_000, 256)):
+        if n_train < limit:
+            return size
+    return 512
+
+
 # Flat hyperparameters the search space samples; they go into backbone_kwargs.
 _BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k")
 
@@ -42,6 +50,12 @@ class AshlarModel(AbstractModel):
     recipe = "default"
     #: Defaults applied under the sampled hyperparameters.
     defaults: dict = {}
+    #: TabArena TabM's batch size by training rows (32 below 2,800 up to 512 above 32k), instead of Ashlar's "auto".
+    batch_rule: bool = False
+    #: Pool categorical columns with at least this many training levels as random effects (intercept + embedding).
+    pool_min_levels: int | None = None
+    #: Early-stop binary tasks on validation ROC AUC, the metric TabArena scores them on.
+    stop_on_auc: bool = False
 
     def _preprocess(self, X: pd.DataFrame, is_train: bool = False, **kwargs) -> pd.DataFrame:
         X = super()._preprocess(X, **kwargs)
@@ -90,6 +104,18 @@ class AshlarModel(AbstractModel):
             y_val = np.asarray(y_val, dtype=y.dtype)
             validation = (X_val, y_val)
         params = self._get_model_params()
+        if self.batch_rule and "batch_size" not in params:
+            params["batch_size"] = _tabm_batch_size(len(X))
+        if self.stop_on_auc and self.problem_type == "binary":
+            params.setdefault("early_stopping_metric", "roc_auc")
+        if self.pool_min_levels is not None and "random_effects" not in params:
+            pooled = {
+                col: ["intercept", "embedding"]
+                for col in X.columns
+                if X[col].dtype == object and X[col].nunique(dropna=True) >= self.pool_min_levels
+            }
+            if pooled:
+                params["random_effects"] = pooled
         self.model = self._build(params)
         self.model.fit(X, y, validation=validation)
 
@@ -195,3 +221,47 @@ for _name, (_recipe, _overrides) in SWEEP.items():
     )
     globals()[_cls.__name__] = _cls
     SWEEP_MODELS[f"sweep_{_name}"] = _cls
+
+
+# Round 4: Ashlar's own ideas on top of the TabM recipe with TabM's batch rule.
+class AshlarTabMBsModel(AshlarTabMRipModel):
+    """``tabm_piecewise`` until early stopping, with TabM's batch-size rule: the base for round 4."""
+
+    ag_key = "ASRTABMBS"
+    ag_name = "AshlarTabMBs"
+    batch_rule = True
+
+
+class AshlarTabMBsAucModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSAUC"
+    ag_name = "AshlarTabMBs-auc"
+    stop_on_auc = True
+
+
+class AshlarTabMBsPooledModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSPOOL"
+    ag_name = "AshlarTabMBs-pooled"
+    pool_min_levels = 30
+
+
+class AshlarTabMBsAvgModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSAVG"
+    ag_name = "AshlarTabMBs-avg"
+    defaults = {**_RIP, "weight_average": 0.8}
+
+
+class AshlarTabMBsAllModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSALL"
+    ag_name = "AshlarTabMBs-all"
+    stop_on_auc = True
+    pool_min_levels = 30
+    defaults = {**_RIP, "weight_average": 0.8}
+
+
+ROUND4_MODELS = {
+    "tabm_bs": AshlarTabMBsModel,
+    "tabm_bs_auc": AshlarTabMBsAucModel,
+    "tabm_bs_pooled": AshlarTabMBsPooledModel,
+    "tabm_bs_avg": AshlarTabMBsAvgModel,
+    "tabm_bs_all": AshlarTabMBsAllModel,
+}
