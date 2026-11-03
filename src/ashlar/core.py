@@ -107,7 +107,11 @@ class PredictiveCore(Module):
             hidden = self.bottleneck(hidden)
         log_probs = self.head(hidden, key=None)
         if self.monotone is not None:
-            log_probs = log_probs + self.monotone(numeric_z)
+            if isinstance(log_probs, tuple):
+                # A chain's head output: the term moves the parameters, the first part.
+                log_probs = (log_probs[0] + self.monotone(numeric_z), *log_probs[1:])
+            else:
+                log_probs = log_probs + self.monotone(numeric_z)
         if self.random_effects is not None:
             if not offsets:
                 return log_probs

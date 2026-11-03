@@ -194,7 +194,31 @@ model.predict_interval(X_new, 0.9, target=total_cost)
 
 A column's kind is any one-column head that has a likelihood: `poisson` and `negative_binomial` (with `"zero_inflated": True` in a dict), `hurdle` (with `"severity": "gamma"`), `categorical` (codes `0, 1, 2, ...`; the class count comes from the training values, or `"classes": n`), and the continuous `gaussian`, `mixture`, `flow`, `histogram`, and `student_t`, which are standardized column by column; counts, amounts, and classes stay in their own units. Each column's head reads the row's hidden state and the values of the columns before it, as observed in training and as drawn in a draw, through a small network of its own (`head_kwargs={"hidden": 32}`), so the cost of a claim can depend on how many claims there were, and its spread as well as its mean. The joint log-likelihood is the sum of the columns' conditional log-likelihoods, a mass for a count or a class and a density for an amount or a value, so it is exact. A question about several columns, such as the total cost of a policy, is read from the joint draws, as for the flow, and `calibrate` calibrates each column and any function of them the same way ([calibrating the columns and the total](#calibrating-the-columns-and-the-total)). Order the columns so that the ones that drive the others come first.
 
-A chain takes a [joint label](observed.md#several-products-that-sell-out-together) too. A categorical column's cell can be a range of classes, `observed.interval(-inf, inf)` for a class that was not recorded, and the likelihood sums over the classes it allows; the last column's cell can be censored or an interval. Every other cell must be exact, because the columns after it condition on its value. That is enough for a censored time with an unknown cause, the competing-risks model in [docs/observed.md](observed.md).
+A chain takes a [joint label](observed.md#several-products-that-sell-out-together) too. A categorical column's cell can be a range of classes, `observed.interval(-inf, inf)` for a class that was not recorded, and the likelihood sums over the classes it allows; the last column's cell can be censored or an interval. Any other cell can be censored or an interval when every cell after it in its row is unknown, `observed.interval(-inf, inf)`, since those columns then integrate to one. Every other cell must be exact, because the columns after it condition on its value. That is enough for a censored time with an unknown cause, the competing-risks model in [docs/observed.md](observed.md), and for a loan still running, whose cause is unknown, whose time is censored, and whose loss has not happened yet:
+
+```python
+running = status == "active"
+y = observed.stack([
+    observed.interval(np.where(running, -np.inf, cause), np.where(running, np.inf, cause)),   # default or payoff
+    observed.censored(np.log(months), running),                                              # log time to the end
+    observed.interval(np.where(running, -np.inf, loss), np.where(running, np.inf, loss)),     # loss, 0 on a payoff
+])
+model = ASRRegressor(
+    task="chain",
+    head_kwargs={"columns": [
+        {"kind": "categorical", "classes": 2},
+        {"kind": "gaussian", "monotone": {"rate": -1}},
+        "hurdle",
+    ]},
+    random_effects={"lender": ["intercept", "embedding"]},
+    monotone={"rate": 1},
+).fit(X, y)
+```
+
+A chain trains every column together on one trunk, so its columns can share [entity effects](effects.md) and [monotone features](#features-that-push-one-way):
+
+- `random_effects` gives each group an offset of its own on every column that has a location: the location of a continuous column, every component's location of a `mixture`, the log mean of a count, the amount of a `hurdle`, and, for a `categorical` column, the logit of each class after the first against the first. A `histogram` column has no location and gets none. Each offset has its own spread between groups, so a lender can default more often and pay off sooner by amounts the model learns separately. `random_effects_` reports `tau` as `(terms, offsets)` and each group's `mean` and `sd` as `(groups, terms, offsets)`, in each head's own units: the standardized value for a continuous column, the log mean for a count, the logit for a class. Training and prediction read the offsets on nodes, each offset's nodes in an order of its own. `with_context` does not yet update a chain's offsets.
+- `monotone=` moves the same outputs one way for a constrained feature, so each column, given the columns before it, moves up as the feature rises: a location, every component's location of a `mixture` (its weights and widths read only the other features), a log mean, a `hurdle`'s amount (its zero's probability reads only the other features), and the second class's odds of a two-class `categorical`. A column's own `"monotone"` entry flips a feature's direction for that column, so the rate above raises the odds of a default and shortens the time. `flow`, `histogram`, and `categorical` columns of more than two classes are refused. The guarantee is for each column given the columns before it; a later column's marginal mixes over the earlier ones and is not covered.
 
 On freMTPL2's 677,991 motor policies, a chain of a `negative_binomial` claim count and a `hurdle` cost has a joint NLL of 0.467 nats per policy, against 0.615 for the same two heads fitted apart, because it knows that a cost is zero exactly when there was no claim. It ties the actuary's frequency and severity model built by hand, 0.4672 against 0.4673, with the total's calibration the same, and gets there from the column kinds alone. LightGBM Poisson × gamma, the same two models built with gradient boosting and composed by hand, ties it on the total too, a CRPS of 92.7 against 92.5, with a joint NLL 0.011 nats worse ([against the GBM actuary](benchmarks.md#against-the-gbm-actuary)). [docs/benchmarks.md](benchmarks.md#chained-claim-counts-and-costs) has the table.
 

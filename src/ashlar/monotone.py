@@ -87,7 +87,8 @@ class MonotoneTerm(Module):
     weight: jax.Array
     columns: tuple[int, ...] = field(static=True)
     directions: tuple[int, ...] = field(static=True)
-    signs: tuple[int, ...] = field(static=True)
+    # One sign per output, or per feature and output, ``((outputs,), ...)``, when features move outputs differently.
+    signs: tuple = field(static=True)
 
     def __init__(self, edges, members: int, columns, directions, signs):
         edges = jnp.asarray(edges, dtype=jnp.float32)
@@ -95,13 +96,20 @@ class MonotoneTerm(Module):
             raise ShapeError(f"monotone edges must be (features, bins + 1) for {len(columns)} features; received {edges.shape}.")
         self.columns = tuple(int(column) for column in columns)
         self.directions = tuple(int(direction) for direction in directions)
-        self.signs = tuple(int(sign) for sign in signs)
+        if len(signs) and isinstance(signs[0], (tuple, list, np.ndarray)):
+            if len(signs) != len(columns):
+                raise ShapeError(f"monotone signs per feature need one row per feature; received {len(signs)}.")
+            self.signs = tuple(tuple(int(sign) for sign in row) for row in signs)
+            outputs = len(self.signs[0])
+        else:
+            self.signs = tuple(int(sign) for sign in signs)
+            outputs = len(self.signs)
         # Edges are fitted on z; a falling feature reads -z, whose edges are the reversed negatives.
         flip = jnp.asarray(self.directions, dtype=jnp.float32)[:, None] < 0
         self.edges = jnp.where(flip, -edges[:, ::-1], edges)
         bins = edges.shape[1] - 1
         start = float(np.log(np.expm1(MONOTONE_START / bins))) / MONOTONE_GAIN
-        self.weight = jnp.full((int(members), len(columns), len(signs), bins), start, dtype=jnp.float32)
+        self.weight = jnp.full((int(members), len(columns), outputs, bins), start, dtype=jnp.float32)
 
     def encode(self, numeric_z):
         x = numeric_z[:, list(self.columns)] * jnp.asarray(self.directions, dtype=numeric_z.dtype)
@@ -115,16 +123,19 @@ class MonotoneTerm(Module):
         upper = jnp.where(jnp.arange(bins) == bins - 1, jnp.inf, 1.0)
         return jnp.where(empty, 0.0, jnp.clip(fraction, lower, upper))
 
+    def _signs(self, dtype):
+        """``(features, outputs)``: each feature's sign on each output."""
+        signs = jnp.asarray(self.signs, dtype=dtype)
+        return signs if signs.ndim == 2 else jnp.broadcast_to(signs, (len(self.columns), signs.shape[0]))
+
     def __call__(self, numeric_z):
-        ramps = self.encode(numeric_z)
-        shapes = jnp.einsum("bjn,kjpn->bkp", ramps, jax.nn.softplus(MONOTONE_GAIN * self.weight))
-        return shapes * jnp.asarray(self.signs, dtype=shapes.dtype)
+        return jnp.sum(self.parts(numeric_z), axis=2)
 
     def parts(self, numeric_z):
         """``(batch, members, features, outputs)``: each constrained feature's shape; they sum to the term."""
         ramps = self.encode(numeric_z)
         shapes = jnp.einsum("bjn,kjpn->bkjp", ramps, jax.nn.softplus(MONOTONE_GAIN * self.weight))
-        return shapes * jnp.asarray(self.signs, dtype=shapes.dtype)
+        return shapes * self._signs(shapes.dtype)
 
     def without(self, numeric_z):
         """``numeric_z`` with the constrained columns set to 0, the trunk's input."""
