@@ -2,6 +2,12 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Fixed
+
+- A table with only categorical columns no longer raises on the default `num_embeddings` or on `numeric_scaling="quantile"`. Both have nothing to act on there and are skipped; the categorical columns are still embedded. Saving and loading such a model works too.
+
 ## 0.0.5 — 2026-11-03
 
 ### Added
