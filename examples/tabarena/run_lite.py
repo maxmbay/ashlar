@@ -18,17 +18,22 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from ashlar_tabarena import AshlarModel, AshlarTabMModel  # noqa: E402
+from ashlar_tabarena import AshlarModel, AshlarRipModel, AshlarTabMModel, AshlarTabMRipModel  # noqa: E402
 
 SMOKE = ["blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal"]
-MODELS = {"default": AshlarModel, "tabm": AshlarTabMModel}
+MODELS = {
+    "default": AshlarModel,
+    "tabm": AshlarTabMModel,
+    "rip": AshlarRipModel,
+    "tabm_rip": AshlarTabMRipModel,
+}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--datasets", nargs="*", default=None)
-    parser.add_argument("--models", nargs="*", default=list(MODELS), choices=list(MODELS))
+    parser.add_argument("--models", nargs="*", default=["default", "tabm"], choices=list(MODELS))
     parser.add_argument("--n-configs", type=int, default=0)
     parser.add_argument("--expname", default="ashlar_lite")
     parser.add_argument("--no-debug", action="store_true", help="Use the Ray backend (parallel folds).")

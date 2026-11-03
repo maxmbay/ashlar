@@ -40,6 +40,8 @@ class AshlarModel(AbstractModel):
     seed_name = "random_state"
     _supported_problem_types = ["binary", "multiclass", "regression"]
     recipe = "default"
+    #: Defaults applied under the sampled hyperparameters.
+    defaults: dict = {}
 
     def _preprocess(self, X: pd.DataFrame, is_train: bool = False, **kwargs) -> pd.DataFrame:
         X = super()._preprocess(X, **kwargs)
@@ -56,7 +58,7 @@ class AshlarModel(AbstractModel):
     def _build(self, params: dict):
         from ashlar import ASRClassifier, ASRRegressor, tabm_piecewise
 
-        params = dict(params)
+        params = {**self.defaults, **params}
         backbone = {key: params.pop(key) for key in _BACKBONE_KEYS if key in params}
         classification = self.problem_type in ("binary", "multiclass")
         if self.recipe == "tabm_piecewise":
@@ -141,3 +143,25 @@ class AshlarTabMModel(AshlarModel):
     ag_key = "ASRTABM"
     ag_name = "AshlarTabM"
     recipe = "tabm_piecewise"
+
+
+# Train until early stopping (patience 16, best epoch restored) instead of the
+# ``max_epochs="auto"`` budget of 20-100 epochs. Constant learning rate, since
+# the cosine schedule's warmup and decay are spread over ``max_epochs``.
+_RIP = {"max_epochs": 2000, "learning_rate_schedule": "constant"}
+
+
+class AshlarRipModel(AshlarModel):
+    """Ashlar defaults, trained until early stopping."""
+
+    ag_key = "ASRRIP"
+    ag_name = "AshlarRip"
+    defaults = _RIP
+
+
+class AshlarTabMRipModel(AshlarTabMModel):
+    """``tabm_piecewise``, trained until early stopping."""
+
+    ag_key = "ASRTABMRIP"
+    ag_name = "AshlarTabMRip"
+    defaults = _RIP
