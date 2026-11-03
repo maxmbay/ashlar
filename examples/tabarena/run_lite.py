@@ -18,7 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from ashlar_tabarena import AshlarModel, AshlarRipModel, AshlarTabMModel, AshlarTabMRipModel  # noqa: E402
+from ashlar_tabarena import SWEEP_MODELS, AshlarModel, AshlarRipModel, AshlarTabMModel, AshlarTabMRipModel  # noqa: E402
 
 SMOKE = ["blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal"]
 MODELS = {
@@ -26,6 +26,7 @@ MODELS = {
     "tabm": AshlarTabMModel,
     "rip": AshlarRipModel,
     "tabm_rip": AshlarTabMRipModel,
+    **SWEEP_MODELS,
 }
 
 

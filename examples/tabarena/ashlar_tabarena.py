@@ -165,3 +165,33 @@ class AshlarTabMRipModel(AshlarTabMModel):
     ag_key = "ASRTABMRIP"
     ag_name = "AshlarTabMRip"
     defaults = _RIP
+
+
+# Candidate defaults, all trained until early stopping. ``n_blocks``,
+# ``d_block``, ``dropout`` and ``k`` go into backbone_kwargs (see _build).
+SWEEP = {
+    "base": ("default", {}),
+    "deep": ("default", {"n_blocks": 5}),
+    "wide": ("default", {"d_block": 512, "dropout": 0.15}),
+    "bottleneck": ("default", {"bottleneck": True}),
+    "lr1e3": ("default", {"learning_rate": 1e-3}),
+    "batch128": ("default", {"batch_size": 128}),
+    "regularized": ("default", {"dropout": 0.25, "weight_decay": 1e-3}),
+    "tabm_wide": ("tabm_piecewise", {"n_blocks": 3, "d_block": 512}),
+}
+SWEEP_MODELS = {}
+for _name, (_recipe, _overrides) in SWEEP.items():
+    _key = "ASRS" + _name.upper().replace("_", "")
+    _cls = type(
+        f"AshlarSweep_{_name}",
+        (AshlarModel,),
+        {
+            "ag_key": _key,
+            "ag_name": f"AshlarSweep-{_name}",
+            "recipe": _recipe,
+            "defaults": {**_RIP, **_overrides},
+            "__module__": __name__,
+        },
+    )
+    globals()[_cls.__name__] = _cls
+    SWEEP_MODELS[f"sweep_{_name}"] = _cls
