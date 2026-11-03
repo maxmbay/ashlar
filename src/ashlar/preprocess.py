@@ -282,7 +282,7 @@ class FeatureEncoder:
         self.numeric_scaling = numeric_scaling
         self.numeric_clip = None if numeric_clip is None else float(numeric_clip)
         numeric = [column for column in columns if column.role == "numeric"]
-        if numeric_scaling in {"quantile", "quantile_tabr"}:
+        if numeric_scaling in {"quantile", "quantile_tabr"} and numeric:
             if quantiles is None or references is None:
                 raise AshlarError("quantile scaling requires knots fit on the training partition.")
             quantile_knots = jnp.asarray(quantiles, dtype=jnp.float32)

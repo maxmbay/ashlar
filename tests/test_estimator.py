@@ -1212,3 +1212,21 @@ def test_robust_scale_and_default_categorical_embeddings(tmp_path):
     refused = _regression(numeric_scaling="nope", max_epochs=1, patience=0, validation_size=0)
     with pytest.raises(AshlarError, match="robust"):
         refused.fit(column.astype(np.float32), np.zeros(len(column), dtype=np.float32))
+
+
+def test_all_categorical_table_ignores_numeric_settings(tmp_path):
+    # Numeric embeddings and quantile scaling have nothing to act on; the categorical embeddings still train.
+    import pandas as pd
+
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"a": rng.choice(list("xyz"), 64), "b": rng.choice(list("pq"), 64)})
+    y = (X["a"] == "x").astype(float).to_numpy() + rng.normal(scale=0.1, size=64)
+    model = ASRRegressor(num_embeddings="piecewise", numeric_scaling="quantile", max_epochs=2, batch_size=16)
+    model.fit(X, y)
+    assert model.embedded_columns_ == ["a", "b"]
+    pred = model.predict(X)
+    assert np.isfinite(pred).all()
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict(X), pred)

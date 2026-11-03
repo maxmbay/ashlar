@@ -1158,8 +1158,6 @@ class ASRModel(BaseEstimator):
             numeric_scaling=self.numeric_scaling,
             numeric_clip=self.numeric_clip,
         )
-        if self.num_embeddings is not None and encoder.n_numeric == 0:
-            raise AshlarError("num_embeddings was requested, but the training partition has no numeric columns.")
         n_events, n_classes = self._output_sizes(y_train_model, classes)
         encoded = encoder.transform(train_frame)
         numeric_z = encoder.numeric_transform(encoded.numeric_raw)
@@ -1821,6 +1819,13 @@ class ASRModel(BaseEstimator):
             raise AshlarError("soft_stages is an ordinal leaf histogram. It does not apply to other tasks.")
         return int(value)
 
+    def _numeric_embeddings(self, encoder: FeatureEncoder) -> str | None:
+        """``num_embeddings``, or ``None`` when there are no numeric columns to embed.
+
+        A table of only categorical columns still embeds those; the numeric setting has nothing to act on.
+        """
+        return None if encoder.n_numeric == 0 else self.num_embeddings
+
     def _build_core(
         self, encoder: FeatureEncoder, n_events: int, n_classes: int, key, head_kwargs=None, numeric_z=None
     ):
@@ -1829,9 +1834,8 @@ class ASRModel(BaseEstimator):
         Without it, as on ``load``, the bins are placeholders of the right shape.
         """
         emb_key, cat_key, set_key, backbone_key, head_key = jax.random.split(key, 5)
-        embedding_dim = None
-        if self.num_embeddings is not None:
-            embedding_dim = int(self.num_embedding_dim)
+        num_embeddings = self._numeric_embeddings(encoder)
+        embedding_dim = None if num_embeddings is None else int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
         fields = self._core_fields(encoder)
         effects = check_random_effects(self.random_effects)
@@ -1848,17 +1852,17 @@ class ASRModel(BaseEstimator):
             kwargs["feature_chunks"] = chunks
             kwargs["terms"] = self._additive_terms([name for name, _ in fields], kwargs.pop("pairs", None))[0]
         embeddings = None
-        if self.num_embeddings == "linear_relu":
+        if num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
-        elif self.num_embeddings == "periodic":
+        elif num_embeddings == "periodic":
             embeddings = PeriodicEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
-        elif self.num_embeddings in {"piecewise", "piecewise_relu"}:
+        elif num_embeddings in {"piecewise", "piecewise_relu"}:
             if numeric_z is None:
                 edges = jnp.tile(jnp.linspace(-1.0, 1.0, int(self.num_embedding_bins) + 1), (encoder.n_numeric, 1))
             else:
                 edges = quantile_edges(numeric_z, int(self.num_embedding_bins), seed=int(self.random_state))
             embeddings = PiecewiseLinearEmbeddings(
-                edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
+                edges, embedding_dim, key=emb_key, activation=num_embeddings == "piecewise_relu"
             )
         embedded = [column for column in encoder.embedding_columns if column.name not in effects]
         categorical_embeddings = _category_tables(embedded, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden))
@@ -1932,7 +1936,7 @@ class ASRModel(BaseEstimator):
         A grouping column of ``random_effects`` reaches the network only
         through its pooled embedding, a field of its own after the others.
         """
-        embedding_dim = None if self.num_embeddings is None else int(self.num_embedding_dim)
+        embedding_dim = None if self._numeric_embeddings(encoder) is None else int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
         fields = encoder.fields(embedding_dim, cat_dim, legacy=bool(getattr(self, "_legacy_field_order", False)))
         effects = check_random_effects(self.random_effects)

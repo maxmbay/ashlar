@@ -83,9 +83,12 @@ class InputModel:
     def from_json(cls, payload) -> InputModel | None:
         if payload is None:
             return None
+        n = len(payload["correlation"])
+        # A table with no numeric columns saves empty maps, whose width can't be inferred.
+        width = -1 if n else KNOTS
         return cls(
-            knots=np.asarray(payload["knots"], dtype=np.float64).reshape(len(payload["correlation"]), -1),
-            scores=np.asarray(payload["scores"], dtype=np.float64).reshape(len(payload["correlation"]), -1),
+            knots=np.asarray(payload["knots"], dtype=np.float64).reshape(n, width),
+            scores=np.asarray(payload["scores"], dtype=np.float64).reshape(n, width),
             correlation=np.asarray(payload["correlation"], dtype=np.float64),
         )
 
