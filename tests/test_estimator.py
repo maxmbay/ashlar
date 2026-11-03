@@ -542,8 +542,9 @@ def test_classification_tabm_shares_batches_and_skips_the_label_scale():
     assert tabm().standardize_target is True
     assert tabm(task="classification", numeric_scaling="quantile_tabr").numeric_scaling == "quantile_tabr"
     assert tabm(task="classification", prediction_policy="mean_logits").prediction_policy == "mean_logits"
+    tabm(task="classification", share_training_batches=False)._check_config()
     with pytest.raises(AshlarError, match="share_training_batches"):
-        tabm(task="classification", share_training_batches=False)._check_config()
+        tabm(task="ordinal", share_training_batches=False)._check_config()
     with pytest.raises(AshlarError, match="standardize_target"):
         tabm(task="classification", standardize_target=True)._check_config()
 
@@ -607,6 +608,30 @@ def test_unshared_member_targets_and_a_small_tabm_fit():
     pred = np.asarray(model.predict(x[:2]))
     assert pred.shape == (2,)
     assert np.isfinite(pred).all()
+
+
+def test_unshared_batches_train_a_classifier():
+    import jax.numpy as jnp
+
+    from ashlar import ASRClassifier
+    from ashlar.objectives import classification_objective
+
+    raw = jnp.zeros((2, 3, 4)).at[0, 1, 2].set(5.0)
+    y = jnp.array([[0, 2, 1], [3, 3, 0]])
+    weights = jnp.ones((2, 3))
+    per_member = classification_objective(raw, y, weights)
+    shared = classification_objective(raw, jnp.array([0, 3]), jnp.ones(2))
+    assert np.isfinite(float(per_member)) and float(per_member) != float(shared)
+
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(48, 2))
+    labels = (X[:, 0] > 0).astype(int) + (X[:, 1] > 0.5)
+    model = ASRClassifier(
+        backbone="tabm", backbone_kwargs={"n_blocks": 1, "d_block": 8, "k": 4}, max_epochs=2, batch_size=8,
+        share_training_batches=False,
+    ).fit(X, labels)
+    proba = np.asarray(model.predict_proba(X[:3]))
+    assert proba.shape == (3, 3) and np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
 
 
 def test_linear_schedule_stays_on_adamw():

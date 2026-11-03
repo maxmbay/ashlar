@@ -45,12 +45,31 @@ def _limit_cpus(num_cpus) -> None:
     start = (os.getpid() % (len(allowed) // n)) * n
     os.sched_setaffinity(0, allowed[start : start + n])
 
-def _tabm_batch_size(n_train: int) -> int:
-    """TabArena TabM's batch size rule (tabm_utils.get_tabm_auto_batch_size)."""
-    for limit, size in ((2_800, 32), (4_500, 64), (6_400, 128), (32_000, 256)):
-        if n_train < limit:
-            return size
-    return 512
+
+def _tabm_batch_size(n_rows: int, n_features: int) -> int:
+    """TabArena TabM's batch size rule (tabm_utils.get_tabm_auto_batch_size): by rows, capped by width."""
+    by_rows = next((size for limit, size in ((2_800, 32), (4_500, 64), (6_400, 128), (32_000, 256)) if n_rows < limit), 512)
+    by_features = next((size for limit, size in ((256, 1024), (512, 512), (1024, 256), (2048, 64)) if n_features < limit), 32)
+    return min(by_rows, by_features)
+
+
+def _tempered(proba: np.ndarray, temperature: float) -> np.ndarray:
+    logits = np.log(np.clip(proba, 1e-12, None)) / temperature
+    logits -= logits.max(axis=1, keepdims=True)
+    out = np.exp(logits)
+    return out / out.sum(axis=1, keepdims=True)
+
+
+def _fit_temperature(proba: np.ndarray, y: np.ndarray) -> float:
+    """The temperature in [0.25, 4] that minimises validation log loss."""
+    from scipy.optimize import minimize_scalar
+
+    rows = np.arange(len(y))
+
+    def loss(log_t: float) -> float:
+        return -np.mean(np.log(np.clip(_tempered(proba, np.exp(log_t))[rows, y], 1e-12, None)))
+
+    return float(np.exp(minimize_scalar(loss, bounds=(np.log(0.25), np.log(4.0)), method="bounded").x))
 
 
 # Flat hyperparameters the search space samples; they go into backbone_kwargs.
@@ -78,6 +97,9 @@ class AshlarModel(AbstractModel):
     pool_min_levels: int | None = None
     #: Early-stop binary tasks on validation ROC AUC, the metric TabArena scores them on.
     stop_on_auc: bool = False
+    #: Fit a softmax temperature on the validation fold (classification).
+    temperature_scaling: bool = False
+    temperature_: float = 1.0
 
     def _preprocess(self, X: pd.DataFrame, is_train: bool = False, **kwargs) -> pd.DataFrame:
         X = super()._preprocess(X, **kwargs)
@@ -102,15 +124,20 @@ class AshlarModel(AbstractModel):
         params = {**self.defaults, **params}
         backbone = {key: params.pop(key) for key in _BACKBONE_KEYS if key in params}
         classification = self.problem_type in ("binary", "multiclass")
+        # A distribution head for regression (its mean is the point prediction).
+        task = "classification" if classification else params.pop("task", "regression")
+        params.pop("task", None)
         if self.recipe == "tabm_piecewise":
             if backbone:
                 base = {"n_blocks": 2, "d_block": 256, "dropout": 0.1, "k": 32, "start_scaling_init": "normal"}
                 params["backbone_kwargs"] = {**base, **backbone}
-            return tabm_piecewise(task="classification" if classification else "regression", **params)
+            return tabm_piecewise(task=task, **params)
         if backbone:
             backbone.pop("k", None)
             params["backbone_kwargs"] = {"n_blocks": 3, "d_block": 256, "dropout": 0.1, **backbone}
-        return ASRClassifier(**params) if classification else ASRRegressor(**params)
+        if classification:
+            return ASRClassifier(**params)
+        return ASRRegressor(**params) if task == "regression" else ASRRegressor(task=task, **params)
 
     def _fit(
         self,
@@ -133,7 +160,7 @@ class AshlarModel(AbstractModel):
             validation = (X_val, y_val)
         params = self._get_model_params()
         if self.batch_rule and "batch_size" not in params:
-            params["batch_size"] = _tabm_batch_size(len(X))
+            params["batch_size"] = _tabm_batch_size(*X.shape)
         if self.stop_on_auc and self.problem_type == "binary":
             params.setdefault("early_stopping_metric", "roc_auc")
         if self.pool_min_levels is not None and "random_effects" not in params:
@@ -149,18 +176,26 @@ class AshlarModel(AbstractModel):
             params["time_limit"] = max(1.0, 0.85 * float(time_limit))
         self.model = self._build(params)
         self.model.fit(X, y, validation=validation)
+        if self.temperature_scaling and validation is not None and self.problem_type != "regression":
+            self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
 
     def _predict_proba(self, X, **kwargs) -> np.ndarray:
         X = self.preprocess(X, **kwargs)
         if self.problem_type == "regression":
             return np.asarray(self.model.predict(X), dtype=np.float32)
-        proba = np.asarray(self.model.predict_proba(X), dtype=np.float32)
+        full = self._aligned_proba(X)
+        if self.temperature_ != 1.0:
+            full = _tempered(full, self.temperature_)
+        return self._convert_proba_to_unified_form(full.astype(np.float32))
+
+    def _aligned_proba(self, X: pd.DataFrame) -> np.ndarray:
+        proba = np.asarray(self.model.predict_proba(X), dtype=np.float64)
         # AutoGluon labels are 0..K-1; align columns to them in case a class
         # was missing from a training fold.
         classes = list(np.asarray(self.model.classes_).astype(int))
-        full = np.zeros((len(X), self.num_classes), dtype=np.float32)
+        full = np.zeros((len(X), self.num_classes), dtype=np.float64)
         full[:, classes] = proba
-        return self._convert_proba_to_unified_form(full)
+        return full
 
     def _set_default_params(self) -> None:
         self._set_default_param_value("random_state", 0)
@@ -259,7 +294,7 @@ class AshlarTabMBsModel(AshlarTabMRipModel):
     """``tabm_piecewise`` until early stopping, with TabM's batch-size rule: the base for round 4."""
 
     ag_key = "ASRTABMBS"
-    ag_name = "AshlarTabMBs"
+    ag_name = "AshlarTabMRipBs"
     batch_rule = True
 
 
@@ -295,4 +330,73 @@ ROUND4_MODELS = {
     "tabm_bs_pooled": AshlarTabMBsPooledModel,
     "tabm_bs_avg": AshlarTabMBsAvgModel,
     "tabm_bs_all": AshlarTabMBsAllModel,
+}
+
+
+# Local sweep on the Mac (default architecture, then what the single-model
+# neural baselines leave on the table), all trained until early stopping.
+# ``Bs`` is TabM's batch-size rule.
+def _variant(base, key, name, batch_rule=True, **params):
+    return type(
+        name + "Model",
+        (base,),
+        {"ag_key": key, "ag_name": name, "defaults": {**_RIP, **params}, "batch_rule": batch_rule, "__module__": __name__},
+    )
+
+
+AshlarRipBsModel = _variant(AshlarRipModel, "ASRBS", "AshlarRipBs")
+AshlarRipBsDeepModel = _variant(AshlarRipModel, "ASRBSDEEP", "AshlarRipBsDeep", n_blocks=6)
+AshlarRipBsWideModel = _variant(AshlarRipModel, "ASRBSWIDE", "AshlarRipBsWide", d_block=512)
+AshlarRipBsNeckModel = _variant(AshlarRipModel, "ASRBSNECK", "AshlarRipBsNeck", bottleneck=True)
+AshlarRipBsOneHotModel = _variant(AshlarRipModel, "ASRBSOH", "AshlarRipBsOneHot", categorical_embeddings=[])
+AshlarTabMRipParityModel = _variant(
+    AshlarTabMRipModel, "ASRTABMPAR", "AshlarTabMRipParity", d_block=512, weight_decay=3e-4, gradient_clip=1.0
+)
+AshlarTabMOneHotModel = _variant(AshlarTabMRipModel, "ASRTABMOH", "AshlarTabMOneHot", categorical_embeddings=[])
+AshlarTabMPeriodicModel = _variant(AshlarTabMRipModel, "ASRTABMPER", "AshlarTabMPeriodic", num_embeddings="periodic")
+# TabArena's TabM samples batches per member, for classification as well as regression.
+AshlarTabMMemberBatchesModel = _variant(
+    AshlarTabMRipModel, "ASRTABMMB", "AshlarTabMMemberBatches", share_training_batches=False
+)
+AshlarTabMQuantileTabrModel = _variant(
+    AshlarTabMRipModel, "ASRTABMQT", "AshlarTabMQuantileTabr", numeric_scaling="quantile_tabr"
+)
+AshlarTabMKitchenModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMKIT",
+    "AshlarTabMKitchen",
+    d_block=512,
+    weight_decay=3e-4,
+    gradient_clip=1.0,
+    categorical_embeddings=[],
+    share_training_batches=False,
+)
+# Temperature scaling on the bagging fold for log loss, and distribution heads
+# (their mean as the point) for skewed or heteroscedastic regression targets.
+AshlarTabMTempModel = _variant(AshlarTabMRipModel, "ASRTABMT", "AshlarTabMTemp")
+AshlarTabMTempModel.temperature_scaling = True
+AshlarTabMMixtureModel = _variant(AshlarTabMRipModel, "ASRTABMMIX", "AshlarTabMMixture", task="mixture")
+AshlarTabMGaussianModel = _variant(AshlarTabMRipModel, "ASRTABMGAU", "AshlarTabMGaussian", task="gaussian")
+# The submission config with per-member batches: the candidate fix for multiclass log loss.
+AshlarTabMRipBsMemberModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSMB", "AshlarTabMRipBsMember", share_training_batches=False
+)
+
+LOCAL_SWEEP_MODELS = {
+    "rip_bs": AshlarRipBsModel,
+    "rip_bs_deep": AshlarRipBsDeepModel,
+    "rip_bs_wide": AshlarRipBsWideModel,
+    "rip_bs_neck": AshlarRipBsNeckModel,
+    "rip_bs_onehot": AshlarRipBsOneHotModel,
+    "tabm_rip_bs": AshlarTabMBsModel,
+    "tabm_rip_parity": AshlarTabMRipParityModel,
+    "tabm_onehot": AshlarTabMOneHotModel,
+    "tabm_periodic": AshlarTabMPeriodicModel,
+    "tabm_member_batches": AshlarTabMMemberBatchesModel,
+    "tabm_quantile_tabr": AshlarTabMQuantileTabrModel,
+    "tabm_kitchen": AshlarTabMKitchenModel,
+    "tabm_temp": AshlarTabMTempModel,
+    "tabm_mixture": AshlarTabMMixtureModel,
+    "tabm_gaussian": AshlarTabMGaussianModel,
+    "tabm_bs_member": AshlarTabMRipBsMemberModel,
 }

@@ -539,7 +539,7 @@ class ASRModel(BaseEstimator):
     share_training_batches:
         ``True`` (default) shows every member the same minibatch. ``False``
         gives each TabM member its own shuffle. Prediction still averages
-        members on the same rows. Regression only.
+        members on the same rows. Regression and classification.
     bottleneck:
         ``None`` (default) leaves the head on the backbone width. ``True``
         inserts a per-member linear map of width 32 and a ReLU after the
@@ -797,8 +797,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError(f"the {self.task} head works on a standardized axis, so standardize_target must stay on.")
         if self.share_training_batches not in {True, False}:
             raise AshlarError("share_training_batches must be true or false.")
-        if not self.share_training_batches and self.task != "regression":
-            raise AshlarError("share_training_batches=False is implemented for regression.")
+        if not self.share_training_batches and self.task not in {"regression", "classification"}:
+            raise AshlarError("share_training_batches=False is implemented for regression and classification.")
         if self.num_embeddings not in _NUM_EMBEDDINGS:
             raise AshlarError("num_embeddings must be None, 'linear_relu', 'periodic', 'piecewise', or 'piecewise_relu'.")
         head = self.head
@@ -1222,6 +1222,8 @@ class ASRModel(BaseEstimator):
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
         resolved = self._resolved_training()
+        if not self.share_training_batches and (getattr(self, "_candidates", None) is not None or self._observing()):
+            raise AshlarError("share_training_batches=False needs exact labels; coarse or observed labels train with shared batches.")
         trained, opt_state, history = fit_loop(
             core,
             numeric_z,

@@ -18,7 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from ashlar_tabarena import ROUND4_MODELS, SWEEP_MODELS, AshlarModel, AshlarRipModel, AshlarTabMModel, AshlarTabMRipModel  # noqa: E402
+from ashlar_tabarena import LOCAL_SWEEP_MODELS, ROUND4_MODELS, SWEEP_MODELS, AshlarModel, AshlarRipModel, AshlarTabMModel, AshlarTabMRipModel  # noqa: E402
 
 SMOKE = ["blood-transfusion-service-center", "QSAR_fish_toxicity", "anneal"]
 MODELS = {
@@ -28,6 +28,7 @@ MODELS = {
     "tabm_rip": AshlarTabMRipModel,
     **SWEEP_MODELS,
     **ROUND4_MODELS,
+    **LOCAL_SWEEP_MODELS,
 }
 
 
@@ -39,6 +40,7 @@ def main() -> None:
     parser.add_argument("--n-configs", type=int, default=0)
     parser.add_argument("--expname", default="ashlar_lite")
     parser.add_argument("--no-debug", action="store_true", help="Use the Ray backend (parallel folds).")
+    parser.add_argument("--keep-going", action="store_true", help="Record a failed job (e.g. over the time limit) and continue.")
     args = parser.parse_args()
 
     from tabarena.benchmark.experiment import TabArenaV0pt1ExperimentBundle
@@ -62,6 +64,7 @@ def main() -> None:
         build_kwargs=build_kwargs,
         new_result_prefix="[New] ",
         debug_mode=not args.no_debug,
+        raise_on_failure=not args.keep_going,
     )
 
     leaderboard = context.compare(output_dir=eval_dir, subset="lite", datasets=datasets)
