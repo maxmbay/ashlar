@@ -15,9 +15,10 @@ from ashlar.distributions import (
     Mixture,
     joint_flow_distribution,
 )
-from ashlar.errors import AshlarError, ShapeError
+from ashlar.errors import ShapeError
 from ashlar.heads import MultivariateFlowHead
 from ashlar.objectives import make_joint_objective
+from micro import MICRO
 
 
 def _raw(rows=5, members=1, d=3, depth=1, scale=3.0, seed=0):
@@ -37,6 +38,7 @@ def test_head_output_and_errors():
         AutoregressiveFlow(context[..., :-1], w_in, w_out, 3)
 
 
+@pytest.mark.slow
 def test_zero_parameters_are_the_standard_normal():
     context, w_in, w_out = _raw(scale=0.0)
     dist = AutoregressiveFlow(context, w_in, w_out, 3)
@@ -44,6 +46,7 @@ def test_zero_parameters_are_the_standard_normal():
     assert np.allclose(dist.log_prob(y), jnp.sum(jax.scipy.stats.norm.logpdf(y), axis=-1), atol=1e-5)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("depth", [1, 2])
 def test_inverse_undoes_forward_and_density_is_the_change_of_variables(depth):
     context, w_in, w_out = _raw(depth=depth)
@@ -62,6 +65,7 @@ def test_inverse_undoes_forward_and_density_is_the_change_of_variables(depth):
         assert np.all(np.triu(jacobian, 1) == 0) and np.all(np.abs(np.tril(jacobian, -1)[:, 1:, :1]) > 0)
 
 
+@pytest.mark.slow
 def test_member_mixture_draws_moments_marginals_and_indexing():
     dist = Mixture(joint_flow_distribution(_raw(rows=2, members=2), 3))
     draws = np.asarray(dist.sample(jax.random.PRNGKey(5), (20000,)))
@@ -75,6 +79,7 @@ def test_member_mixture_draws_moments_marginals_and_indexing():
     assert isinstance(single, Empirical) and single.batch_shape == (2, 2, 3)
 
 
+@pytest.mark.slow
 def test_objective_is_the_member_mean_negative_log_density():
     raw = _raw(rows=6, members=2)
     y = jax.random.normal(jax.random.PRNGKey(2), (6, 3))
@@ -82,7 +87,7 @@ def test_objective_is_the_member_mean_negative_log_density():
     assert np.isclose(make_joint_objective(3, "flow")(raw, y, jnp.ones(6)), expected, rtol=1e-5)
 
 
-def _curved(n=3000, seed=0):
+def _curved(n=800, seed=0):
     """Two columns with zero correlation and strong dependence: the second is the square of the first's noise."""
     rng = np.random.default_rng(seed)
     x = rng.normal(size=(n, 2)).astype(np.float32)
@@ -92,24 +97,30 @@ def _curved(n=3000, seed=0):
     return x, (y * np.array([1.0, 20.0]) + np.array([5.0, -40.0])).astype(np.float32)
 
 
+@pytest.mark.slow
 def test_fit_beats_the_joint_normal_on_curved_dependence(tmp_path):
     x, y = _curved()
-    train, test = slice(0, 2500), slice(2500, None)
-    flow = ASRRegressor(task="multivariate_flow", max_epochs=40, random_state=0).fit(x[train], y[train])
-    normal = ASRRegressor(task="multivariate_gaussian", max_epochs=40, random_state=0).fit(x[train], y[train])
+    train, test = slice(0, 600), slice(600, None)
+    flow = ASRRegressor(task="multivariate_flow", max_epochs=10, learning_rate=1e-2, **MICRO).fit(x[train], y[train])
+    normal = ASRRegressor(task="multivariate_gaussian", max_epochs=10, learning_rate=1e-2, **MICRO).fit(x[train], y[train])
     # The normal sees no correlation to model; the flow sees the curve.
     assert flow.log_prob(x[test], y[test]).mean() > normal.log_prob(x[test], y[test]).mean() + 0.3
 
+
+@pytest.mark.slow
+def test_the_flow_task_predicts_samples_and_saves(tmp_path):
+    x, y = _curved(300)
+    train, test = slice(0, 200), slice(200, None)
+    flow = ASRRegressor(task="multivariate_flow", max_epochs=2, **MICRO).fit(x[train], y[train])
     dist = flow.predict_dist(x[test])
-    assert isinstance(dist, AffineTransformed) and dist.batch_shape == (500,) and dist.event_shape == (2,)
-    assert flow.predict(x[test]).shape == (500, 2)
-    assert np.allclose(flow.predict(x[test][:5]), dist[:5].mean(), atol=1e-3)
-    quantiles = flow.predict_quantiles(x[test][:6], [0.1, 0.5, 0.9])
-    assert quantiles.shape == (6, 2, 3) and np.all(np.diff(quantiles, axis=-1) > 0)
-    assert flow.sample(x[test][:4], n=7).shape == (7, 4, 2)
-    assert flow.predict_uncertainty(x[test][:4])["total"].shape == (4, 2)
+    assert isinstance(dist, AffineTransformed) and dist.batch_shape == (100,) and dist.event_shape == (2,)
+    assert flow.predict(x[test]).shape == (100, 2)
+    # One row count throughout, so each method compiles once.
+    assert np.allclose(flow.predict(x[test]), dist.mean(), atol=1e-3)
+    quantiles = flow.predict_quantiles(x[test], [0.1, 0.5, 0.9])
+    assert quantiles.shape == (100, 2, 3) and np.all(np.diff(quantiles, axis=-1) > 0)
+    assert flow.sample(x[test], n=7).shape == (7, 100, 2)
+    assert flow.predict_uncertainty(x[test])["total"].shape == (100, 2)
 
     restored = ASRModel.load(flow.save(tmp_path / "flow"))
     assert np.allclose(restored.log_prob(x[test], y[test]), flow.log_prob(x[test], y[test]), atol=1e-4)
-    with pytest.raises(AshlarError):
-        flow.calibrate(x[test], y[test])

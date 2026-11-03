@@ -1,0 +1,5 @@
+at 1281973 (dev)
+{"table": "covertype", "model": "ashlar", "variant": "v3", "seed": 1, "seconds": 226.7, "epochs": 54, "accuracy": 0.9676944657194737, "log_loss": 0.09373904764652252, "auc": 0.9987805950609205}
+{"table": "covertype", "model": "lightgbm", "variant": "", "seed": 1, "seconds": 123.8, "trees": 4000, "accuracy": 0.9637100591206768, "log_loss": 0.11191184482033865, "auc": 0.9984491749238156}
+{"table": "covertype", "model": "xgboost", "variant": "", "seed": 1, "seconds": 185.7, "trees": 3999, "accuracy": 0.949235389792002, "log_loss": 0.1439511775970459, "auc": 0.9974690106735943}
+{"table": "covertype", "model": "catboost", "variant": "", "seed": 1, "seconds": 150.4, "trees": 4000, "accuracy": 0.9126614631291791, "log_loss": 0.2442123821248972, "auc": 0.9932009531736261}

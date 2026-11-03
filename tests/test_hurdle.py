@@ -10,8 +10,10 @@ import pytest
 from ashlar import ASRModel, ASRRegressor
 from ashlar.distributions import Gamma, Hurdle, LogNormal, Mixture, randomized_pit
 from ashlar.errors import AshlarError
+from micro import MICRO
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("severity", [LogNormal(jnp.array([0.0, 1.0]), jnp.array([0.5, 1.0])), Gamma(jnp.array([2.0, 5.0]), jnp.array([0.7, 3.0]))])
 def test_hurdle_moments_quantiles_and_pit(severity):
     dist = Hurdle(jnp.array([0.3, 0.6]), severity)
@@ -34,7 +36,7 @@ def test_hurdle_fit_recovers_the_zero_probability(tmp_path):
     x = rng.normal(size=(3000, 2)).astype(np.float32)
     zero = 1.0 / (1.0 + np.exp(-1.5 * x[:, 0]))
     y = np.where(rng.random(3000) < zero, 0.0, np.exp(1.0 + 0.5 * x[:, 1] + 0.4 * rng.normal(size=3000))).astype(np.float32)
-    model = ASRRegressor(task="hurdle", max_epochs=30).fit(x[:2500], y[:2500])
+    model = ASRRegressor(task="hurdle", max_epochs=30, **MICRO).fit(x[:2500], y[:2500])
     dist = model.predict_dist(x[2500:])
     assert np.corrcoef(np.asarray(dist.cdf(0.0)), zero[2500:])[0, 1] > 0.95
     assert np.isfinite(model.log_prob(x[2500:], y[2500:])).all()
@@ -44,7 +46,7 @@ def test_hurdle_fit_recovers_the_zero_probability(tmp_path):
     assert np.mean((y[2750:] >= interval[:, 0]) & (y[2750:] <= interval[:, 1])) >= 0.75
     restored = ASRModel.load(model.save(tmp_path / "hurdle"))
     assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]), atol=1e-5)
-    gamma = ASRRegressor(task="hurdle", head_kwargs={"severity": "gamma"}, max_epochs=2).fit(x[:500], y[:500])
+    gamma = ASRRegressor(task="hurdle", head_kwargs={"severity": "gamma"}, max_epochs=2, **MICRO).fit(x[:500], y[:500])
     assert isinstance(gamma.predict_dist(x[:3]).components.severity, Gamma)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="hurdle", max_epochs=1).fit(x[:50], y[:50] - 1.0)
+        ASRRegressor(task="hurdle", max_epochs=1, **MICRO).fit(x[:50], y[:50] - 1.0)

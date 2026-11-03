@@ -11,6 +11,7 @@ from ashlar.layers import PiecewiseLinearEmbeddings, quantile_edges
 from ashlar.train import chunked_weighted
 
 import jax.numpy as jnp
+from micro import MICRO
 
 
 def _regression(n=400, seed=0):
@@ -28,27 +29,29 @@ def test_tags_follow_the_task():
     assert is_classifier(clone(ASRClassifier()))
 
 
+@pytest.mark.slow
 def test_score_is_accuracy_or_r2_and_scorers_read_probabilities():
     X, y = _regression()
     labels = (y > np.median(y)).astype(int)
-    model = ASRClassifier(max_epochs=3)
+    model = ASRClassifier(max_epochs=10, learning_rate=1e-2, **MICRO)
     auc = cross_val_score(model, X, labels, cv=3, scoring="roc_auc")
     assert np.all(auc > 0.6)
     fitted = model.fit(X, labels)
     assert fitted.score(X, labels) == pytest.approx(np.mean(fitted.predict(X) == labels))
-    regressor = ASRModel(max_epochs=5).fit(X, y)
+    regressor = ASRModel(max_epochs=20, learning_rate=1e-2, **MICRO).fit(X, y)
     assert regressor.score(X, y) > 0.3
 
 
 @pytest.mark.parametrize("kind", ["periodic", "piecewise"])
 def test_numeric_embeddings_fit_save_and_load(kind, tmp_path):
     X, y = _regression()
-    model = ASRModel(num_embeddings=kind, num_embedding_dim=8, max_epochs=3).fit(X, y)
+    model = ASRModel(max_epochs=3, **{**MICRO, "num_embeddings": kind, "num_embedding_dim": 8}).fit(X, y)
     model.save(tmp_path / "model")
     restored = ASRModel.load(tmp_path / "model")
     assert np.allclose(model.predict(X), restored.predict(X), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_piecewise_edges_are_frozen_and_start_linear():
     X, y = _regression()
     model = ASRModel(num_embeddings="piecewise", num_embedding_dim=4, max_epochs=3, weight_decay=0.1)
@@ -114,16 +117,17 @@ def test_chunked_weighted_matches_one_pass():
 
 def test_cosine_schedule_trains():
     X, y = _regression()
-    model = ASRModel(learning_rate_schedule="cosine", max_epochs=4).fit(X, y)
+    model = ASRModel(learning_rate_schedule="cosine", max_epochs=4, **MICRO).fit(X, y)
     assert len(model.history_["train_loss"]) == 4
 
 
+@pytest.mark.slow
 def test_cyclical_columns_become_points_on_a_circle(tmp_path):
     rng = np.random.default_rng(0)
     hour = rng.uniform(0, 24, size=600)
     y = np.cos(2 * np.pi * hour / 24) + 0.05 * rng.normal(size=600)
     X = {"hour": hour, "noise": rng.normal(size=600)}
-    model = ASRModel(cyclical={"hour": 24}, max_epochs=5).fit(X, y)
+    model = ASRModel(cyclical={"hour": 24}, max_epochs=5, **MICRO).fit(X, y)
     assert [column for column in model.encoder_.feature_names if column.startswith("hour")] == ["hour_sin", "hour_cos"]
     near_midnight = model.predict({"hour": np.array([23.9, 0.1]), "noise": np.zeros(2)})
     assert abs(near_midnight[0] - near_midnight[1]) < 0.2
@@ -131,4 +135,4 @@ def test_cyclical_columns_become_points_on_a_circle(tmp_path):
     restored = ASRModel.load(tmp_path / "model")
     assert np.allclose(model.predict(X), restored.predict(X), atol=1e-5)
     with pytest.raises(AshlarError):
-        ASRModel(cyclical={"minute": 60}).fit(X, y)
+        ASRModel(cyclical={"minute": 60}, **MICRO).fit(X, y)

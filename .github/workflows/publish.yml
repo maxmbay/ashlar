@@ -65,10 +65,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python -m pip install ".[dev]"
-      - run: pytest
+      - name: Restore the JAX compilation cache the tests workflow keeps
+        uses: actions/cache/restore@v4
+        with:
+          path: .jax-cache
+          key: jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-
+          restore-keys: |
+            jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-
+            jax-${{ runner.os }}-
+      # The full suite, slow tests included, before anything is uploaded.
+      - run: pytest -n auto --durations=15
         env:
           JAX_PLATFORMS: cpu
+          JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax-cache
+          JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
+          JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES: "0"
 
   build:
     needs: check
@@ -80,6 +94,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install build twine
+      - name: Check the README's links, then point them at this commit for PyPI
+        run: |
+          python examples/readme/absolute_urls.py --check
+          python examples/readme/absolute_urls.py --ref "${{ github.sha }}"
       - run: python -m build
       - run: twine check --strict dist/*
       - name: Install the wheel in a clean venv and import it

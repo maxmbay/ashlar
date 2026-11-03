@@ -72,7 +72,12 @@ COUNT_LOG_LIMIT = 20.0
 ZERO_INITIAL_LOGIT = -2.0
 OUTPUT_HEADS = ("mse", "quantile", "gaussian", "mixture", "flow", "histogram", "student_t")
 COUNT_HEADS = ("poisson", "negative_binomial")
-TABLE_HEADS = (*OUTPUT_HEADS, *COUNT_HEADS)
+# A quantile function piecewise linear in the normal score: ``ashlar.distributions.QuantileSpline``.
+SPLINE_PIECES = 4
+SPLINE_MIN_SLOPE = 0.02
+# softplus(raw + this) + SPLINE_MIN_SLOPE is sqrt(3) / pi at raw = 0, a logistic of unit variance.
+SPLINE_SLOPE_OFFSET = math.log(math.expm1(math.sqrt(3.0) / math.pi - SPLINE_MIN_SLOPE))
+TABLE_HEADS = (*OUTPUT_HEADS, *COUNT_HEADS, "quantile_spline")
 _COUNT_WIDTH = {"poisson": 1, "negative_binomial": 2}
 _FLOW_DERIVATIVE_BETA = math.log(2.0) / (1.0 - FLOW_MIN_DERIVATIVE)
 
@@ -163,6 +168,8 @@ def output_width(head: str, horizon: int, bins: int = HISTOGRAM_BINS, zero_infla
         return int(horizon) * flow_output_count()
     if head == "student_t":
         return int(horizon) * 3
+    if head == "quantile_spline":
+        return int(horizon) * (1 + 2 * SPLINE_PIECES)
     if head in COUNT_HEADS:
         return int(horizon) * (_COUNT_WIDTH[head] + int(bool(zero_inflated)))
     return int(horizon) * check_histogram_bins(bins)
@@ -202,6 +209,9 @@ def initial_bias(
         if zero_inflated:
             row.append(ZERO_INITIAL_LOGIT)
         return jnp.tile(jnp.asarray(row, dtype=jnp.float32), int(horizon))
+    if head == "quantile_spline":
+        # The median at 0 and every slope sqrt(3) / pi: a logistic of unit variance.
+        return jnp.zeros((width,), dtype=jnp.float32)
     if head == "quantile":
         z = 1.2815515655446004
         gap = math.log(math.expm1(z))
@@ -276,6 +286,15 @@ def decode(head: str, flat: jax.Array, horizon: int, bins: int | None = None):
             f"{head} projection must have shape (batch, {width}); received {flat.shape}."
         )
     batch = flat.shape[0]
+    if head == "quantile_spline":
+        raw = flat.reshape(batch, int(horizon), 1 + 2 * SPLINE_PIECES)
+        slopes = jax.nn.softplus(raw[..., 1:] + SPLINE_SLOPE_OFFSET) + SPLINE_MIN_SLOPE
+        upper, lower = slopes[..., :SPLINE_PIECES], slopes[..., SPLINE_PIECES:]
+        # Each tail is at least as steep as the piece before it, so neither is lighter than a normal's there:
+        # a tail that flattened would put a far value at an enormous normal score.
+        upper = upper.at[..., -1].add(upper[..., -2] - SPLINE_MIN_SLOPE)
+        lower = lower.at[..., -1].add(lower[..., -2] - SPLINE_MIN_SLOPE)
+        return raw[..., 0], upper, lower
     if head == "quantile":
         raw = flat.reshape(batch, int(horizon), 3)
         low = raw[..., 0]
@@ -309,6 +328,8 @@ def point_values(head: str, decoded) -> jax.Array:
     check_head(head)
     if head == "student_t":
         return decoded[0]
+    if head == "quantile_spline":
+        return _spline(decoded).mean()
     if head in COUNT_HEADS:
         return (1.0 - decoded[-1]) * decoded[0]
     if head == "quantile":
@@ -331,7 +352,7 @@ def point_values(head: str, decoded) -> jax.Array:
 def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
     """Mean training loss. ``target`` is standardized ``(batch, horizon)``."""
     check_head(head)
-    if head in {"student_t", *COUNT_HEADS}:
+    if head in {"student_t", "quantile_spline", *COUNT_HEADS}:
         return jnp.mean(-log_density(head, decoded, target))
     target = jnp.asarray(target)
     if head == "quantile":
@@ -374,6 +395,12 @@ def distributional_loss(head: str, decoded, target: jax.Array) -> jax.Array:
     raise AshlarError("the squared-error head does not use the distributional loss.")
 
 
+def _spline(decoded):
+    from ashlar.distributions import QuantileSpline
+
+    return QuantileSpline(*decoded)
+
+
 def _log_weight(weight):
     """Log of mixture weights. A weight that underflows to 0 gives a large
     negative number, not ``-inf``, so its gradient stays finite."""
@@ -409,6 +436,9 @@ def log_density(head: str, decoded, value: jax.Array) -> jax.Array:
         loc, scale, df = decoded
         _same_shape(loc, value, "student_t location")
         return student_t_log_prob(value, loc, scale, df)
+    if head == "quantile_spline":
+        _same_shape(decoded[0], value, "quantile_spline median")
+        return _spline(decoded).log_prob(value)
     if head in COUNT_HEADS:
         _same_shape(decoded[0], value, f"{head} mean")
         if head == "poisson":
@@ -458,6 +488,8 @@ def sample_values(head: str, decoded, key, n: int) -> jax.Array:
     count = int(n)
     if count < 1:
         raise AshlarError("the number of samples must be positive.")
+    if head == "quantile_spline":
+        return _spline(decoded).sample(key, (count,))
     if head == "student_t":
         loc, scale, df = decoded
         noise = jax.random.t(key, df, (count,) + loc.shape, dtype=loc.dtype)

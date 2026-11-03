@@ -37,7 +37,7 @@ Issues = "https://github.com/maxmbay/ashlar/issues"
 
 [project.optional-dependencies]
 dataframes = ["pandas>=2.0", "polars>=1.0"]
-dev = ["pandas>=2.0", "polars>=1.0", "pytest>=8.0"]
+dev = ["pandas>=2.0", "polars>=1.0", "pytest>=8.0", "pytest-xdist>=3.5"]
 
 [tool.setuptools.dynamic]
 version = {attr = "ashlar._version.__version__"}
@@ -48,4 +48,7 @@ include = ["ashlar*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -p no:cacheprovider"
+addopts = "-q -p no:cacheprovider --strict-markers"
+markers = [
+  "slow: takes more than about half a second (a fit, or a long compile); pull requests skip these, and each head keeps one fit, predict, and save test outside the mark",
+]

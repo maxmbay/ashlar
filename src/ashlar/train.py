@@ -98,13 +98,18 @@ def _learning_rate_arg(learning_rate, schedule, n_rows, batch_size, max_epochs):
     raise AshlarError("learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'.")
 
 
+# Leaves with a prior of their own in the loss, which weight decay would pull a second time.
+UNDECAYED_FIELDS = frozenset({"random_effects"})
+
+
 def decay_mask(params):
-    """``True`` for every leaf AdamW may decay. Frozen fitted leaves, such as bin edges, are ``False``."""
+    """``True`` for every leaf AdamW may decay. Frozen fitted leaves, such as bin edges, are ``False``, and so are
+    leaves with a prior of their own, such as random effects."""
     from ashlar.layers import FROZEN_FIELDS
 
     def keep(path, leaf):
         del leaf
-        return not any(getattr(entry, "name", None) in FROZEN_FIELDS for entry in path)
+        return not any(getattr(entry, "name", None) in FROZEN_FIELDS | UNDECAYED_FIELDS for entry in path)
 
     return jax.tree_util.tree_map_with_path(keep, params)
 
@@ -139,12 +144,36 @@ def surface_learning_rate(n_train: int, curvature: float, grad_rms: float) -> fl
     return float(raw)
 
 
+# An objective that draws (``objective.stochastic``, such as the energy score) takes a key. Its draws come
+# from their own stream of the step's key, apart from dropout, and validation reads every epoch with the
+# same fixed draws, so epochs compare on equal terms. Such an objective is validated in smaller chunks.
+_DRAW_STREAM = 0x5C02E
+_DRAWN_CHUNK_DIVISOR = 4
+
+
+def _loss(objective, raw, y, sample_weight, key=None):
+    """``objective(raw, y, sample_weight)``, with a key for one that draws; ``key=None`` reads the fixed draws."""
+    if not getattr(objective, "stochastic", False):
+        return objective(raw, y, sample_weight)
+    if key is None:
+        key = jax.random.PRNGKey(_DRAW_STREAM)
+    else:
+        key = jax.random.fold_in(key, _DRAW_STREAM)
+    return objective(raw, y, sample_weight, key=key)
+
+
+def _penalty(model):
+    """The model's own term beside the objective (``PredictiveCore.penalty``, such as random effects), else 0."""
+    penalty = getattr(model, "penalty", None)
+    return 0.0 if penalty is None else penalty()
+
+
 def _adamw_step(optimizer, objective):
     @filter_jit
     def step(model, state, z_batch, cat_batch, index_batch, token_batch, mask_batch, y_batch, w_batch, step_key):
         def loss_fn(candidate):
             raw = candidate(z_batch, cat_batch, index_batch, token_batch, mask_batch, key=step_key)
-            return objective(raw, y_batch, w_batch)
+            return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
 
         loss, grads = filter_value_and_grad(loss_fn)(model)
         arrays = eqx_filter(model, is_array)
@@ -239,7 +268,7 @@ def fit_loop(
 
         def loss_fn(candidate):
             raw = candidate(z_batch, cat_batch, index_batch, token_batch, mask_batch, key=None)
-            return objective(raw, y_batch, w_batch)
+            return _loss(objective, raw, y_batch, w_batch) + _penalty(candidate)
 
         grad_fn = filter_grad(loss_fn)
         grads = grad_fn(model)
@@ -277,7 +306,7 @@ def fit_loop(
     @filter_jit
     def evaluate(model, z_batch, cat_batch, index_batch, token_batch, mask_batch, y_batch, w_batch):
         raw = model(z_batch, cat_batch, index_batch, token_batch, mask_batch, key=None)
-        return objective(raw, y_batch, w_batch)
+        return _loss(objective, raw, y_batch, w_batch)
 
     if category_index is None:
         category_index = jnp.zeros((n_rows, 0), dtype=jnp.int32)
@@ -535,7 +564,7 @@ def _fit_scanned(
             def loss_fn(candidate_params):
                 candidate = eqx_combine(candidate_params, static)
                 raw = candidate(*features, key=step_key)
-                return objective(raw, y_batch, w_batch)
+                return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
 
             has_mass = jnp.sum(w_batch) > 0
 
@@ -568,8 +597,11 @@ def _fit_scanned(
     def evaluate(model, *batch):
         *features, y_batch, w_batch = batch
         raw = model(*features, key=None)
-        return objective(raw, y_batch, w_batch)
+        return _loss(objective, raw, y_batch, w_batch)
 
+    eval_rows = EVAL_CHUNK_ROWS
+    if getattr(objective, "stochastic", False):
+        eval_rows = max(256, EVAL_CHUNK_ROWS // _DRAWN_CHUNK_DIVISOR // max(1, int(core.backbone.k)))
     history = {"train_loss": [], "val_loss": []}
     best_core = core
     best_state = opt_state
@@ -598,7 +630,7 @@ def _fit_scanned(
         if validation is None:
             best_core, best_state = core, opt_state
             continue
-        val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1])
+        val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1], eval_rows)
         if val_loss != val_loss:
             raise WeightError("validation loss is not finite.")
         history["val_loss"].append(val_loss)

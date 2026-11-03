@@ -204,6 +204,10 @@ class NormalHead(_EnsembleHead):
         return raw.reshape(batch, self.k, self.n_events, 2)
 
 
+# A cure head starts at a probability of never of about 12%.
+CURE_INITIAL_LOGIT = -2.0
+
+
 class DistributionHead(_EnsembleHead):
     """Flat parameters of one ``ashlar.distributional`` head per member. Output ``(batch, member, width)``.
 
@@ -213,7 +217,9 @@ class DistributionHead(_EnsembleHead):
     for the mixture, the flow, and the count heads, mixture means on a grid.
     ``zero_inflated`` adds a structural zero to a count head, and
     ``log_mean`` starts a count head's mean at ``exp(log_mean)``; the
-    estimator sets it from the training target.
+    estimator sets it from the training target. ``cure`` adds the logit of
+    never happening to a ``gaussian``, ``mixture``, ``flow``, or
+    ``student_t`` head (``ashlar.distributions.Cured``).
     """
 
     kind: str = field(static=True)
@@ -230,6 +236,7 @@ class DistributionHead(_EnsembleHead):
         bins=None,
         zero_inflated=False,
         log_mean=0.0,
+        cure=False,
         **kwargs,
     ):
         from ashlar.distributional import (
@@ -238,6 +245,7 @@ class DistributionHead(_EnsembleHead):
             initial_weight_scale,
             output_width,
         )
+        from ashlar.distributions import CURE_HEADS
 
         del n_classes
         if kwargs:
@@ -246,11 +254,16 @@ class DistributionHead(_EnsembleHead):
             raise ShapeError("a distributional table head models one target column.")
         if bins is not None and kind != "histogram":
             raise ShapeError(f"bins is the histogram head's bin count; the {kind} head does not take it.")
+        if cure and kind not in CURE_HEADS:
+            raise ShapeError(f"cure adds never happening to a time: one of {', '.join(CURE_HEADS)}; not the {kind} head.")
         count = HISTOGRAM_BINS if bins is None else bins
-        width = output_width(kind, 1, count, bool(zero_inflated))
+        width = output_width(kind, 1, count, bool(zero_inflated)) + int(bool(cure))
         scale = initial_weight_scale(kind, d_in)
         weight = scale * jax.random.normal(key, (k, d_in, width), dtype=jnp.float32)
         start = initial_bias(kind, 1, count, zero_inflated=bool(zero_inflated), log_mean=float(log_mean))
+        if cure:
+            weight = weight.at[..., -1].multiply(0.01)
+            start = jnp.concatenate([start, jnp.asarray([CURE_INITIAL_LOGIT], dtype=jnp.float32)])
         bias = jnp.broadcast_to(start, (k, width))
         self.output = LinearEnsemble(weight=weight, bias=jnp.asarray(bias))
         self.k = k

@@ -1,0 +1,13 @@
+at c6a2fb7 (claude/project-thread-j36znx)
+airlines_delay: 1,600,000 training and 400,000 test flights; columns ['Month', 'DayOfWeek', 'CRSDepTime', 'CRSArrTime', 'UniqueCarrier', 'Origin', 'Dest', 'Distance']
+scheduled times are hhmm
+ashlar mixture fitted in 259 s, saved to /Users/maxwellbay/.cache/ashlar-bench/readme/hero-flights/ashlar-mixture-seed0
+catboost 127.31860613822937 s, lightgbm 4 s, lightgbm residual sd 29.21
+ashlar {'crps': 9.1689, 'nll': 2.6604, 'pinball': 4.345, 'coverage80': 0.7981, 'width80': 32.7999, 'brier60': 0.0388, 'rmse': 29.1111, 'mae': 13.9408}
+catboost_uncertainty {'crps': 11.4573, 'nll': 4.7216, 'pinball': 5.4873, 'coverage80': 0.9391, 'width80': 66.8171, 'brier60': 0.0392, 'rmse': 29.0586, 'mae': 13.9174}
+lightgbm_normal {'crps': 12.1955, 'nll': 4.8126, 'pinball': 5.7472, 'coverage80': 0.943, 'width80': 74.8688, 'brier60': 0.0389, 'rmse': 29.0579, 'mae': 13.9066}
+card.json: 14 KB
+hours.npz: 103 KB
+pool.npz: 159 KB
+summary.json: 5 KB
+sweep.npz: 20 KB

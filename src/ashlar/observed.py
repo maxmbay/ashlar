@@ -224,8 +224,10 @@ def noisy(label, scale) -> np.ndarray:
     The model's distribution is for the value itself; the likelihood is that
     of the recorded value, so the head learns to subtract the noise it is
     told about. Bounds and truncation apply to the recorded value. The
-    ``gaussian``, ``mixture``, and ``normal`` heads support it, since a
-    normal plus normal noise stays in closed form.
+    ``gaussian``, ``mixture``, and ``normal`` heads support it in closed
+    form, and ``student_t``, ``flow``, ``histogram``, and ``hurdle`` by
+    Gauss-Hermite quadrature over the noise. A hurdle's recorded value may
+    then fall below zero.
     """
     label = as_observed(label).copy()
     _one_column(label, "noise")
@@ -312,6 +314,65 @@ def stack(labels) -> np.ndarray:
     if len({len(part) for part in parts}) > 1:
         raise ShapeError(f"labels to stack need the same rows; received {[len(part) for part in parts]}.")
     return check(np.stack(parts, axis=1))
+
+
+class Candidates:
+    """A classifier's label that says only which classes a row could be: ``observed.one_of``.
+
+    ``mask`` is ``(rows, classes)``, true for every class the row may be,
+    and ``classes`` names the columns in sorted order.
+    """
+
+    def __init__(self, mask, classes):
+        self.mask = np.asarray(mask, dtype=bool)
+        self.classes = np.asarray(classes)
+
+    def __len__(self):
+        return len(self.mask)
+
+
+def one_of(candidates, classes=None) -> Candidates:
+    """The class of each row is one of a set: a label for ``ASRClassifier`` and ``ASROrdinalClassifier``.
+
+    ``candidates`` is a list with one entry per row: a set or list of the
+    classes the row may be, a single class for a row that is known, or
+    ``None`` for a row whose class is unknown. It may also be a boolean
+    ``(rows, classes)`` array, or a boolean DataFrame whose columns are the
+    classes. The likelihood is the probability of the set, the sum of the
+    probabilities of its classes, so a row that is one of {cat, dog} teaches
+    the model that it is not a bird and nothing about cat against dog.
+    ``classes`` lists every class, for classes that no row names alone;
+    otherwise they are every class named. An ordinal range is
+    ``interval(low, high)`` instead.
+    """
+    if type(candidates).__module__.startswith("pandas") and hasattr(candidates, "columns"):
+        classes = np.asarray(candidates.columns) if classes is None else classes
+        candidates = np.asarray(candidates, dtype=bool)
+    if isinstance(candidates, np.ndarray) and candidates.ndim == 2:
+        mask = np.asarray(candidates, dtype=bool)
+        names = np.arange(mask.shape[1]) if classes is None else np.asarray(classes)
+        if len(names) != mask.shape[1]:
+            raise ShapeError(f"one_of has {mask.shape[1]} columns and {len(names)} classes.")
+        order = np.argsort(names, kind="stable")
+        names, mask = names[order], mask[:, order]
+    else:
+        rows = [None if entry is None else ({entry} if np.isscalar(entry) else set(entry)) for entry in candidates]
+        named = set().union(*[row for row in rows if row is not None]) if rows else set()
+        names = np.asarray(sorted(named)) if classes is None else np.unique(np.asarray(list(classes)))
+        if classes is not None and not named <= set(names.tolist()):
+            raise AshlarError(f"one_of names classes {sorted(named - set(names.tolist()))} that are not in classes.")
+        index = {name: position for position, name in enumerate(names.tolist())}
+        mask = np.zeros((len(rows), len(names)), dtype=bool)
+        for row, entry in enumerate(rows):
+            if entry is None:
+                mask[row] = True
+            else:
+                mask[row, [index[name] for name in entry]] = True
+    if mask.shape[0] and not mask.any(axis=1).all():
+        raise AshlarError("every row of one_of needs at least one possible class.")
+    if len(names) < 2:
+        raise AshlarError("one_of needs at least 2 classes.")
+    return Candidates(mask, names)
 
 
 def is_observed(y) -> bool:

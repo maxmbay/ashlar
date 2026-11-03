@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from copy import deepcopy
+from copy import copy, deepcopy
 from pathlib import Path
 
 import jax
@@ -22,6 +22,7 @@ from sklearn.base import BaseEstimator
 
 from ashlar._compat import renamed
 from ashlar._version import __version__
+from ashlar.chain import ChainHead, chain_columns, chain_monotone_signs, chain_targets, column_start, resolve_columns
 from ashlar.core import PredictiveCore
 from ashlar.errors import AshlarError, ShapeError, WeightError
 from ashlar.heads import (
@@ -36,9 +37,12 @@ from ashlar.heads import (
     PointHead,
     SoftmaxHead,
 )
+from ashlar.inputs import InputModel
 from ashlar.io import dump_ref, load_leaves, load_ref, save_leaves, save_opt_state, load_opt_state
+from ashlar.monotone import MONOTONE_TASKS, MonotoneTerm, check_monotone, monotone_edges, output_signs
 from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
+    AdditiveBackbone,
     CategoricalEmbeddings,
     FeatureTransformer,
     LateBottleneck,
@@ -62,29 +66,51 @@ from ashlar.objectives import (
     joint_member_distribution,
     make_joint_objective,
     make_joint_observed_objective,
+    make_joint_score_objective,
     make_observed_objective,
     make_ordinal_expectation_objective,
     make_total_objective,
     member_distribution,
     sum_distribution,
     TOTAL_TASKS,
+    GRID_TOTAL_TASKS,
+    make_candidate_objective,
+    grid_totals,
+    segment_layout,
     make_ordinal_histogram_objective,
     ordinal_objective,
     regression_objective,
+    score_weights,
 )
 from ashlar.calibrate import (
+    MIN_CALIBRATION_ROWS,
+    MIN_GROUP_ROWS,
     check_coverage,
     cqr_calibration,
     cqr_margin,
+    density_pit,
+    disagreement_edges,
+    disagreement_keys,
+    draw_interval,
+    draw_quantiles,
+    group_keys,
+    grouped_calibration,
     interval_levels,
+    joint_calibration,
+    joint_targets,
     pit_calibration,
     pit_values,
+    recalibrated_cdf,
     recalibrated_levels,
+    region_level,
+    region_threshold,
+    target_spec,
 )
 from ashlar.distributional import COUNT_HEADS, FLOW_LAYOUT, QUANTILE_LEVELS, bare_spline_width, decode, point_values
 from ashlar import observed
 from ashlar.distributions import (
     BOX_POINTS,
+    CURE_HEADS,
     AffineTransformed,
     Categorical,
     Independent,
@@ -96,7 +122,30 @@ from ashlar.distributions import (
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
-from ashlar.preprocess import NUMERIC_SCALINGS, FeatureEncoder, frame_columns, target_array
+from ashlar.effects import (
+    EMBEDDING,
+    INTERCEPT,
+    RANDOM_EFFECT_TASKS,
+    RandomEffects,
+    check_random_effects,
+    embedding_leaves,
+    laplace_update,
+    location_outputs,
+    nesting,
+    offset_terms,
+)
+from ashlar.effects import report as effect_report
+from ashlar.shapes import ADDITIVE_REFUSED, additive_terms, check_pairs
+from ashlar.preprocess import (
+    FIELD_ORDER,
+    NUMERIC_SCALINGS,
+    EncodedBatch,
+    FeatureEncoder,
+    _is_missing,
+    check_numeric_clip,
+    frame_columns,
+    target_array,
+)
 from ashlar.search import resolve_search, trial_grid
 from ashlar.tree import TreeHead, empirical_edge_prior, parse_tree, tree_json, tree_objective
 from ashlar.train import EVAL_CHUNK_ROWS, auto_batch_size, auto_max_epochs, fit_loop, make_optimizer, pack_units
@@ -107,6 +156,7 @@ _BACKBONES = {
     "tabm": TabMBackbone,
     "transformer": FeatureTransformer,
     "set": SetEncoder,
+    "additive": AdditiveBackbone,
 }
 _FIELD_BACKBONES = (FeatureTransformer, SetEncoder)
 _HEADS = {
@@ -121,6 +171,7 @@ _HEADS = {
     "multivariate_flow": MultivariateFlowHead,
     "hurdle": HurdleHead,
     "tree": TreeHead,
+    "chain": ChainHead,
 }
 _ORDINAL_HEADS = {"ordinal", "softmax"}
 _TASK_HEAD = {"regression": "point", "classification": "logits", "normal": "normal", "ordinal": "ordinal", "tree": "tree"}
@@ -135,15 +186,18 @@ _LABELED_TASKS = {"classification", "ordinal"}
 # Tasks whose ``predict`` returns a label and whose ``predict_proba`` exists.
 _CLASSIFIER_TASKS = {*_LABELED_TASKS, "tree"}
 # Tasks whose head is a whole predictive distribution from ``ashlar.distributional``.
-DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", *COUNT_HEADS)
+DISTRIBUTION_TASKS = ("gaussian", "mixture", "flow", "histogram", "quantile", "student_t", "quantile_spline", *COUNT_HEADS)
 # Tasks whose head is one joint distribution over several target columns.
-JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow")
+JOINT_TASKS = ("multivariate_gaussian", "multivariate_mixture", "multivariate_flow", "chain")
+# Joint tasks whose marginals and moments are read from draws: no closed form.
+_DRAWN_JOINT = ("multivariate_flow", "chain")
 _SCALED_TASKS = {"regression", *(task for task in DISTRIBUTION_TASKS if task not in COUNT_HEADS), *JOINT_TASKS}
 _TASK_HEAD.update({task: "distribution" for task in DISTRIBUTION_TASKS})
 _TASK_HEAD["multivariate_gaussian"] = "multivariate_normal"
 _TASK_HEAD["multivariate_mixture"] = "multivariate_mixture"
 _TASK_HEAD["multivariate_flow"] = "multivariate_flow"
-_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow"}
+_TASK_HEAD["chain"] = "chain"
+_JOINT_FAMILY = {"multivariate_gaussian": "normal", "multivariate_mixture": "mixture", "multivariate_flow": "flow", "chain": "chain"}
 # Rows per block when reading a flow's draws, which take one network pass per column.
 _FLOW_CHUNK_ROWS = 128
 # Points × rows × members × columns × components per block when scoring a joint label.
@@ -166,9 +220,9 @@ _NUM_EMBEDDINGS = {None, "linear_relu", "periodic", "piecewise", "piecewise_relu
 # Global gradient norm cap for the distribution tasks when ``gradient_clip`` is None.
 DISTRIBUTION_GRADIENT_CLIP = 1.0
 # Tasks that train on an ``ashlar.observed`` label: every univariate head with a CDF.
-OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", *COUNT_HEADS, "normal", "hurdle")
+OBSERVED_TASKS = ("gaussian", "mixture", "flow", "histogram", "student_t", "quantile_spline", *COUNT_HEADS, "normal", "hurdle")
 # Those whose distribution plus normal noise stays in closed form.
-NOISY_TASKS = ("gaussian", "mixture", "normal")
+NOISY_TASKS = ("gaussian", "mixture", "normal", "student_t", "flow", "histogram", "quantile_spline", "hurdle")
 # Those whose sum over independent rows stays in closed form, for group totals: ``TOTAL_TASKS``.
 
 
@@ -215,7 +269,11 @@ def _point_from_raw(task, policy, raw, point_fn):
 
 
 def _decode_members(task, raw):
-    """Decode ``(batch, member, width)`` with every member as its own row."""
+    """Decode ``(batch, member, width)`` with every member as its own row. A cure head's last output is left out."""
+    from ashlar.distributions import cure_width
+
+    if cure_width(task, raw):
+        raw = raw[..., :-1]
     batch, members, width = raw.shape
     return decode(task, raw.reshape(batch * members, width), 1), batch, members
 
@@ -280,6 +338,16 @@ def _jit_observed_log_likelihood(truncated: bool, noisy: bool):
 
 
 _JOINT_LOG_BOX = None
+_GRID_TOTALS = None
+
+
+def _jit_grid_totals():
+    global _GRID_TOTALS
+    if _GRID_TOTALS is None:
+        import equinox as eqx
+
+        _GRID_TOTALS = eqx.filter_jit(grid_totals)
+    return _GRID_TOTALS
 
 
 def _jit_joint_log_box():
@@ -298,6 +366,79 @@ def _jit_observed_pit():
 
         _OBSERVED_PIT = eqx.filter_jit(observed.randomized_pit)
     return _OBSERVED_PIT
+
+
+_CDF = None
+_LOG_PROB = None
+# Draws times rows times members per block when a joint region reads the log density of its draws.
+_REGION_BLOCK = 2_000_000
+
+
+def _jit_cdf():
+    global _CDF
+    if _CDF is None:
+        import equinox as eqx
+
+        _CDF = eqx.filter_jit(lambda dist, value: dist.cdf(value))
+    return _CDF
+
+
+def _jit_draw_log_prob():
+    """``(log p(draws), log p(value))`` of ``n`` fresh draws per row and of ``value``, compiled once per shape."""
+    global _LOG_PROB
+    if _LOG_PROB is None:
+        import equinox as eqx
+
+        def score(dist, value, key, n):
+            draws = dist.sample(key, (n,))
+            return dist.log_prob(draws), None if value is None else dist.log_prob(value)
+
+        _LOG_PROB = eqx.filter_jit(score)
+    return _LOG_PROB
+
+
+def _chunks(dist, size: int):
+    """``(start, dist[start : start + size])`` over the rows of ``dist``."""
+    rows = int(dist.batch_shape[0])
+    for start in range(0, rows, int(size)):
+        yield start, dist[start : start + int(size)]
+
+
+def _projected(dist, spec):
+    """The exact distribution of a weighted-sum target, or ``None`` when it has to be read from draws."""
+    if "weights" not in spec:
+        return None
+    try:
+        return dist.project(jnp.asarray(spec["weights"], dtype=jnp.float32))
+    except NotImplementedError:
+        return None
+
+
+def _target_values(spec, values) -> np.ndarray:
+    """A joint target of ``values`` shaped ``(..., columns)``: shape ``(...)``."""
+    values = np.asarray(values, dtype=np.float64)
+    if "weights" in spec:
+        return values @ np.asarray(spec["weights"], dtype=np.float64)
+    result = np.asarray(spec["function"](values), dtype=np.float64)
+    if result.shape != values.shape[:-1]:
+        raise ShapeError(
+            f"a target function maps (..., columns) to (...), reducing the last axis; "
+            f"from shape {values.shape} it returned {result.shape}."
+        )
+    if not np.isfinite(result).all():
+        raise AshlarError("the target function returned a value that is not finite.")
+    return result
+
+
+def _thresholds(threshold, shape) -> np.ndarray:
+    values = np.asarray(threshold, dtype=np.float64)
+    try:
+        values = np.broadcast_to(values, shape)
+    except ValueError as exc:
+        raise ShapeError(f"threshold must be one number or broadcast to {shape}; received shape {values.shape}.") from exc
+    if np.isnan(values).any():
+        raise AshlarError("threshold must not be NaN.")
+    return values
 
 
 class ASRModel(BaseEstimator):
@@ -329,8 +470,23 @@ class ASRModel(BaseEstimator):
         ``head_kwargs={"class_prior": "empirical"}`` freezes the cuts at a
         Jeffreys prior from the training counts. The default cuts stay learnable.
     backbone:
-        ``residual_mlp``, ``tabm``, or an Equinox class with
-        ``__init__(d_in, *, key, **kwargs)`` and attributes ``k`` and ``d_out``.
+        ``residual_mlp``, ``tabm``, ``transformer``, ``set``, ``additive``, or
+        an Equinox class with ``__init__(d_in, *, key, **kwargs)`` and
+        attributes ``k`` and ``d_out``. ``additive`` gives each column, and
+        each pair named in ``backbone_kwargs={"pairs": [[a, b], ...]}``, a
+        network of its own, so every head output is a sum of one shape per
+        term; ``shape_functions`` reads them (``ashlar.shapes``).
+    objective:
+        ``None`` (default) trains on the task's own loss. A callable
+        ``objective(raw, y, sample_weight)`` replaces it, and ``custom``
+        needs one; a callable with ``stochastic = True`` is also passed a
+        fresh ``key=`` on every step. A joint head also takes proper scores by name:
+        ``"nll"``, its log density (the default); ``"energy"``, the energy
+        score; or a blend such as ``{"nll": 1.0, "energy": 1.0}``, which
+        may include ``"variogram"``, the variogram score of order 0.5. The
+        energy and variogram scores are estimated from 16 fresh
+        reparameterized draws per row on every step, on the standardized
+        columns. See ``ashlar.objectives.make_joint_score_objective``.
     prediction_policy:
         Classification: ``mean_probabilities`` (default) or ``mean_logits``.
         Ordinal: ``mean_probabilities``, the mean of the member class probabilities.
@@ -354,6 +510,15 @@ class ASRModel(BaseEstimator):
         train-only normal quantile transform. Scaling does not change the
         backbone, the learning rate, or the penalties. Linear-ReLU numeric
         embeddings stay off unless ``num_embeddings`` is set.
+    numeric_clip:
+        The robust soft clip, in interquartile units (default 3). A larger
+        number widens it. ``None`` turns every clip off, so a value past the
+        training range keeps moving the model instead of landing on the edge:
+        robust scaling becomes linear, and the quantile maps continue past
+        their outermost knots on a straight line at ``1.349 / IQR`` per unit,
+        the slope of a normal margin. Standard scaling never clips. Use
+        ``None`` when rows may fall outside the training range (see
+        ``docs/benchmarks.md``, "Spread past the training range").
     learning_rate_schedule:
         ``constant`` (default) keeps the AdamW rate fixed. ``linear`` decays
         that same rate to zero across the epoch budget. ``surface`` warms up
@@ -397,6 +562,37 @@ class ASRModel(BaseEstimator):
         stump has two class-logit leaves, mixed by a sigmoid gate. The
         stumps are summed with shrinkage 0.3 and added to the head's
         log-probabilities. The residual default leaves this off.
+    monotone:
+        ``None`` (default) leaves every feature to the trunk. A dict of
+        numeric feature names to ``+1`` or ``-1`` keeps those features out
+        of the trunk and adds them back through rising (or falling)
+        piecewise-linear shapes, on the head outputs whose rise moves every
+        quantile up, so the whole predictive distribution moves one way
+        with each: first-order stochastic dominance. For ``regression``,
+        ``gaussian``, ``student_t``, ``quantile_spline``, ``poisson``, and
+        ``negative_binomial``, and ``chain``, whose columns each move with
+        the feature given the columns before them, a column's own
+        ``"monotone"`` entry flipping its direction. A constrained feature
+        does not interact with the others. See ``ashlar.monotone``.
+    random_effects:
+        ``None`` (default) leaves every column to the network. A dict of
+        grouping columns to their terms, ``{"store": "intercept"}`` or
+        ``{"store": ["intercept", "price", "embedding"]}``, or nested in a
+        broader grouping column, ``{"store": {"terms": [...], "within":
+        "region"}}``, so a store is pulled towards its region, takes each
+        grouping column out of the network and gives every group a pooled
+        offset on the head's location, ``b ~ N(0, tau^2)`` with ``tau``
+        learned, plus a random slope on each named numeric feature (per unit
+        of its scaled value). ``"embedding"`` also feeds the network a pooled
+        embedding of the group, shrunk towards the average group by a learned
+        prior, so the group can interact with the other features. A group
+        seen in training predicts with its posterior; an unseen or missing
+        group with the prior, the population answer. For
+        ``regression``, ``gaussian``, ``mixture``, ``flow``, ``student_t``,
+        ``quantile``, ``quantile_spline``, ``poisson``,
+        ``negative_binomial``, and ``hurdle``, and ``chain``, which gives
+        every column with a location an offset of its own. See
+        ``ashlar.effects``, ``random_effects_``, and ``with_context``.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -447,6 +643,7 @@ class ASRModel(BaseEstimator):
         gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
         numeric_scaling: str = "robust",
+        numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
         class_weight=None,
         categorical: list[str] | None = None,
@@ -458,6 +655,8 @@ class ASRModel(BaseEstimator):
         cyclical: dict | None = None,
         random_state: int = 0,
         tree: dict | None = None,
+        monotone: dict | None = None,
+        random_effects: dict | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -490,6 +689,7 @@ class ASRModel(BaseEstimator):
         self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
         self.numeric_scaling = numeric_scaling
+        self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
         self.class_weight = class_weight
         self.categorical = categorical
@@ -497,12 +697,22 @@ class ASRModel(BaseEstimator):
         self.set_features = set_features
         self.categorical_embedding_dim = categorical_embedding_dim
         self.categorical_embedding_hidden = categorical_embedding_hidden
+        self.monotone = monotone
+        self.random_effects = random_effects
         self.set_max_length = set_max_length
         self.cyclical = cyclical
         self.random_state = random_state
         self.tree = tree
 
     def _check_config(self):
+        if check_monotone(self.monotone):
+            if self.task not in (*MONOTONE_TASKS, "chain"):
+                raise AshlarError(
+                    f"monotone constraints need a head whose outputs move every quantile one way: "
+                    f"{', '.join(MONOTONE_TASKS)}; this model is {self.task}."
+                )
+            if self._cure() or self.soft_stages is not None or not (self.head is None or isinstance(self.head, str)):
+                raise AshlarError("monotone constraints work with the built-in heads, without cure fractions or soft stages.")
         if self.task not in {
             "regression", "classification", "ordinal", "normal", "tree", "custom",
             *DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS,
@@ -539,6 +749,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
             )
+        check_numeric_clip(self.numeric_clip, self.numeric_scaling)
+        self._check_random_effects()
         if self.standardize_target and self.task not in _SCALED_TASKS:
             raise AshlarError(
                 "standardize_target is a regression label z-score. It applies to regression and the distribution tasks, "
@@ -560,8 +772,21 @@ class ASRModel(BaseEstimator):
             raise AshlarError(
                 f"task {self.task!r} uses the { _TASK_HEAD[self.task]!r} head; received head {head!r}."
             )
-        if self.task == "custom" and (head is None or self.objective is None or self.point_fn is None):
-            raise AshlarError("a custom task requires a head class, an objective, and point_fn.")
+        if self.task == "custom" and (head is None or not callable(self.objective) or self.point_fn is None):
+            raise AshlarError("a custom task requires a head class, an objective function, and point_fn.")
+        self._scores()
+        if self._cure() and self.task not in CURE_HEADS:
+            raise AshlarError(
+                f"cure=True adds the chance that a time never comes: a head for times, one of {', '.join(CURE_HEADS)}; "
+                f"not task {self.task!r}."
+            )
+        if self.task == "chain":
+            chain_columns((self.head_kwargs or {}).get("columns"))
+            if self._scores() != {"nll": 1.0}:
+                raise AshlarError(
+                    "a chain trains on its exact joint log-likelihood, objective=None: the energy and variogram "
+                    "scores need reparameterized draws, and a count or a class has none."
+                )
         if self.task not in _LABELED_TASKS and self.class_weight is not None:
             raise AshlarError(
                 "class_weight is only applied for classification and ordinal classification, and it is a loss multiplier, not a sampler."
@@ -578,7 +803,7 @@ class ASRModel(BaseEstimator):
         if self.task in {*DISTRIBUTION_TASKS, *JOINT_TASKS, *HURDLE_TASKS} and policy != "mixture":
             raise AshlarError("a distribution task predicts the equal-weight mixture of its members: prediction_policy='mixture'.")
         if isinstance(self.backbone, str) and self.backbone not in _BACKBONES:
-            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', or a class.")
+            raise AshlarError("backbone must be 'residual_mlp', 'tabm', 'transformer', 'set', 'additive', or a class.")
         if int(self.categorical_embedding_dim) < 1 or int(self.set_max_length) < 1:
             raise AshlarError("categorical_embedding_dim and set_max_length must be positive.")
         self._bottleneck_width()
@@ -595,11 +820,15 @@ class ASRModel(BaseEstimator):
         self._expectation_weight()
         self._soft_stage_count()
         kwargs = dict(self.backbone_kwargs or {})
-        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs:
+        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
             raise AshlarError(
-                "scaling_chunks and feature_chunks are derived from the fitted schema, and arch_type "
+                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema, and arch_type "
                 "other than batch-ensemble TabM is not implemented. Refusing to ignore those arguments."
             )
+        if self._backbone_cls() is AdditiveBackbone:
+            self._check_additive()
+        elif isinstance(self.backbone, str) and "pairs" in kwargs:
+            raise AshlarError("pairs are the additive backbone's pairwise terms; pass backbone='additive'.")
 
     def _policy(self) -> str:
         if self.prediction_policy is not None:
@@ -646,8 +875,10 @@ class ASRModel(BaseEstimator):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
         self._trial = None
         if not resume:
-            # A fresh fit resolves its own settings; a previous fit's must not leak in.
+            # A fresh fit resolves its own settings and builds its fields in today's order; a previous fit's must not leak in.
             self.resolved_ = None
+            self._legacy_field_order = False
+        y, validation = self._candidate_inputs(y, validation)
         y_array = target_array(y)
         X = self._with_cyclical(X)
         if validation is not None:
@@ -679,16 +910,54 @@ class ASRModel(BaseEstimator):
                 )
                 self._trial = chosen
             self._assign_after_success(names, columns, y_array, weights, train_idx, val_idx, val_pack, resume)
+            self._finish_effects(names, columns, y_array, weights, train_idx, val_idx)
             self.resolved_ = self._resolved_training()
             self.search_ = None if trials is None else {"chosen": dict(self.resolved_), "trials": trials}
         finally:
             self._trial = None
         return self
 
+    def _candidate_inputs(self, y, validation):
+        """A classifier's labels as a ``(rows, classes)`` mask when any is a set (``observed.one_of``) or a range.
+
+        A range is an ``ashlar.observed`` label on the class values, such as
+        ``observed.interval(2, 4)`` for an ordinal score known to lie from 2
+        to 4. The classes are every class a label names, and an exact value
+        of an observed label names its class.
+        """
+        self._candidates = None
+        if self.task not in _LABELED_TASKS:
+            return y, validation
+        val_y = validation[1] if validation is not None and len(validation) >= 2 else None
+
+        def coarse(value):
+            return isinstance(value, observed.Candidates) or observed.is_observed(target_array(value))
+
+        if not (coarse(y) or (val_y is not None and coarse(val_y))):
+            return y, validation
+        if self.class_weight is not None:
+            raise AshlarError("class_weight needs each row's class; a set or a range of classes has none. Weight the rows with sample_weight.")
+        if self.task == "ordinal" and (self._expectation_weight() is not None or self.histogram_variance is not None):
+            raise AshlarError("expectation_weight and histogram_variance score one known class; a set or a range of classes trains on its likelihood alone.")
+        named = [_candidate_classes(value) for value in (y, val_y) if value is not None]
+        classes = np.unique(np.concatenate([np.asarray(part) for part in named]))
+        if self.task == "ordinal":
+            classes = np.unique(_ordinal_label_vector(classes))
+        if len(classes) < 2:
+            raise AshlarError("a set or a range of classes needs at least 2 classes among the labels.")
+        self._candidates = classes
+        mask = _candidate_mask(y, classes)
+        if validation is not None:
+            validation = (validation[0], _candidate_mask(val_y, classes), *validation[2:])
+        return mask, validation
+
     def _observed_inputs(self, y_array, validation):
-        """Read both ``y`` and the validation ``y`` as ``ashlar.observed`` labels when either one is."""
+        """Read both ``y`` and the validation ``y`` as ``ashlar.observed`` labels when either one is.
+
+        A cure head always does: its likelihood is the observed one, with plain values exact.
+        """
         val_observed = validation is not None and len(validation) >= 2 and observed.is_observed(target_array(validation[1]))
-        if not (observed.is_observed(y_array) or val_observed):
+        if not (observed.is_observed(y_array) or val_observed or self._cure()):
             self._observed_spec = None
             return y_array, validation
         y_array = observed.as_observed(y_array)
@@ -723,14 +992,19 @@ class ASRModel(BaseEstimator):
                 f"{', '.join(NOISY_TASKS)}; the {task} head has none."
             )
         totals = any(observed.has_groups(part) for part in labels)
+        if self._cure() and (totals or any(observed.is_noisy(part) for part in labels)):
+            raise AshlarError("a cure head takes exact, censored, interval, and truncated times; not noisy labels or totals.")
         if totals:
-            if task not in TOTAL_TASKS:
+            if task not in TOTAL_TASKS and task not in GRID_TOTAL_TASKS:
                 raise AshlarError(
-                    f"a group total needs a head whose sum over rows has a closed form: "
-                    f"{', '.join(TOTAL_TASKS)}; the {task} head has none."
+                    f"a group total needs a head with a CDF whose rows can be summed: "
+                    f"{', '.join(dict.fromkeys((*TOTAL_TASKS, *GRID_TOTAL_TASKS)))}; the {task} head is not one."
                 )
-            if task == "poisson" and (self.head_kwargs or {}).get("zero_inflated"):
-                raise AshlarError("a sum of zero-inflated Poisson counts has no closed form; drop zero_inflated for group totals.")
+            if self._grid_totals() and any(observed.is_noisy(part) for part in labels):
+                raise AshlarError(
+                    f"a noisy group total needs a head whose sum has a closed form, {', '.join(TOTAL_TASKS)}; "
+                    f"the {task} head's total is convolved on a grid."
+                )
             if self.learning_rate_schedule == "surface":
                 raise AshlarError("group totals keep each group in one minibatch, which the surface schedule's probe does not; use another schedule.")
             for part in labels:
@@ -740,12 +1014,16 @@ class ASRModel(BaseEstimator):
             finite = bounds[np.isfinite(bounds)]
             if task in COUNT_HEADS and (np.any(finite < 0) or np.any(finite != np.round(finite))):
                 raise AshlarError(f"the {task} head models counts: observed bounds must be non-negative whole numbers or infinite.")
+            # A recorded value with noise may fall below zero; only the rows without noise must not.
+            clean = np.tile(part["noise"] == 0, 4)
+            finite = bounds[np.isfinite(bounds) & clean]
             if task in HURDLE_TASKS and np.any(finite < 0):
                 raise AshlarError("the hurdle head models an exact zero or a positive amount: observed bounds must be non-negative.")
         self._observed_spec = {
             "truncated": any(observed.is_truncated(part) for part in labels),
             "noisy": any(observed.is_noisy(part) for part in labels),
             "totals": totals,
+            "max_rows": max(int(observed.group_sizes(part).max()) for part in labels) if totals else None,
         }
 
     def _check_joint_observed(self, labels):
@@ -762,6 +1040,24 @@ class ASRModel(BaseEstimator):
         if self.n_events is not None and int(self.n_events) not in columns:
             raise ShapeError(f"n_events={self.n_events} does not match a label with {columns.pop()} columns.")
         coarse = any(not observed.is_exact(part).all() for part in labels)
+        if coarse and self.task == "chain":
+            columns = chain_columns((self.head_kwargs or {}).get("columns"))
+            fixed = [index for index, column in enumerate(columns[:-1]) if column.kind != "categorical"]
+            for part in labels:
+                if not fixed:
+                    continue
+                exact = observed.is_exact(part)
+                fields = np.asarray(part)
+                unknown = np.isneginf(fields["lower"]) & np.isposinf(fields["upper"])
+                # A coarse cell is allowed where every later cell of its row is unknown.
+                tail = np.flip(np.cumsum(np.flip(~unknown, axis=1), axis=1), axis=1)
+                tail_unknown = np.concatenate([tail[:, 1:] == 0, np.ones((len(fields), 1), dtype=bool)], axis=1)
+                if not (exact[:, fixed] | tail_unknown[:, fixed]).all():
+                    raise AshlarError(
+                        "a chain conditions each column on the ones before it, so a cell before the last column must be "
+                        "exact, unless its column is categorical, whose classes a range sums over, or every later cell "
+                        "of its row is unknown, observed.interval(-inf, inf). Put a censored or interval column last."
+                    )
         if coarse and self.task == "multivariate_flow" and int((self.head_kwargs or {}).get("depth", 1)) != 1:
             raise AshlarError(
                 "the joint flow trains on coarse cells with one autoregressive block, head_kwargs={'depth': 1}; "
@@ -851,6 +1147,7 @@ class ASRModel(BaseEstimator):
             raise AshlarError("the hurdle head models an exact zero or a positive amount: y must be non-negative.")
         y_train_model = self._fit_target_scale(y_train_model)
         self.calibration_ = None
+        self._calibration_functions = {}
         categorical = list(self._categorical_names(names, columns))
         encoder = FeatureEncoder.fit(
             train_frame,
@@ -859,6 +1156,7 @@ class ASRModel(BaseEstimator):
             set_features=list(self.set_features or []),
             set_max_length=int(self.set_max_length),
             numeric_scaling=self.numeric_scaling,
+            numeric_clip=self.numeric_clip,
         )
         if self.num_embeddings is not None and encoder.n_numeric == 0:
             raise AshlarError("num_embeddings was requested, but the training partition has no numeric columns.")
@@ -872,6 +1170,8 @@ class ASRModel(BaseEstimator):
             train_key = self._train_key
         else:
             init_key, train_key = jax.random.split(jax.random.PRNGKey(int(self.random_state)))
+            # The random effects' KL divergence is counted once per pass over this much training weight.
+            self._effect_mass = float(np.sum(w_train)) if w_train is not None else float(len(train_idx))
             core = self._build_core(
                 encoder,
                 n_events,
@@ -912,6 +1212,7 @@ class ASRModel(BaseEstimator):
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
         self.numeric_transform_ = encoder.numeric_transform
+        self.input_model_ = InputModel.fit(np.asarray(encoded.numeric_raw))
         self.core_ = trained
         self.opt_state_ = opt_state
         self.classes_ = None if classes is None else np.asarray(classes)
@@ -1018,6 +1319,7 @@ class ASRModel(BaseEstimator):
             set_features=list(self.set_features or []),
             set_max_length=int(self.set_max_length),
             numeric_scaling=self.numeric_scaling,
+            numeric_clip=self.numeric_clip,
         )
         n_events, n_classes = self._output_sizes(y_train_model, classes)
         encoded = encoder.transform(train_frame)
@@ -1037,7 +1339,8 @@ class ASRModel(BaseEstimator):
         )
         resolved = self._resolved_training()
         score_fn = None
-        if self.task == "classification":
+        # Accuracy needs each row's class; a set of classes is scored by its likelihood.
+        if self.task == "classification" and getattr(self, "_candidates", None) is None:
             policy = self._policy()
 
             def score_fn(model, z_batch, cat_batch, index_batch, token_batch, mask_batch, y_batch, w_batch, policy=policy):
@@ -1070,7 +1373,7 @@ class ASRModel(BaseEstimator):
         if not history["val_loss"]:
             raise AshlarError("a search trial produced no validation loss.")
         result = {"val_loss": float(min(history["val_loss"])), "metric": "val_loss"}
-        if self.task == "classification":
+        if self.task == "classification" and getattr(self, "_candidates", None) is None:
             if not history.get("val_score"):
                 raise AshlarError("a classification search trial produced no accuracy score.")
             result = {
@@ -1081,15 +1384,83 @@ class ASRModel(BaseEstimator):
         return result
 
     def _embedding_argument(self) -> list[str] | None:
-        """``None`` embeds every non-set categorical. A list, including ``[]``, is explicit."""
+        """``None`` embeds every non-set categorical. A list, including ``[]``, is explicit.
+
+        A grouping column of ``random_effects`` is always an embedding column, which the core reads as group indices.
+        """
         if self.categorical_embeddings is None:
             return None
-        return list(self.categorical_embeddings)
+        named = list(self.categorical_embeddings)
+        return named + [name for name in check_random_effects(self.random_effects) if name not in named]
+
+    def _check_random_effects(self):
+        effects = check_random_effects(self.random_effects)
+        if not effects:
+            return
+        if self.task not in (*RANDOM_EFFECT_TASKS, "chain"):
+            raise AshlarError(
+                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, or chain, "
+                f"not {self.task!r}."
+            )
+        if not (self.head is None or isinstance(self.head, str)) or self._cure():
+            raise AshlarError("random effects work with the built-in heads, without cure fractions.")
+        if not self.share_training_batches:
+            raise AshlarError("random effects train with shared minibatches; leave share_training_batches=True.")
+        clash = set(effects).intersection(self.set_features or [])
+        if clash:
+            raise AshlarError(f"grouping columns {sorted(clash)} cannot also be set features.")
+        constrained = check_monotone(self.monotone)
+        for name, terms in effects.items():
+            if name in constrained:
+                raise AshlarError(f"{name!r} is a monotone feature, so it cannot be a grouping column.")
+            sloped = [term for term in terms if term in constrained]
+            if sloped:
+                raise AshlarError(
+                    f"a random slope on a monotone feature ({sloped}) could turn its effect around for a group."
+                )
+
+    def _check_additive(self):
+        """Refuse what would mix the additive backbone's terms before the head's outputs."""
+        if self.task in ADDITIVE_REFUSED:
+            raise AshlarError(
+                f"the {self.task} head reads the hidden layer through a network of its own, so its outputs would not "
+                "be sums of per-feature terms. backbone='additive' takes every other built-in head."
+            )
+        if self._bottleneck_width() is not None:
+            raise AshlarError("a bottleneck mixes the additive backbone's terms; leave bottleneck=None.")
+        if self._soft_stage_count() is not None:
+            raise AshlarError("soft_stages adds stumps outside the additive terms; leave soft_stages=None.")
+        if not self.share_training_batches:
+            raise AshlarError("the additive backbone shows every member the same rows; leave share_training_batches=True.")
+        constrained = check_monotone(self.monotone)
+        for pair in check_pairs((self.backbone_kwargs or {}).get("pairs")):
+            clash = [name for name in pair if name in constrained]
+            if clash:
+                raise AshlarError(f"a monotone feature does not interact with the others, so {clash} cannot be in a pair.")
+
+    def _field_source(self, name: str) -> str:
+        """The column of ``X`` a field comes from: a cyclical column's ``_sin`` and ``_cos`` come from it."""
+        for suffix in ("_sin", "_cos"):
+            if self.cyclical and name.endswith(suffix) and name[: -len(suffix)] in self.cyclical:
+                return name[: -len(suffix)]
+        return name
+
+    def _additive_terms(self, names: list[str], pairs):
+        """The additive backbone's terms over the core's fields ``names``, and each term's columns.
+
+        One term per column of ``X``, so a cyclical column's sine and cosine
+        are one term, and one per pair, over both columns' fields. A monotone
+        feature reaches the outputs through its own shape, so no term reads it.
+        """
+        return additive_terms(
+            [self._field_source(name) for name in names], check_pairs(pairs), set(check_monotone(self.monotone))
+        )
 
     def _categorical_names(self, names, columns):
         requested = set(self.categorical or [])
         requested.update(self.categorical_embeddings or [])
         requested.update(self.set_features or [])
+        requested.update(check_random_effects(self.random_effects))
         unknown = requested.difference(names)
         if unknown:
             raise AshlarError(f"categorical columns {sorted(unknown)} are not in X.")
@@ -1099,6 +1470,8 @@ class ASRModel(BaseEstimator):
         return requested
 
     def _training_target(self, y_train, w_train):
+        if getattr(self, "_candidates", None) is not None:
+            return self._candidates, np.asarray(y_train, dtype=np.float32), w_train
         if self.task in _LABELED_TASKS:
             labels = _ordinal_label_vector(y_train) if self.task == "ordinal" else np.asarray(y_train)
             classes, encoded = np.unique(labels, return_inverse=True)
@@ -1174,28 +1547,46 @@ class ASRModel(BaseEstimator):
         return weight
 
     def _objective(self, class_values=None, n_events: int = 1):
-        if self.objective is not None:
+        scores = self._scores()
+        if scores is None:
             return self.objective
         if self._observing():
             spec = self._observed_spec
             if spec.get("joint"):
                 family, components = _JOINT_FAMILY[self.task], self._mixture_components()
                 if spec.get("coarse"):
-                    return make_joint_observed_objective(n_events, family, components=components)
-                # Every cell exact: the joint density of the values themselves, the first field.
-                density = make_joint_objective(n_events, family, components=components)
-                return lambda raw, y, sample_weight: density(raw, y[..., 0], sample_weight)
+                    if scores != {"nll": 1.0}:
+                        raise AshlarError(
+                            "the energy and variogram scores compare draws with a value, and a censored or interval "
+                            "cell has none; a joint label with coarse cells trains on its likelihood, objective='nll'."
+                        )
+                    return make_joint_observed_objective(n_events, family, components=components, columns=self._chain_columns())
+                # Every cell exact: the scores of the values themselves, the first field.
+                exact = self._joint_objective(n_events, scores)
+
+                def objective(raw, y, sample_weight, **kwargs):
+                    return exact(raw, y[..., 0], sample_weight, **kwargs)
+
+                objective.stochastic = getattr(exact, "stochastic", False)
+                return objective
             if spec.get("totals"):
-                return make_total_objective(self.task, truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy")))
+                return make_total_objective(
+                    self.task,
+                    truncated=bool(spec.get("truncated")),
+                    noisy=bool(spec.get("noisy")),
+                    max_rows=spec["max_rows"] if self._grid_totals() else None,
+                )
             return make_observed_objective(
                 self.task, severity=self._severity(), truncated=bool(spec.get("truncated")), noisy=bool(spec.get("noisy"))
             )
+        if getattr(self, "_candidates", None) is not None:
+            return make_candidate_objective(self.task)
         if self.task == "ordinal" and self.histogram_variance is not None:
             return make_ordinal_histogram_objective(float(self.histogram_variance))
         if self.task in DISTRIBUTION_TASKS:
             return make_distribution_objective(self.task)
         if self.task in JOINT_TASKS:
-            return make_joint_objective(n_events, _JOINT_FAMILY[self.task], components=self._mixture_components())
+            return self._joint_objective(n_events, scores)
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
@@ -1206,8 +1597,27 @@ class ASRModel(BaseEstimator):
             raise AshlarError("expectation_weight needs the ordered class values from the training labels.")
         return make_ordinal_expectation_objective(np.asarray(class_values, dtype=np.float64), weight)
 
+    def _scores(self) -> dict | None:
+        """``{score: weight}`` of a built-in objective, or ``None`` for a custom callable. See ``score_weights``."""
+        scores = score_weights(self.objective)
+        if scores is not None and self.objective is not None and self.task not in JOINT_TASKS:
+            raise AshlarError(
+                f"objective={self.objective!r} names proper scores for a joint head ({', '.join(JOINT_TASKS)}); "
+                f"task {self.task!r} trains on its own loss, or on a callable objective."
+            )
+        return scores
+
+    def _joint_objective(self, n_events: int, scores: dict):
+        family, components = _JOINT_FAMILY[self.task], self._mixture_components()
+        if scores == {"nll": 1.0}:
+            return make_joint_objective(n_events, family, components=components, columns=self._chain_columns())
+        return make_joint_score_objective(n_events, family, scores, components=components)
+
     def _head_kwargs_for_fit(self, y_encoded, n_classes: int) -> dict:
         kwargs = dict(self.head_kwargs or {})
+        if self.task == "chain":
+            kwargs.update(self._chain_kwargs(y_encoded))
+            return kwargs
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
         if observed.is_observed(y_encoded):
@@ -1232,7 +1642,12 @@ class ASRModel(BaseEstimator):
             return kwargs
         if self.task != "ordinal":
             raise AshlarError("class_prior='empirical' is an ordinal cut prior. It does not apply to other tasks.")
-        counts = np.bincount(np.asarray(y_encoded, dtype=np.int64).reshape(-1), minlength=int(n_classes)).astype(np.float64)
+        if np.ndim(y_encoded) == 2:
+            # A set of classes counts each of its classes in equal shares.
+            mask = np.asarray(y_encoded, dtype=np.float64)
+            counts = (mask / mask.sum(axis=1, keepdims=True)).sum(axis=0)
+        else:
+            counts = np.bincount(np.asarray(y_encoded, dtype=np.int64).reshape(-1), minlength=int(n_classes)).astype(np.float64)
         total = float(counts.sum())
         if total <= 0.0:
             raise AshlarError("the empirical class prior needs at least one training label.")
@@ -1245,6 +1660,8 @@ class ASRModel(BaseEstimator):
 
     def _head_kwargs_for_load(self) -> dict:
         kwargs = dict(self.head_kwargs or {})
+        if self.task == "chain":
+            kwargs["columns"] = [column.to_json() for column in self._chain_columns()]
         if self.task in DISTRIBUTION_TASKS:
             kwargs["kind"] = self.task
         if self.task == "tree":
@@ -1255,6 +1672,37 @@ class ASRModel(BaseEstimator):
 
     def _severity(self) -> str:
         return str((self.head_kwargs or {}).get("severity", "lognormal"))
+
+    def _grid_totals(self) -> bool:
+        """Whether this head's group totals are convolved on a grid: its sum over rows has no closed form."""
+        zero_inflated = bool((self.head_kwargs or {}).get("zero_inflated"))
+        return self.task in GRID_TOTAL_TASKS and (self.task not in TOTAL_TASKS or zero_inflated)
+
+    def _cure(self) -> bool:
+        return bool((self.head_kwargs or {}).get("cure", False))
+
+    def _chain_columns(self):
+        """A chain's columns, resolved from the training values once fitted; ``None`` for the other tasks."""
+        if self.task != "chain":
+            return None
+        resolved = getattr(self, "chain_columns_", None)
+        if resolved is not None:
+            return resolved
+        return chain_columns((self.head_kwargs or {}).get("columns"))
+
+    def _chain_kwargs(self, y_encoded) -> dict:
+        """The chain head's columns, resolved from the training values, and each column's starting bias."""
+        if observed.is_observed(y_encoded):
+            label = observed.as_observed(y_encoded)
+            values = np.where(observed.is_exact(label), label["lower"], np.nan)
+        else:
+            values = np.asarray(y_encoded, dtype=np.float64)
+        columns = resolve_columns(chain_columns((self.head_kwargs or {}).get("columns")), values)
+        self.chain_columns_ = columns
+        return {
+            "columns": [column.to_json() for column in columns],
+            "start": [np.asarray(column_start(column, values[:, index])).tolist() for index, column in enumerate(columns)],
+        }
 
     def _mixture_components(self) -> int | None:
         """The joint mixture's component count, as its head reads it; ``None`` for the other tasks."""
@@ -1278,6 +1726,91 @@ class ASRModel(BaseEstimator):
             )
         return int(value)
 
+    def _monotone_term(self, encoder, numeric_z, members: int, head, d_head: int):
+        """The ``MonotoneTerm`` for ``monotone=``, or ``None``."""
+        constraints = check_monotone(self.monotone)
+        if not constraints:
+            return None
+        numeric = [column.name for column in encoder.columns if column.role == "numeric"]
+        unknown = [name for name in constraints if name not in numeric]
+        if unknown:
+            raise AshlarError(f"monotone features must be numeric columns of X; {unknown} are not.")
+        columns = [numeric.index(name) for name in constraints]
+        edges = monotone_edges(None if numeric_z is None else np.asarray(numeric_z), columns)
+        if self.task == "chain":
+            signs = chain_monotone_signs(head.columns, head.hidden, constraints)
+            return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
+        shape = jax.eval_shape(lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32))
+        if not hasattr(shape, "shape") or len(shape.shape) != 3:
+            raise AshlarError(f"monotone constraints need one of {', '.join(MONOTONE_TASKS)}; this model is {self.task}.")
+        signs = output_signs(self.task, int(shape.shape[-1]))
+        return MonotoneTerm(edges, members, columns, list(constraints.values()), signs)
+
+    def _random_effects_term(self, encoder, members: int, head, d_head: int, key):
+        """The ``RandomEffects`` for ``random_effects=``, or ``None``."""
+        effects = check_random_effects(self.random_effects)
+        if not effects:
+            return None
+        embedded = [column.name for column in encoder.embedding_columns]
+        numeric = [column.name for column in encoder.columns if column.role == "numeric"]
+        missing = [name for name in effects if name not in embedded]
+        if missing:
+            raise AshlarError(f"grouping columns {missing} are not categorical columns of X.")
+        slopes = []
+        for name, terms in effects.items():
+            terms = offset_terms(terms)
+            unknown = [term for term in terms if term != INTERCEPT and term not in numeric]
+            if unknown:
+                raise AshlarError(f"random slopes of {name!r} need numeric columns of X; {unknown} are not.")
+            slopes.append([-1 if term == INTERCEPT else numeric.index(term) for term in terms])
+        targets = None
+        if self.task == "chain":
+            # One offset per column with a location, and per class after the first of a categorical column.
+            targets, _ = chain_targets(head.columns)
+            locations, scales = [position for target in targets for position in target], None
+        else:
+            shape = jax.eval_shape(
+                lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+            )
+            locations, scales = location_outputs(self.task, int(shape.shape[-1]))
+        sizes = [len(encoder.embedding_columns[embedded.index(name)].categories) for name in effects]
+        parents = nesting(self.random_effects)
+        mass = float(getattr(self, "_effect_mass", 1.0) or 1.0)
+        return RandomEffects(
+            sizes,
+            [embedded.index(name) for name in effects],
+            slopes,
+            locations,
+            scales,
+            1.0 / mass,
+            embedded=[position for position, terms in enumerate(effects.values()) if EMBEDDING in terms],
+            embedding_dim=int(self.categorical_embedding_dim),
+            parents=[list(effects).index(parents[name]) if name in parents else -1 for name in effects],
+            key=key,
+            targets=targets,
+        )
+
+    @property
+    def random_effects_(self) -> dict:
+        """Per grouping column: ``terms``, ``tau`` per term, and each seen group's posterior ``mean`` and ``sd``.
+
+        In the units of the head's location: ``y`` for the normal-family heads
+        (``tau`` is the standard deviation of a group's offset in ``y``), and
+        the log mean for the count heads and the gamma severity. ``categories``
+        orders the rows of ``mean`` and ``sd``.
+        """
+        self._require_fitted()
+        module = getattr(self.core_, "random_effects", None)
+        if module is None:
+            raise AshlarError("this model has no random effects; fit with random_effects={column: 'intercept'}.")
+        return effect_report(module, check_random_effects(self.random_effects), self.encoder_, self._location_unit())
+
+    def _location_unit(self) -> float:
+        """One unit of the head's location in ``y``: the target scale for a standardized target, else 1."""
+        if self.task in _SCALED_TASKS and self.standardize_target and self.task != "chain":
+            return float(np.asarray(self.target_std_, dtype=np.float64).reshape(-1)[0])
+        return 1.0
+
     def _soft_stage_count(self) -> int | None:
         value = self.soft_stages
         if value is None or value is False:
@@ -1300,7 +1833,9 @@ class ASRModel(BaseEstimator):
         if self.num_embeddings is not None:
             embedding_dim = int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
-        chunks = encoder.feature_chunks(embedding_dim, cat_dim)
+        fields = self._core_fields(encoder)
+        effects = check_random_effects(self.random_effects)
+        chunks = [width for _, width in fields]
         d_in = sum(chunks)
         backbone_cls = self._backbone_cls()
         kwargs = dict(self._resolved_training()["backbone_kwargs"] or {})
@@ -1309,6 +1844,9 @@ class ASRModel(BaseEstimator):
             kwargs["share_training_batches"] = bool(self.share_training_batches)
         if backbone_cls in _FIELD_BACKBONES:
             kwargs["feature_chunks"] = chunks
+        if backbone_cls is AdditiveBackbone:
+            kwargs["feature_chunks"] = chunks
+            kwargs["terms"] = self._additive_terms([name for name, _ in fields], kwargs.pop("pairs", None))[0]
         embeddings = None
         if self.num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
@@ -1322,9 +1860,13 @@ class ASRModel(BaseEstimator):
             embeddings = PiecewiseLinearEmbeddings(
                 edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
             )
-        categorical_embeddings = _category_tables(
-            encoder.embedding_columns, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden)
-        )
+        embedded = [column for column in encoder.embedding_columns if column.name not in effects]
+        categorical_embeddings = _category_tables(embedded, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden))
+        embedding_positions = None
+        if effects:
+            embedding_positions = tuple(
+                index for index, column in enumerate(encoder.embedding_columns) if column.name not in effects
+            )
         set_embeddings = _category_tables(encoder.set_columns, cat_dim, set_key, set_encoder=True)
         backbone = backbone_cls(d_in, key=backbone_key, **kwargs)
         if not hasattr(backbone, "k") or not hasattr(backbone, "d_out"):
@@ -1362,7 +1904,12 @@ class ASRModel(BaseEstimator):
                 shrinkage=SOFT_STAGE_SHRINKAGE,
                 key=jax.random.fold_in(key, 8),
             )
+        monotone = self._monotone_term(encoder, numeric_z, int(backbone.k), head, d_head)
+        random_effects = self._random_effects_term(encoder, int(backbone.k), head, d_head, jax.random.fold_in(key, 9))
         return PredictiveCore(
+            monotone=monotone,
+            random_effects=random_effects,
+            embedding_positions=embedding_positions,
             embeddings=embeddings,
             categorical_embeddings=categorical_embeddings,
             set_embeddings=set_embeddings,
@@ -1378,6 +1925,21 @@ class ASRModel(BaseEstimator):
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
         )
+
+    def _core_fields(self, encoder: FeatureEncoder) -> list[tuple[str, int]]:
+        """``(column, width)`` of each field the backbone reads, in the core's order (``FeatureEncoder.fields``).
+
+        A grouping column of ``random_effects`` reaches the network only
+        through its pooled embedding, a field of its own after the others.
+        """
+        embedding_dim = None if self.num_embeddings is None else int(self.num_embedding_dim)
+        cat_dim = int(self.categorical_embedding_dim)
+        fields = encoder.fields(embedding_dim, cat_dim, legacy=bool(getattr(self, "_legacy_field_order", False)))
+        effects = check_random_effects(self.random_effects)
+        if effects:
+            fields = [(name, width) for name, width in fields if name not in effects]
+            fields += [(name, cat_dim) for name in embedding_leaves(effects, nesting(self.random_effects))]
+        return fields
 
     def _fit_target_scale(self, y):
         if not self.standardize_target or self.task not in _SCALED_TASKS:
@@ -1413,7 +1975,18 @@ class ASRModel(BaseEstimator):
         self.target_std_ = float(std) if np.ndim(std) == 0 else np.asarray(std, dtype=np.float64)
         return self._apply_target_scale(array)
 
+    def _raw_chain_columns(self):
+        """Mean 0 and scale 1 for a chain's columns that are read raw: counts, amounts, and classes."""
+        if self.task != "chain" or self.target_mean_ is None:
+            return
+        raw = np.asarray([not column.scaled for column in chain_columns((self.head_kwargs or {}).get("columns"))])
+        if raw.size != np.size(self.target_mean_):
+            raise ShapeError(f"the chain names {raw.size} columns; y has {np.size(self.target_mean_)}.")
+        self.target_mean_ = np.where(raw, 0.0, np.atleast_1d(self.target_mean_)).astype(np.float64)
+        self.target_std_ = np.where(raw, 1.0, np.atleast_1d(self.target_std_)).astype(np.float64)
+
     def _apply_target_scale(self, y):
+        self._raw_chain_columns()
         if not self.standardize_target or self.target_mean_ is None:
             return y
         if observed.is_observed(y):
@@ -1444,7 +2017,9 @@ class ASRModel(BaseEstimator):
         encoded = encoder.transform(frame)
         numeric_z = encoder.numeric_transform(encoded.numeric_raw)
         categorical = encoded.categorical_onehot
-        if self.task in _LABELED_TASKS:
+        if getattr(self, "_candidates", None) is not None:
+            y_device, w_device = _device_targets(self.task, np.asarray(y_val, dtype=np.float32), w_val)
+        elif self.task in _LABELED_TASKS:
             labels = _ordinal_label_vector(y_val) if self.task == "ordinal" else np.asarray(y_val)
             y_encoded = _encode_known_labels(labels, classes)
             w_val = _apply_class_weight(labels, y_encoded, len(classes), self.class_weight, np.asarray(w_val, dtype=np.float64))
@@ -1526,6 +2101,72 @@ class ASRModel(BaseEstimator):
         )
         return self.core_(transformed, categorical, category_index, set_tokens, set_mask, key=None)
 
+    def encode(self, X) -> EncodedBatch:
+        """Host-encode a frame for the traceable path: ``forward_raw`` and ``forward_dist``.
+
+        Returns an ``EncodedBatch`` whose ``numeric_raw`` is still in the
+        units of ``X``, NaNs included; imputation and scaling run inside JAX.
+        Categories become one-hot columns, learned-embedding indices, and set
+        tokens here, on the host, so gradients reach numeric columns only.
+        """
+        self._require_fitted()
+        return self.encoder_.transform(self._with_cyclical(X))
+
+    def forward_dist(
+        self,
+        numeric_raw,
+        categorical_onehot,
+        category_index=None,
+        set_tokens=None,
+        set_mask=None,
+        *,
+        policy: str | None = None,
+    ):
+        """``predict_dist`` from encoded arrays, traceable end to end.
+
+        ``predict_dist(X)`` encodes the frame on the host, so ``jax.grad``
+        cannot reach ``X`` through it. This takes the arrays from
+        ``encode(X)`` instead and runs imputation, scaling, the core, and the
+        head inside JAX, so ``jax.grad``, ``jax.jit``, and ``jax.vmap`` see the
+        whole path from raw numeric values to the ``Distribution``::
+
+            batch = model.encode(X)
+            def q90(numeric):
+                dist = model.forward_dist(numeric, batch.categorical_onehot, batch.category_index,
+                                          batch.set_tokens, batch.set_mask)
+                return dist.quantile(0.9).sum()
+            jax.grad(q90)(batch.numeric_raw)  # d q90 / d x, in the units of X
+
+        A NaN cell is imputed with the training median, so its gradient is 0.
+        """
+        raw = self.forward_raw(numeric_raw, categorical_onehot, category_index, set_tokens, set_mask)
+        return self.dist_from_raw(raw, policy)
+
+    def explain(self, X, target="quantile", **kwargs):
+        """Attribute a quantile, the spread, an interval's width, or a tail probability to the features.
+
+        Shorthand for ``ashlar.explain.explain(self, X, target, **kwargs)``;
+        see there for targets, methods, and baselines.
+        """
+        from ashlar.explain import explain
+
+        self._require_distribution("explain")
+        return explain(self, X, target, **kwargs)
+
+    def shape_functions(self, X, *, center: bool = True):
+        """Each additive term's part of each head output, row by row, for ``backbone="additive"``.
+
+        Returns an ``ashlar.shapes.ShapeFunctions``: per row, the intercept
+        plus the terms is the head's output (a location, a raw scale, a log
+        mean, a logit), so a term's values against its column draw that
+        column's shape on that output. Terms are centered on the rows of
+        ``X``; pass the training rows, or a sample, to read them against the
+        data's average. ``center=False`` leaves each term as the network gives it.
+        """
+        from ashlar.shapes import read_shapes
+
+        return read_shapes(self, X, center=center)
+
     def forward_transformed(self, numeric_raw, categorical_onehot, category_index=None, set_tokens=None, set_mask=None):
         """Point predictions from raw numeric values, keeping JAX arrays."""
         raw = self.forward_raw(
@@ -1557,6 +2198,316 @@ class ASRModel(BaseEstimator):
     def _raw_from_frame(self, X):
         self._require_fitted()
         encoded = self.encoder_.transform(self._with_cyclical(X))
+        settings = getattr(self, "_uncertain_inputs", None)
+        if settings is not None:
+            return self._raw_over_inputs(X, encoded, settings)
+        return self._raw_from_encoded(encoded)
+
+    def _raw_over_inputs(self, X, encoded, settings):
+        """Raw outputs on ``draws`` completions of each row, the draws folded into the member axis."""
+        numeric = np.asarray(encoded.numeric_raw, dtype=np.float64)
+        n_rows = numeric.shape[0]
+        draws = int(settings["draws"])
+        noise = self._input_noise(X, settings.get("noise"), n_rows)
+        completed = self._input_model().draw(numeric, draws, np.random.default_rng(settings.get("seed", 0)), noise)
+        tiled = EncodedBatch(
+            numeric_raw=jnp.asarray(completed.reshape(draws * n_rows, -1), dtype=jnp.float32),
+            categorical_onehot=jnp.tile(encoded.categorical_onehot, (draws, 1)),
+            category_index=jnp.tile(encoded.category_index, (draws, 1)),
+            set_tokens=jnp.tile(encoded.set_tokens, (draws, 1, 1)),
+            set_mask=jnp.tile(encoded.set_mask, (draws, 1, 1)),
+        )
+        raw = self._raw_from_encoded(tiled)
+
+        def fold(array):
+            if array.ndim < 3:
+                raise AshlarError("uncertain inputs need a head with a member axis.")
+            shaped = array.reshape(draws, n_rows, *array.shape[1:])
+            return jnp.moveaxis(shaped, 0, 1).reshape(n_rows, draws * array.shape[1], *array.shape[2:])
+
+        if isinstance(raw, tuple):
+            return (fold(raw[0]), *raw[1:])
+        return fold(raw)
+
+    def _input_model(self) -> InputModel:
+        model = getattr(self, "input_model_", None)
+        if model is None:
+            raise AshlarError(
+                "this model has no input model (it was saved by an older version). Call fit_inputs(X_train) first."
+            )
+        return model
+
+    def _input_noise(self, X, noise, n_rows):
+        if not noise:
+            return None
+        numeric = [column.name for column in self.encoder_.columns if column.role == "numeric"]
+        out = np.zeros((n_rows, len(numeric)))
+        for name, value in dict(noise).items():
+            if name not in numeric:
+                raise AshlarError(
+                    f"input_noise names {name!r}, which is not a numeric feature; the numeric features are {numeric}."
+                )
+            sd = np.broadcast_to(np.asarray(value, dtype=np.float64), (n_rows,))
+            if np.any(~np.isfinite(sd)) or np.any(sd < 0):
+                raise AshlarError("input_noise standard deviations must be finite and non-negative.")
+            out[:, numeric.index(name)] = sd
+        return out
+
+    def with_uncertain_inputs(self, draws: int = 32, noise: dict | None = None, seed: int = 0):
+        """A view of this model that integrates over what is unknown about each row's inputs.
+
+        Every prediction (``predict_dist``, ``predict_interval``,
+        ``predict_quantiles``, ``predict_exceedance``, ``sample``,
+        ``log_prob``, ``predict``, and ``calibrate``) runs the network on
+        ``draws`` completions of each row and mixes them with the members:
+
+        - a missing numeric cell is drawn from its distribution given the
+          row's observed numeric cells, under a Gaussian copula of the
+          numeric features fitted on the training partition
+          (``input_model_``), instead of being set to the training median;
+        - ``noise={"column": sd}`` declares a measurement error: that cell is
+          drawn as ``value + sd * N(0, 1)``. ``sd`` is a number or one per row.
+
+        Intervals widen with what is not known about the row. Categorical
+        cells are not drawn; a missing category is still the unknown
+        category. The view shares the fitted parameters with this model.
+        """
+        if int(draws) < 1:
+            raise AshlarError("draws must be at least 1.")
+        self._require_fitted()
+        self._input_model()
+        view = copy(self)
+        view._uncertain_inputs = {"draws": int(draws), "noise": noise, "seed": int(seed)}
+        return view
+
+    def with_context(self, X, y, *, steps: int = 25):
+        """A copy whose groups' offsets are updated from new rows of those groups, without refitting the network.
+
+        For a model with ``random_effects``: each group in ``X`` has its
+        offsets' posterior updated with the rows' likelihood under the
+        fitted network, by Laplace's method, which a normal head makes exact
+        in one step. A group the model has not seen starts from the prior
+        ``N(0, tau^2)``, so three rows of a new store give it a posterior of
+        its own, pulled towards the average store as the fitted ones were;
+        a group seen in training starts from its fitted posterior, so pass
+        rows it was not fitted on. Groups not in ``X`` keep their posteriors.
+        A pooled embedding is not updated: a new group's stays at the average
+        group's. Several grouping columns are updated one after another, each
+        with the others' offsets at their posterior means.
+
+        Returns a new model; this one is unchanged.
+        """
+        self._require_fitted()
+        return self._updated_offsets(self._with_cyclical(X), y, steps=steps)
+
+    def _updated_offsets(self, X, y, *, steps: int = 25, weights=None, from_prior: bool = False, sweeps: int = 1):
+        """``with_context``'s update on ``X`` with its cyclical columns already expanded; ``fit`` finishes with it.
+
+        ``from_prior`` starts each column's groups from ``N(0, tau^2)`` instead
+        of their posteriors, for rows those posteriors already hold.
+        ``weights`` weight the rows' log likelihoods. ``sweeps`` repeats the
+        columns' updates, each with the others at their latest means, so
+        crossed and nested columns settle together.
+        """
+        import equinox as eqx
+
+        from ashlar.effects import positive, raw_of
+
+        module = getattr(self.core_, "random_effects", None)
+        if module is None or not module.has_offsets:
+            raise AshlarError("with_context updates random effects' offsets; fit with random_effects={column: 'intercept'}.")
+        if self.task == "regression":
+            raise AshlarError("with_context reads the rows' likelihood, and the regression task predicts a point.")
+        if self.task == "chain":
+            raise AshlarError("with_context updates one offset per row; a chain's groups have one per column, which it does not yet update.")
+        values = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
+        if observed.is_observed(target_array(y)) or not np.isfinite(values).all():
+            raise AshlarError("with_context takes finite values of y, not observed labels.")
+        effects = check_random_effects(self.random_effects)
+        names, columns = frame_columns(X)
+        if len(values) != (len(columns[0]) if columns else 0):
+            raise AshlarError("X and y have different numbers of rows.")
+        row_weights = np.ones(len(values)) if weights is None else np.asarray(weights, dtype=np.float64).reshape(-1)
+        payload = self.encoder_.to_json()
+        by_name = {item["name"]: item for item in payload["columns"]}
+        added = {}
+        for name in effects:
+            if name not in names:
+                raise AshlarError(f"with_context needs the grouping column {name!r} in X.")
+            known = by_name[name]["categories"]
+            seen = set(known)
+            fresh = []
+            for value in columns[names.index(name)].tolist():
+                if _is_missing(value):
+                    continue
+                text = str(value)
+                if text not in seen:
+                    seen.add(text)
+                    fresh.append(text)
+            known.extend(fresh)
+            added[name] = len(fresh)
+        encoder = FeatureEncoder.from_json(payload)
+        encoder.numeric_transform = self.numeric_transform_
+        # New groups start at the prior: offsets N(0, tau^2), embeddings at the average group's.
+        means, scales = list(module.means), list(module.raw_scales)
+        for position, (name, tau) in enumerate(zip(effects, module.taus())):
+            count = added[name]
+            means[position] = jnp.concatenate([means[position], jnp.zeros((count, means[position].shape[1]))], axis=0)
+            scales[position] = jnp.concatenate([scales[position], jnp.tile(raw_of(tau)[None, :], (count, 1))], axis=0)
+        embed_means, embed_scales = list(module.embed_means), list(module.embed_raw_scales)
+        for number, (position, tau) in enumerate(zip(module.embedded, module.embed_taus())):
+            count = added[list(effects)[position]]
+            width = embed_means[number].shape[1]
+            embed_means[number] = jnp.concatenate([embed_means[number], jnp.zeros((count, width))], axis=0)
+            embed_scales[number] = jnp.concatenate([embed_scales[number], jnp.tile(raw_of(tau)[None, :], (count, 1))], axis=0)
+        module = eqx.tree_at(
+            lambda tree: (tree.means, tree.raw_scales, tree.embed_means, tree.embed_raw_scales),
+            module,
+            (tuple(means), tuple(scales), tuple(embed_means), tuple(embed_scales)),
+        )
+        view = copy(self)
+        view.encoder_ = encoder
+        encoded = encoder.transform(X)
+        numeric_z = self.numeric_transform_(encoded.numeric_raw)
+        inputs = (numeric_z, encoded.categorical_onehot, encoded.category_index, encoded.set_tokens, encoded.set_mask)
+        view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
+        n_rows = int(numeric_z.shape[0])
+        if n_rows <= EVAL_CHUNK_ROWS:
+            raw = view.core_(*inputs, key=None, offsets=False)
+        else:
+            forward = _jit_forward(offsets=False)
+            raw = jnp.concatenate(
+                [
+                    forward(view.core_, *(array[start : start + EVAL_CHUNK_ROWS] for array in inputs))
+                    for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+                ],
+                axis=0,
+            )
+        locations = np.zeros((raw.shape[-1],), dtype=np.float32)
+        locations[list(module.locations)] = 1.0
+        locations = jnp.asarray(locations)
+        target = jnp.asarray(values.astype(np.float32))
+        chunk = max(1, min(EVAL_CHUNK_ROWS, n_rows))
+
+        @jax.jit
+        def chunk_derivatives(raw_rows, shift, target_rows):
+            # Each row's log likelihood reads only its own offset, so the Hessian is diagonal: a JVP with ones reads it.
+            def loglik(delta):
+                shifted = raw_rows + (shift + delta)[:, None, None] * locations
+                return jnp.sum(view._dist_from_raw(shifted).log_prob(target_rows))
+
+            zero = jnp.zeros_like(shift)
+            return jax.jvp(jax.grad(loglik), (zero,), (jnp.ones_like(zero),))
+
+        def derivatives(rows, shift):
+            """Each row's first and second derivative of its weighted log likelihood in its offset, at ``shift``."""
+            first, second = np.zeros(len(rows)), np.zeros(len(rows))
+            for start in range(0, len(rows), chunk):
+                part = rows[start : start + chunk]
+                size = len(part)
+                padding = chunk - size
+                # The last piece is padded to the chunk, so one compiled shape serves every piece.
+                index = np.concatenate([part, np.full(padding, part[0])])
+                moved = np.concatenate([shift[start : start + size], np.zeros(padding)])
+                one, two = chunk_derivatives(raw[index], jnp.asarray(moved, dtype=jnp.float32), target[index])
+                first[start : start + size] = np.asarray(one, dtype=np.float64)[:size]
+                second[start : start + size] = np.asarray(two, dtype=np.float64)[:size]
+            return first * row_weights[rows], second * row_weights[rows]
+
+        for _ in range(int(sweeps)):
+            for position, terms in enumerate(module.slope_columns):
+                if not terms:
+                    continue
+                column = module.index_columns[position]
+                groups = np.asarray(encoded.category_index[:, column])
+                rows = np.flatnonzero(groups > 0)
+                if not rows.size:
+                    continue
+                total, _ = module.offsets(encoded.category_index, numeric_z)
+                covariate = np.stack(
+                    [np.ones(len(groups)) if term < 0 else np.asarray(numeric_z[:, term], dtype=np.float64) for term in terms],
+                    axis=1,
+                )
+                current = np.asarray(module.means[position], dtype=np.float64)
+                # The offsets of the other columns stay at their posterior means.
+                others = np.asarray(total, dtype=np.float64) - np.sum(current[groups] * covariate, axis=1)
+                present = np.unique(groups[rows])
+                compact = np.zeros(len(current), dtype=np.int64)
+                compact[present] = np.arange(len(present))
+                if from_prior:
+                    tau = np.asarray(module.taus()[position], dtype=np.float64)
+                    prior_mean = np.zeros((len(present), len(terms)))
+                    prior_var = np.tile(np.square(tau)[None, :], (len(present), 1))
+                else:
+                    prior_mean = current[present]
+                    prior_var = np.square(np.asarray(positive(module.raw_scales[position]), dtype=np.float64)[present])
+
+                def row_derivatives(offset, rows=rows, others=others):
+                    return derivatives(rows, others[rows] + offset)
+
+                mean, variance = laplace_update(
+                    row_derivatives, prior_mean, prior_var, covariate[rows], compact[groups[rows]], len(present), steps=steps
+                )
+                updated_means = module.means[position].at[present].set(jnp.asarray(mean, dtype=jnp.float32))
+                updated_scales = module.raw_scales[position].at[present].set(
+                    raw_of(jnp.asarray(np.sqrt(variance), dtype=jnp.float32))
+                )
+                module = eqx.tree_at(
+                    lambda tree, position=position: (tree.means[position], tree.raw_scales[position]),
+                    module,
+                    (updated_means, updated_scales),
+                )
+        view.core_ = eqx.tree_at(lambda tree: tree.random_effects, self.core_, module)
+        if any(added.values()):
+            # The optimizer's moments match the fitted tables, not the grown ones; a refit starts them afresh.
+            view.opt_state_ = None
+        return view
+
+    def _finish_effects(self, names, columns, y_array, weights, train_idx, val_idx):
+        """After training, each group's offsets at their posterior under the trained network, from every row of ``X``.
+
+        Training fits the posteriors by stochastic variational inference, which
+        leaves a group with few rows short of its optimum, since its rows reach
+        few minibatches, and never sees a group whose rows all fell in the
+        validation partition. This is the step the variational objective
+        converges to for the offsets, given the network: Laplace's method from
+        ``N(0, tau^2)`` on the group's rows of ``X``, both partitions, which a
+        normal head makes exact. Observed labels keep the variational posteriors.
+        """
+        module = getattr(self.core_, "random_effects", None)
+        if module is None or not module.has_offsets or self.task == "regression" or self._observing():
+            return
+        rows = np.asarray(train_idx)
+        if val_idx is not None and len(val_idx):
+            rows = np.concatenate([rows, np.asarray(val_idx)])
+        values = np.asarray(target_array(y_array), dtype=np.float64)[rows]
+        if values.ndim != 1 or not np.isfinite(values).all():
+            return
+        sweeps = 1 if len(module.slope_columns) == 1 else 3
+        finished = self._updated_offsets(
+            _take_rows(names, columns, rows), values, weights=np.asarray(weights)[rows], from_prior=True, sweeps=sweeps
+        )
+        self.encoder_ = finished.encoder_
+        self.core_ = finished.core_
+        self.opt_state_ = finished.opt_state_
+
+    def fit_inputs(self, X):
+        """Refit the copula of the numeric features (``input_model_``) on ``X``, for example after ``load``."""
+        self._require_fitted()
+        self.input_model_ = InputModel.fit(np.asarray(self.encode(X).numeric_raw))
+        return self
+
+    def input_log_density(self, X) -> np.ndarray:
+        """``log p(x)`` of each row's observed numeric features under ``input_model_``, in the units of ``X``.
+
+        Low values flag rows unlike the training partition: shifted, out of
+        range, or with an unusual combination of values. Missing cells are
+        integrated out. Categorical features are not scored.
+        """
+        self._require_fitted()
+        return self._input_model().log_density(np.asarray(self.encode(X).numeric_raw))
+
+    def _raw_from_encoded(self, encoded):
         numeric_z = self.numeric_transform_(encoded.numeric_raw)
         inputs = (
             numeric_z,
@@ -1582,8 +2533,8 @@ class ASRModel(BaseEstimator):
         raw = self._raw_from_frame(X)
         if self.task in HURDLE_TASKS:
             point = np.asarray(hurdle_distribution(raw, self._severity()).mean().mean(axis=1))
-        elif self.task == "multivariate_flow":
-            # Monte Carlo means of each member's flow, averaged: the mean of the joint mixture.
+        elif self.task in _DRAWN_JOINT:
+            # Monte Carlo means of each member's flow or chain, averaged: the mean of the joint mixture.
             point = np.concatenate(
                 [
                     np.asarray(self._joint_components(_raw_rows(raw, start, _FLOW_CHUNK_ROWS)).mean().mean(axis=1))
@@ -1736,7 +2687,15 @@ class ASRModel(BaseEstimator):
             return np.asarray(self.target_mean_, dtype=np.float64), np.asarray(self.target_std_, dtype=np.float64)
         return float(self.target_mean_), float(self.target_std_)
 
-    def predict_dist(self, X, policy: str | None = None):
+    def predict_dist(
+        self,
+        X,
+        policy: str | None = None,
+        *,
+        input_draws: int | None = None,
+        input_noise: dict | None = None,
+        seed: int = 0,
+    ):
         """The predictive distribution of every row, in the units of ``y``.
 
         One object for every head, an ``ashlar.distributions.Distribution``
@@ -1754,8 +2713,25 @@ class ASRModel(BaseEstimator):
         - ``classification``, ``ordinal``, and ``tree``: a ``Categorical`` over
           ``classes_`` (the leaves, for a tree), its values class indices.
         - ``custom``: whatever ``dist_fn(raw)`` returns.
+
+        ``input_draws=K`` integrates over each row's missing numeric cells
+        and ``input_noise={"column": sd}`` over declared measurement errors:
+        the mixture over ``K`` completions of the row and the members. See
+        ``with_uncertain_inputs``, which does the same for every method.
         """
+        if input_draws is not None or input_noise:
+            view = self.with_uncertain_inputs(32 if input_draws is None else input_draws, input_noise, seed)
+            return view._dist_from_raw(view._raw_from_frame(X), policy)
         return self._dist_from_raw(self._raw_from_frame(X), policy)
+
+    def dist_from_raw(self, raw, policy: str | None = None):
+        """The ``Distribution`` for raw head outputs, such as ``forward_raw``'s.
+
+        Traceable: no host round trip, so it composes with ``jax.grad`` and
+        ``jax.jit``. ``predict_dist(X)`` is ``dist_from_raw`` of the core's
+        output on ``X``; ``forward_dist`` is the same from encoded arrays.
+        """
+        return self._dist_from_raw(raw, policy)
 
     def _dist_from_raw(self, raw, policy: str | None = None):
         task = self.task
@@ -1801,18 +2777,16 @@ class ASRModel(BaseEstimator):
 
     def _joint_components(self, raw):
         """Each member's joint distribution on the standardized target, batch ``(rows, members)``."""
-        return joint_member_distribution(_JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components())
+        return joint_member_distribution(
+            _JOINT_FAMILY[self.task], raw, int(self.n_events_), self._mixture_components(), columns=self._chain_columns()
+        )
 
     def _dist_chunks(self, X):
         """``(start, distribution)`` per block of at most 4096 rows, so draws and quantiles stay in memory.
 
         A flow's blocks are smaller, because every draw carries its member's spline parameters.
         """
-        dist = self.predict_dist(X)
-        rows = int(dist.batch_shape[0])
-        size = _FLOW_CHUNK_ROWS if self.task == "multivariate_flow" else 4096
-        for start in range(0, rows, size):
-            yield start, dist[start : start + size]
+        yield from _chunks(self.predict_dist(X), self._chunk_rows())
 
     def sample(self, X, n: int = 100, seed: int = 0):
         """``n`` draws per row from ``predict_dist(X)``, shape ``(n, rows)``, in the units of ``y``.
@@ -1869,6 +2843,8 @@ class ASRModel(BaseEstimator):
         from jax.scipy.special import logsumexp
 
         self._univariate_dist("score of a group total")
+        if self._grid_totals():
+            return self._grid_total_log_likelihood(X, label)
         if self.task not in TOTAL_TASKS:
             raise AshlarError(f"a group total needs one of {', '.join(TOTAL_TASKS)}; this model is {self.task}.")
         if observed.is_noisy(label) and self.task not in NOISY_TASKS:
@@ -1897,6 +2873,45 @@ class ASRModel(BaseEstimator):
         )
         values = logsumexp(values, axis=1) - np.log(values.shape[1])
         return np.asarray(values, dtype=np.float64), order, first, size
+
+    def _grid_total_log_likelihood(self, X, label, block: int = 1024):
+        """``_total_log_likelihood`` for a head whose totals are convolved on a grid, in blocks of whole groups."""
+        from jax.scipy.special import logsumexp
+
+        if observed.is_noisy(label):
+            raise AshlarError(f"a noisy group total needs one of {', '.join(TOTAL_TASKS)}; this model is {self.task}.")
+        observed.check_whole(label)
+        order = observed.contiguous_order(label)
+        label = label[order]
+        first, size = observed.units(label)
+        raw = self._raw_from_frame(X)
+        if int(raw.shape[0]) != len(label):
+            raise AshlarError(f"X has {int(raw.shape[0])} rows and y has {len(label)}.")
+        raw = raw[jnp.asarray(order)]
+        scaled = label if self.target_mean_ is None else self._apply_target_scale(label)
+        log_scale = 0.0 if self.target_std_ is None else float(np.log(self.target_std_))
+        truncated = observed.is_truncated(label)
+        max_rows = int(size.max())
+        score = _jit_grid_totals()
+        values = []
+        for start in range(0, len(first), int(block)):
+            units = slice(start, start + int(block))
+            begin = int(first[units][0])
+            end = int(first[units][-1] + size[units][-1])
+            flags = np.zeros(end - begin, dtype=np.float64)
+            flags[first[units] - begin] = 1.0
+            y = np.concatenate([observed.fields(scaled[begin:end]), flags[:, None]], axis=1)
+            segment, _weight, rows = segment_layout(jnp.asarray(flags > 0), jnp.ones(end - begin))
+            dist = member_distribution(self.task, raw[begin:end])
+            part = score(dist, jnp.asarray(y, dtype=jnp.float32), segment, rows, max_rows, truncated)
+            part = np.asarray(logsumexp(part, axis=1) - np.log(part.shape[1]), dtype=np.float64)[: len(first[units])]
+            values.append(part)
+        values = np.concatenate(values)
+        # An exact continuous total is a density: per unit of y, not of the standardized axis.
+        exact = (label["lower"] == label["upper"])[first]
+        if self.target_mean_ is not None:
+            values = values - np.where(exact, log_scale, 0.0)
+        return values, order, first, size
 
     def _observed_log_prob(self, X, label):
         self._univariate_dist("log_prob of an observed label")
@@ -1943,7 +2958,7 @@ class ASRModel(BaseEstimator):
         grid = box_points(int(points), d)
         # A flow's step holds its masked network's hidden units for every point, about eight times a column's cells.
         width = int(points) * int(self.core_.head.k) * d * (self._mixture_components() or 1)
-        width *= 8 if self.task == "multivariate_flow" else 1
+        width *= 8 if self.task in _DRAWN_JOINT else 1
         size = max(8, min(4096, _BOX_CHUNK_CELLS // width))
         dist = self.predict_dist(X)
         rows = int(dist.batch_shape[0])
@@ -1975,7 +2990,7 @@ class ASRModel(BaseEstimator):
         pieces = []
         key = jax.random.PRNGKey(int(seed))
         for _start, dist in self._dist_chunks(X):
-            if self.task == "multivariate_flow":
+            if self.task in _DRAWN_JOINT:
                 key, draw_key = jax.random.split(key)
                 draws = np.asarray(dist.sample(draw_key, (int(n_samples),)), dtype=np.float64)
                 pieces.append(np.moveaxis(np.quantile(draws, levels, axis=0), 0, -1))
@@ -1994,7 +3009,14 @@ class ASRModel(BaseEstimator):
         return np.concatenate(pieces, axis=0)
 
     def predict_quantiles(
-        self, X, levels=QUANTILE_LEVELS, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None
+        self,
+        X,
+        levels=QUANTILE_LEVELS,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
+        groups=None,
     ):
         """Quantiles per row, shape ``(rows, len(levels))``, in the units of ``y``.
 
@@ -2007,15 +3029,54 @@ class ASRModel(BaseEstimator):
         quantile head has its three trained levels, 0.1, 0.5, and 0.9,
         averaged across members, and no others.
 
+        A joint head gives each column's quantiles, ``(rows, columns,
+        len(levels))``. With ``target`` it gives the quantiles of one function
+        of the columns instead, ``(rows, len(levels))``: ``"sum"``, a weight
+        per column, or a named function of the last axis (see
+        ``calibrate``). A weighted sum is exact under the normal-based joint
+        heads; anything else is read from ``n_samples`` joint draws.
+
         After ``calibrate``, each level is first mapped to the nominal level
         that held that fraction of the calibration rows, and the quantile
         head's outer levels move out (or in) by the conformal margin at 80%.
         ``calibrated=False`` reads the raw head; ``None`` uses the calibration
-        when there is one.
+        when there is one. A calibration by group reads each row's group's
+        table; ``groups`` gives each row's label when ``calibrate`` was given
+        labels rather than a column.
         """
         self._univariate_dist("predict_quantiles")
         levels = tuple(float(level) for level in np.atleast_1d(levels))
-        calibration = self._calibration(calibrated)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_quantiles(part, levels, n_samples, seed, calibration, target),
+        )
+
+    def predict_order(self, X, under: float, over: float, **kwargs):
+        """The cost-optimal order per row when a unit short costs ``under`` and a unit over costs ``over``.
+
+        The ``under / (under + over)`` quantile (the newsvendor's critical
+        ratio), from ``predict_quantiles``, which takes the other keyword
+        arguments. After ``calibrate`` it is the calibrated quantile, so the
+        share of new rows whose outcome it covers holds at the critical
+        ratio: a cost-optimal order with a service level that holds.
+        ``ashlar.decide`` has the costs, tail risks, and the objective that
+        trains through them.
+        """
+        from ashlar.decide import critical_ratio
+
+        return self.predict_quantiles(X, [critical_ratio(under, over)], **kwargs)[..., 0]
+
+    def _calibrated_quantiles(self, X, levels, n_samples: int, seed: int, calibration, target):
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibration)
+            if tables is None:
+                if spec is None:
+                    return self._quantiles(X, levels, n_samples, seed)
+                return self._joint_quantiles(X, spec, [levels], n_samples, seed)
+            return self._joint_quantiles(X, spec, [recalibrated_levels(table, levels) for table in tables], n_samples, seed)
+        self._no_target(target)
         mean, std = self._target_affine()
         if self.task == "quantile":
             if levels != tuple(QUANTILE_LEVELS):
@@ -2029,47 +3090,258 @@ class ASRModel(BaseEstimator):
             levels = recalibrated_levels(calibration, levels)
         return self._quantiles(X, levels, n_samples, seed)
 
-    def predict_interval(self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None):
+    def predict_interval(
+        self,
+        X,
+        coverage: float = 0.8,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
+        groups=None,
+    ):
         """Central interval per row, shape ``(rows, 2)``, in the units of ``y``.
 
         Uncalibrated, it is the ``(1 - coverage) / 2`` and ``(1 + coverage) / 2``
         quantiles of ``predict_dist(X)``. After ``calibrate`` it is the
         split-conformal interval: on rows exchangeable with the calibration
-        rows it holds at least ``coverage`` of them. The quantile head gives
-        only its 80% interval, calibrated or not.
+        rows it holds at least ``coverage`` of them, and after a calibration
+        by group, within each group that had a table of its own. The quantile
+        head gives only its 80% interval, calibrated or not.
+
+        A joint head gives each column's interval, ``(rows, columns, 2)``, or
+        with ``target`` the interval of that function of the columns, such as
+        ``target="sum"`` for the total, ``(rows, 2)``. See ``calibrate``.
         """
         self._univariate_dist("predict_interval")
         coverage = check_coverage(coverage)
-        calibration = self._calibration(calibrated)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_interval(part, coverage, n_samples, seed, calibration, target),
+        )
+
+    def _calibrated_interval(self, X, coverage: float, n_samples: int, seed: int, calibration, target):
+        nominal = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibration)
+            if tables is None:
+                if spec is None:
+                    return self._quantiles(X, nominal, n_samples, seed)
+                return self._joint_quantiles(X, spec, [nominal], n_samples, seed, interval=True)
+            levels = [interval_levels(table, coverage) for table in tables]
+            return self._joint_quantiles(X, spec, levels, n_samples, seed, interval=True)
+        self._no_target(target)
         if self.task == "quantile":
             outer = QUANTILE_LEVELS[2] - QUANTILE_LEVELS[0]
             if not np.isclose(coverage, outer):
                 raise AshlarError(f"the quantile head gives only its {outer:.0%} interval.")
-            values = self.predict_quantiles(X, calibrated=calibration is not None)
+            values = self._calibrated_quantiles(X, tuple(QUANTILE_LEVELS), n_samples, seed, calibration, None)
             return values[:, [0, 2]]
         if calibration is None:
-            levels = (0.5 * (1.0 - coverage), 0.5 * (1.0 + coverage))
+            levels = nominal
         else:
             levels = interval_levels(calibration, coverage)
         return self._quantiles(X, levels, n_samples, seed)
 
-    def calibrate(self, X, y, n_samples: int = 1000, seed: int = 0):
+    def predict_exceedance(
+        self,
+        X,
+        threshold,
+        n_samples: int = 1000,
+        seed: int = 0,
+        calibrated: bool | None = None,
+        target=None,
+        groups=None,
+    ):
+        """``P(y > threshold)`` per row, shape ``(rows,)``.
+
+        ``threshold`` is one number or one per row. It is ``1 - cdf(threshold)``
+        of ``predict_dist(X)``. After ``calibrate`` the model's own
+        ``cdf(threshold)`` is replaced by the share of calibration rows whose
+        PIT was at most that much (``ashlar.calibrate.recalibrated_cdf``), so
+        an overconfident model's small probabilities move up and its large
+        ones down; after a calibration by group, by the rows of the row's
+        group.
+
+        A joint head gives each column's probability, ``(rows, columns)``, with
+        a threshold per column or one for all, or with ``target`` the
+        probability that a function of the columns exceeds it, such as
+        ``target="sum"`` for P(total > capacity), ``(rows,)``. A weighted sum
+        is exact under the normal-based joint heads; anything else, and every
+        column of a flow, is read from ``n_samples`` joint draws.
+        """
+        self._univariate_dist("predict_exceedance")
+        if self.task == "quantile":
+            raise AshlarError("the quantile head has three levels, not a CDF, so it has no exceedance probability.")
+        rows = _row_count(X)
+        if self.task in JOINT_TASKS:
+            shape = (rows, int(self.n_events_)) if target is None else (rows,)
+        else:
+            self._no_target(target)
+            shape = (rows,)
+        values = _thresholds(threshold, shape)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, at: self._calibrated_exceedance(
+                part, values if at is None else values[at], n_samples, seed, calibration, target
+            ),
+        )
+
+    def _calibrated_exceedance(self, X, values, n_samples: int, seed: int, calibration, target):
+        dist = self.predict_dist(X)
+        if self.task in JOINT_TASKS:
+            spec, tables = self._joint_tables(target, calibration)
+            below = self._joint_cdf(dist, spec, values, n_samples, seed)
+            if tables is not None:
+                if spec is None:
+                    below = np.stack([recalibrated_cdf(table, below[:, index]) for index, table in enumerate(tables)], axis=1)
+                else:
+                    below = recalibrated_cdf(tables[0], below)
+            return 1.0 - below
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = values[start : start + int(chunk.batch_shape[0])]
+            try:
+                pieces.append(np.asarray(_jit_cdf()(chunk, jnp.asarray(part, dtype=jnp.float32)), dtype=np.float64))
+            except NotImplementedError:
+                key, draw_key = jax.random.split(key)
+                draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                pieces.append(np.mean(draws <= part[None, :], axis=0))
+        below = np.concatenate(pieces) if pieces else np.zeros(0)
+        if calibration is not None:
+            below = recalibrated_cdf(calibration, below)
+        return 1.0 - below
+
+    def predict_region(
+        self, X, coverage: float = 0.8, n_samples: int = 1000, seed: int = 0, calibrated: bool | None = None, groups=None
+    ):
+        """A joint head's highest-density region per row, as a log density threshold, shape ``(rows,)``.
+
+        The region is every outcome ``y`` with ``log_prob(X, y) >= threshold``:
+        the smallest region with its probability, so it follows a curved or
+        multi-modal dependence that a box of per-column intervals cannot.
+        Uncalibrated, its probability under the model is ``coverage``. After
+        ``calibrate`` it is the split-conformal region: the probability is
+        raised or lowered until the region holds ``coverage`` of the
+        calibration rows, so on exchangeable rows it holds at least that
+        share. The threshold is read from ``n_samples`` joint draws per row.
+
+        ``model.log_prob(X, Y) >= model.predict_region(X)`` says, row by row,
+        whether ``Y`` is inside.
+        """
+        self._univariate_dist("predict_region")
+        if self.task not in JOINT_TASKS:
+            raise AshlarError("predict_region is for the joint heads; a one-column head has predict_interval.")
+        coverage = check_coverage(coverage)
+        return self._by_group(
+            X,
+            calibrated,
+            groups,
+            lambda part, calibration, _rows: self._calibrated_region(part, coverage, n_samples, seed, calibration),
+        )
+
+    def _calibrated_region(self, X, coverage: float, n_samples: int, seed: int, calibration):
+        table = None
+        if calibration is not None:
+            if calibration.get("kind") != "joint":
+                raise AshlarError("this calibration is not a joint model's; calibrate the model again.")
+            table = calibration.get("region")
+            if table is None:
+                raise AshlarError("this joint calibration has no region; calibrate the model again.")
+        level = region_level(table, coverage)
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for _start, chunk in _chunks(self.predict_dist(X), self._region_rows(n_samples)):
+            key, draw_key = jax.random.split(key)
+            drawn, _seen = _jit_draw_log_prob()(chunk, None, draw_key, int(n_samples))
+            pieces.append(region_threshold(np.asarray(drawn, dtype=np.float64), level))
+        return np.concatenate(pieces) if pieces else np.zeros(0)
+
+    def calibrate(
+        self,
+        X,
+        y,
+        n_samples: int = 1000,
+        seed: int = 0,
+        target=None,
+        groups=None,
+        localize: str | None = None,
+        min_group_rows: int = MIN_GROUP_ROWS,
+    ):
         """Split-conformal calibration on held-out rows. Returns ``self``.
 
         Pass rows the model was not fitted on. A density head stores each
         row's probability integral transform, ``predict_dist(X).cdf(y)``,
         spread uniformly over the jump at ``y`` for a count head. The quantile
         head stores how far each ``y`` falls outside its 80% interval.
-        Afterwards ``predict_interval`` and ``predict_quantiles`` use the
-        calibration, it is saved with the model, and ``fit`` clears it. See
-        ``ashlar.calibrate`` for the method. ``n_samples`` is only used for a
-        custom distribution without a CDF, whose PIT is then read from draws.
+        Afterwards ``predict_interval``, ``predict_quantiles``, and
+        ``predict_exceedance`` use the calibration, it is saved with the
+        model, and ``fit`` clears it. See ``ashlar.calibrate`` for the method.
+        ``n_samples`` is only used for a custom distribution without a CDF,
+        whose PIT is then read from draws.
+
+        A joint head is calibrated on each column's marginal and on functions
+        of its columns, one PIT table each: always their sum, and also
+        ``target``, which is ``"sum"``, a weight per column (that weighted
+        sum), a function of the last axis defined with ``def`` (``f(y)`` with
+        ``y`` shaped ``(..., columns)``, returning ``(...)``), or a list of
+        them. Pass the same ``target`` to ``predict_interval``,
+        ``predict_quantiles``, or ``predict_exceedance`` to read it. A weighted
+        sum is exact under the normal-based joint heads; a function, and
+        everything about a flow, is read from ``n_samples`` joint draws per
+        row. A saved model keeps a function's PIT table under its name; pass
+        the function again after ``load``. It also calibrates the joint
+        highest-density region of ``predict_region``.
+
+        By group (Mondrian), each group with at least ``min_group_rows`` rows
+        gets tables of its own, read for the rows of that group, and every
+        other row reads the tables of all rows:
+
+        - ``groups="column"``: the groups are the values of that column of
+          ``X``, read again from the rows you predict.
+        - ``groups=labels``: one label per row; pass ``groups=`` again, one
+          per row, when you predict.
+        - ``localize="members"``: up to five equal-count bins of how much the
+          ensemble's members disagree on the row, as a share of its
+          predictive spread (``predict_uncertainty``). It needs a backbone
+          with several members, such as ``tabm``.
         """
         self._univariate_dist("calibrate")
+        grouping = None
+        if groups is not None or localize is not None:
+            grouping = self._calibration_groups(X, groups, localize, min_group_rows)
+        scores, functions = self._calibration_scores(X, y, n_samples, seed, target)
+        pooled = _calibration_table(scores)
+        if grouping is None:
+            self.calibration_ = pooled
+        else:
+            keys, by = grouping
+            if len(keys) != _score_rows(scores):
+                raise ShapeError(f"X has {len(keys)} rows and y has {_score_rows(scores)}.")
+            tables = {}
+            for key in dict.fromkeys(keys):
+                rows = np.flatnonzero(keys == key)
+                if rows.size >= int(min_group_rows):
+                    tables[key] = _calibration_table(scores, rows)
+            self.calibration_ = grouped_calibration(pooled, tables, by, int(min_group_rows))
+        self._calibration_functions = functions
+        return self
+
+    def _calibration_scores(self, X, y, n_samples: int, seed: int, target) -> tuple[dict, dict]:
+        """Each calibration row's scores, which a table of any group of the rows is built from (``_calibration_table``).
+
+        Also the functions of a joint target by name.
+        """
         if self.task in JOINT_TASKS:
-            raise AshlarError("calibrate reads one target column; a joint model's columns are calibrated together, not yet supported.")
+            return self._joint_scores(X, y, n_samples, seed, target)
+        self._no_target(target)
         if observed.is_observed(target_array(y)):
-            return self._calibrate_observed(X, observed.as_observed(target_array(y)), seed)
+            return {"pit": self._observed_pit(X, observed.as_observed(target_array(y)), seed)}, {}
         target = np.asarray(target_array(y), dtype=np.float64).reshape(-1)
         if not np.isfinite(target).all():
             raise AshlarError("calibration targets must be finite.")
@@ -2078,8 +3350,7 @@ class ASRModel(BaseEstimator):
             values = self._quantile_head_levels(X) * std + mean
             if values.shape[0] != target.shape[0]:
                 raise ShapeError(f"X has {values.shape[0]} rows and y has {target.shape[0]}.")
-            self.calibration_ = cqr_calibration(values[:, 0], values[:, 2], target)
-            return self
+            return {"cqr": (values[:, 0], values[:, 2], target)}, {}
         dist = self.predict_dist(X)
         if int(dist.batch_shape[0]) != target.shape[0]:
             raise ShapeError(f"X has {int(dist.batch_shape[0])} rows and y has {target.shape[0]}.")
@@ -2094,11 +3365,97 @@ class ASRModel(BaseEstimator):
         except NotImplementedError:
             draws = self.sample(X, n=n_samples, seed=seed)
             pit = pit_values(draws, target, seed=seed)
-        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
-        return self
+        return {"pit": pit}, {}
 
-    def _calibrate_observed(self, X, label, seed: int):
-        """Calibrate on coarse rows: each row's PIT is uniform over what its label allows."""
+    def _calibration_groups(self, X, groups, localize, min_group_rows) -> tuple[np.ndarray, dict]:
+        """Each calibration row's group key, and how a new row finds its group."""
+        if groups is not None and localize is not None:
+            raise AshlarError("calibrate groups rows by groups= or by localize=, not both.")
+        if int(min_group_rows) < MIN_CALIBRATION_ROWS:
+            raise AshlarError(f"min_group_rows must be at least {MIN_CALIBRATION_ROWS}; received {min_group_rows!r}.")
+        if localize is not None:
+            if localize != "members":
+                raise AshlarError(f"localize is 'members'; received {localize!r}.")
+            disagreement = self._member_disagreement(X)
+            edges = disagreement_edges(disagreement, int(min_group_rows))
+            return disagreement_keys(disagreement, edges), {"members": edges}
+        if isinstance(groups, str):
+            names, columns = frame_columns(X)
+            if groups not in names:
+                raise AshlarError(f"groups names a column of X, and X has no column {groups!r}.")
+            return group_keys(columns[names.index(groups)]), {"column": groups}
+        return group_keys(groups), {"labels": True}
+
+    def _member_disagreement(self, X) -> np.ndarray:
+        """How much the members disagree on each row: their spread's share of the predictive spread, ``(rows,)``."""
+        if int(self.core_.backbone.k) < 2:
+            raise AshlarError(
+                "localize='members' bins rows by how much the ensemble's members disagree, and this backbone has "
+                "one member. Fit with backbone='tabm', or another backbone with k > 1."
+            )
+        if self.task == "quantile":
+            raise AshlarError("localize='members' needs a head with a predictive spread; the quantile head has three levels.")
+        parts = self.predict_uncertainty(X)
+        share = np.asarray(parts["epistemic"], dtype=np.float64) / np.maximum(np.asarray(parts["total"], dtype=np.float64), 1e-12)
+        return share.mean(axis=-1) if share.ndim > 1 else share
+
+    def _by_group(self, X, calibrated, groups, predict):
+        """``predict(X, calibration, rows)`` with the calibration each row reads: the one table, or its group's.
+
+        ``rows`` is ``None`` when every row reads one calibration, and
+        otherwise the indices of the rows passed, for arguments given per row.
+        """
+        calibration = self._calibration(calibrated)
+        if calibration is None or calibration.get("kind") != "groups":
+            stored = getattr(self, "calibration_", None)
+            by_labels = stored is not None and stored.get("kind") == "groups" and "labels" in stored["by"]
+            # The raw head of a model calibrated by labels ignores them; any other model has no use for them.
+            if groups is not None and not by_labels:
+                raise AshlarError("groups= gives each row's label for a model calibrated by labels, and this one was not.")
+            return predict(X, calibration, None)
+        keys = self._row_groups(X, calibration, groups)
+        known = calibration["groups"]
+        tables = np.asarray([key if key in known else None for key in keys], dtype=object)
+        if len(keys) == 0 or all(key is None for key in tables):
+            return predict(X, calibration["pooled"], None)
+        members = {}
+        for index, key in enumerate(tables):
+            members.setdefault(key, []).append(index)
+        names, columns = frame_columns(X)
+        out = None
+        for key, indices in members.items():
+            rows = np.asarray(indices, dtype=np.int64)
+            # Each group's rows are padded with copies of its first to a size from a short ladder, so groups of
+            # similar size share one compiled shape instead of compiling once each.
+            padded = np.concatenate([rows, np.full(_padded_rows(rows.size) - rows.size, rows[0])])
+            table = calibration["pooled"] if key is None else known[key]
+            part = np.asarray(predict(_take_rows(names, columns, padded), table, padded))[: rows.size]
+            if out is None:
+                out = np.empty((len(keys),) + part.shape[1:], dtype=part.dtype)
+            out[rows] = part
+        return out
+
+    def _row_groups(self, X, calibration: dict, groups) -> np.ndarray:
+        """The group key of every row of ``X`` under a calibration by group."""
+        by = calibration["by"]
+        if "labels" not in by and groups is not None:
+            raise AshlarError("this model's groups come from X; pass no groups=.")
+        if "column" in by:
+            names, columns = frame_columns(X)
+            if by["column"] not in names:
+                raise AshlarError(f"the calibration groups rows by column {by['column']!r}, and X has no such column.")
+            return group_keys(columns[names.index(by["column"])])
+        if "members" in by:
+            return disagreement_keys(self._member_disagreement(X), by["members"])
+        if groups is None:
+            raise AshlarError("this model was calibrated with a group label per row; pass groups=, one label per row of X.")
+        keys = group_keys(groups)
+        if len(keys) != _row_count(X):
+            raise ShapeError(f"X has {_row_count(X)} rows and groups has {len(keys)}.")
+        return keys
+
+    def _observed_pit(self, X, label, seed: int) -> np.ndarray:
+        """Each coarse row's PIT, drawn uniformly over what its label allows."""
         if self.task == "quantile":
             raise AshlarError("the quantile head calibrates from exact values; it has no CDF to spread a coarse label over.")
         if observed.is_truncated(label) or observed.is_noisy(label) or observed.has_groups(label):
@@ -2116,8 +3473,78 @@ class ASRModel(BaseEstimator):
         pit = np.concatenate(pit)
         if pit.shape[0] != len(label):
             raise ShapeError(f"X has {pit.shape[0]} rows and y has {len(label)}.")
-        self.calibration_ = pit_calibration(np.clip(pit, 0.0, 1.0))
-        return self
+        return pit
+
+    def _joint_scores(self, X, y, n_samples: int, seed: int, target) -> tuple[dict, dict]:
+        """Each row's PIT per column, per function of the columns, and for the region, from the same rows and draws."""
+        d = int(self.n_events_)
+        values = self._joint_values(y)
+        targets = joint_targets(target, d)
+        dist = self.predict_dist(X)
+        if int(dist.batch_shape[0]) != values.shape[0]:
+            raise ShapeError(f"X has {int(dist.batch_shape[0])} rows and y has {values.shape[0]}.")
+        key = jax.random.PRNGKey(int(seed))
+        rng = np.random.default_rng(int(seed))
+        columns, pits = [], {name: [] for name in targets}
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = values[start : start + int(chunk.batch_shape[0])]
+            key, column_key, draw_key = jax.random.split(key, 3)
+            draws = None
+            if self.task in _DRAWN_JOINT:
+                # A flow's or a chain's marginals have no closed form: rank each column among joint draws.
+                draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                columns.append(np.stack([pit_values(draws[..., j], part[:, j], rng=rng) for j in range(d)], axis=1))
+            else:
+                value = jnp.asarray(part, dtype=jnp.float32)
+                columns.append(np.asarray(_jit_pit()(chunk.marginals(), value, column_key), dtype=np.float64))
+            for name, spec in targets.items():
+                key, pit_key = jax.random.split(key)
+                projected = _projected(chunk, spec)
+                if projected is not None:
+                    value = jnp.asarray(_target_values(spec, part), dtype=jnp.float32)
+                    pits[name].append(np.asarray(_jit_pit()(projected, value, pit_key), dtype=np.float64))
+                    continue
+                if draws is None:
+                    draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+                pits[name].append(pit_values(_target_values(spec, draws), _target_values(spec, part), rng=rng))
+        region = []
+        for start, chunk in _chunks(dist, self._region_rows(n_samples)):
+            key, draw_key = jax.random.split(key)
+            seen = jnp.asarray(values[start : start + int(chunk.batch_shape[0])], dtype=jnp.float32)
+            drawn, observed_density = _jit_draw_log_prob()(chunk, seen, draw_key, int(n_samples))
+            region.append(density_pit(np.asarray(drawn), np.asarray(observed_density), rng=rng))
+        scores = {
+            "columns": np.concatenate(columns),
+            "targets": {name: (spec, np.concatenate(pits[name])) for name, spec in targets.items()},
+            "region": np.concatenate(region),
+        }
+        return scores, {name: spec["function"] for name, spec in targets.items() if "function" in spec}
+
+    def _region_rows(self, n_samples: int) -> int:
+        """Rows per block when reading the log density of ``n_samples`` draws per row and member."""
+        members = int(self.core_.backbone.k)
+        return max(1, min(self._chunk_rows(), _REGION_BLOCK // max(1, int(n_samples) * members)))
+
+    def _joint_values(self, y) -> np.ndarray:
+        """A joint calibration's exact values, ``(rows, columns)``."""
+        d = int(self.n_events_)
+        array = target_array(y)
+        if observed.is_observed(array):
+            label = observed.as_observed(array)
+            if np.ndim(label) != 2 or np.shape(label)[1] != d:
+                raise ShapeError(f"this joint model has {d} columns; received a label of shape {np.shape(label)}.")
+            if not observed.is_exact(label).all():
+                raise AshlarError(
+                    "calibrate reads exact values on a joint model: where a cell is censored or an interval, "
+                    "a function of the columns has no single value. Calibrate on rows whose cells are all exact."
+                )
+            array = label["lower"]
+        values = np.asarray(array, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != d:
+            raise ShapeError(f"this joint model has {d} columns; y must be (rows, {d}), and received {values.shape}.")
+        if not np.isfinite(values).all():
+            raise AshlarError("calibration targets must be finite.")
+        return values
 
     def _calibration(self, calibrated: bool | None):
         calibration = getattr(self, "calibration_", None)
@@ -2126,6 +3553,101 @@ class ASRModel(BaseEstimator):
         if calibrated and calibration is None:
             raise AshlarError("this model has no calibration; call calibrate(X_holdout, y_holdout) first.")
         return calibration if calibrated else None
+
+    def _no_target(self, target):
+        if target is not None:
+            raise AshlarError("target is a function of a joint model's columns; this model has one target column.")
+
+    def _target(self, target) -> tuple[str, dict]:
+        """``(name, spec)`` of a joint target, with a function named by a string found among the calibrated ones."""
+        name, spec = target_spec(target, int(self.n_events_))
+        if "name" in spec:
+            function = getattr(self, "_calibration_functions", {}).get(name)
+            if function is None:
+                raise AshlarError(
+                    f"no function named {name!r} was calibrated in this session; a saved model keeps its PIT "
+                    f"table but not the function, so pass the function itself, target={name}."
+                )
+            spec = {"function": function}
+        return name, spec
+
+    def _joint_tables(self, target, calibration):
+        """``(spec, tables)``: the target (``None`` for each column) and its PIT tables, ``None`` when uncalibrated."""
+        spec = None
+        if target is not None:
+            name, spec = self._target(target)
+        if calibration is None:
+            return spec, None
+        if calibration.get("kind") != "joint":
+            raise AshlarError("this calibration is not a joint model's; calibrate the model again.")
+        if spec is None:
+            return None, calibration["columns"]
+        table = calibration["targets"].get(name)
+        if table is None:
+            known = ", ".join(repr(key) for key in calibration["targets"])
+            raise AshlarError(
+                f"this model is calibrated on each column and on {known}, not on {name!r}. "
+                f"Calibrate with target={target!r} too, or pass calibrated=False for the raw head."
+            )
+        return spec, [table]
+
+    def _joint_quantiles(self, X, spec, levels, n_samples: int, seed: int, interval: bool = False):
+        """Quantiles at ``levels``, one tuple per output: per column ``(rows, columns, L)``, or of a target ``(rows, L)``.
+
+        With ``interval``, levels from draws are read as an interval's ends,
+        the order statistics that bracket them (``draw_interval``).
+        """
+        d = int(self.n_events_)
+        if spec is None and len(levels) != d:
+            raise ShapeError(f"one tuple of levels per column ({d}); received {len(levels)}.")
+        table = np.asarray(levels, dtype=np.float64)
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for _start, chunk in _chunks(self.predict_dist(X), self._chunk_rows()):
+            key, draw_key = jax.random.split(key)
+            if spec is None and self.task not in _DRAWN_JOINT:
+                # Every column's marginal at its own levels: q is (levels, 1, columns).
+                q = jnp.asarray(table.T[:, None, :], dtype=jnp.float32)
+                values = np.asarray(_jit_quantile()(chunk.marginals(), q), dtype=np.float64)
+                pieces.append(np.moveaxis(values, 0, -1))
+                continue
+            projected = None if spec is None else _projected(chunk, spec)
+            if projected is not None:
+                q = jnp.asarray(table[0][:, None], dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_quantile()(projected, q), dtype=np.float64).T)
+                continue
+            draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+            read = (lambda values, at: draw_interval(values, *at)) if interval else draw_quantiles
+            if spec is None:
+                pieces.append(np.stack([read(draws[..., j], table[j]) for j in range(d)], axis=1))
+            else:
+                pieces.append(read(_target_values(spec, draws), table[0]))
+        return np.concatenate(pieces, axis=0)
+
+    def _joint_cdf(self, dist, spec, threshold, n_samples: int, seed: int) -> np.ndarray:
+        """``P(Y <= threshold)`` per column ``(rows, columns)``, or of a target ``(rows,)``."""
+        key = jax.random.PRNGKey(int(seed))
+        pieces = []
+        for start, chunk in _chunks(dist, self._chunk_rows()):
+            part = threshold[start : start + int(chunk.batch_shape[0])]
+            key, draw_key = jax.random.split(key)
+            if spec is None and self.task not in _DRAWN_JOINT:
+                value = jnp.asarray(part, dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_cdf()(chunk.marginals(), value), dtype=np.float64))
+                continue
+            projected = None if spec is None else _projected(chunk, spec)
+            if projected is not None:
+                value = jnp.asarray(part, dtype=jnp.float32)
+                pieces.append(np.asarray(_jit_cdf()(projected, value), dtype=np.float64))
+                continue
+            draws = np.asarray(chunk.sample(draw_key, (int(n_samples),)), dtype=np.float64)
+            values = draws if spec is None else _target_values(spec, draws)
+            pieces.append(np.mean(values <= part[None], axis=0))
+        return np.concatenate(pieces, axis=0)
+
+    def _chunk_rows(self) -> int:
+        """Rows per block when reading draws or quantiles: fewer for a flow, whose draws carry its member's splines."""
+        return _FLOW_CHUNK_ROWS if self.task in _DRAWN_JOINT else 4096
 
     def _quantile_head_levels(self, X):
         """The quantile head's three levels averaged across members, standardized, ``(rows, 3)``."""
@@ -2251,6 +3773,7 @@ class ASRModel(BaseEstimator):
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
             "numeric_scaling": self.numeric_scaling,
+            "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
             "max_epochs": self.max_epochs,
             "patience": self.patience,
@@ -2267,18 +3790,23 @@ class ASRModel(BaseEstimator):
             "gradient_clip": self.gradient_clip,
             "cyclical": self.cyclical,
             "tree": None if self.tree is None else self.tree_.spec,
+            "monotone": check_monotone(self.monotone) or None,
+            "random_effects": _saved_effects(self.random_effects),
+            "random_effects_mass": getattr(self, "_effect_mass", None),
             "set_max_length": int(self.set_max_length),
             "search": getattr(self, "search_", None),
             "train_key": [int(value) for value in np.asarray(self._train_key).tolist()],
             "schema": self.encoder_.to_json(),
+            "input_model": None if getattr(self, "input_model_", None) is None else self.input_model_.to_json(),
             "history": self.history_,
             "resolved_backbone_kwargs": _resolved_backbone_kwargs(self.core_),
             "flow_layout": FLOW_LAYOUT,
+            "field_order": FIELD_ORDER,
         }
         (directory / "metadata.json").write_text(json.dumps(payload, indent=2))
         save_leaves(directory / "core.eqx", self.core_)
         save_leaves(directory / "numeric.eqx", self.numeric_transform_)
-        if save_optimizer:
+        if save_optimizer and getattr(self, "opt_state_", None) is not None:
             save_opt_state(directory, self.opt_state_)
         return str(directory)
 
@@ -2319,6 +3847,7 @@ class ASRModel(BaseEstimator):
             cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
+            numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],
             class_weight=payload["class_weight"],
             categorical=payload.get("categorical"),
@@ -2329,8 +3858,13 @@ class ASRModel(BaseEstimator):
             set_max_length=payload.get("set_max_length", 8),
             random_state=payload["random_state"],
             tree=payload.get("tree"),
+            monotone=payload.get("monotone"),
+            random_effects=payload.get("random_effects"),
         )
+        estimator._effect_mass = payload.get("random_effects_mass")
         estimator.tree_ = parse_tree(tree_json(estimator.tree)) if estimator.task == "tree" else None
+        # Saved before the fields followed the core's order: build the core the way it was trained.
+        estimator._legacy_field_order = payload.get("field_order") != FIELD_ORDER
         encoder = FeatureEncoder.from_json(payload["schema"])
         key = jax.random.PRNGKey(0)
         template = estimator._build_core(encoder, payload["n_events"], payload["n_classes"], key)
@@ -2348,6 +3882,7 @@ class ASRModel(BaseEstimator):
         estimator.target_mean_ = payload.get("target_mean")
         estimator.target_std_ = payload.get("target_std")
         estimator.calibration_ = payload.get("calibration")
+        estimator.input_model_ = InputModel.from_json(payload.get("input_model"))
         estimator.reduction_ = payload["reduction"]
         estimator.n_features_in_ = len(encoder.feature_names)
         estimator.is_fitted_ = True
@@ -2519,21 +4054,28 @@ _TASK_MODELS = {model.__name__: model for model in (ASRRegressor, ASRClassifier,
 __getattr__ = renamed(__name__, globals(), {"TabularEstimator": "ASRModel"})
 
 
-_FORWARD = None
+_FORWARD = {}
 
 
-def _jit_forward():
-    """One compiled inference pass, shared by every fitted core."""
-    global _FORWARD
-    if _FORWARD is None:
+def _jit_forward(offsets: bool = True):
+    """One compiled inference pass, shared by every fitted core; ``offsets=False`` leaves out the random effects'."""
+    if offsets not in _FORWARD:
         import equinox as eqx
 
-        @eqx.filter_jit
-        def forward(core, *inputs):
-            return core(*inputs, key=None)
+        if offsets:
 
-        _FORWARD = forward
-    return _FORWARD
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None)
+
+        else:
+
+            @eqx.filter_jit
+            def forward(core, *inputs):
+                return core(*inputs, key=None, offsets=False)
+
+        _FORWARD[offsets] = forward
+    return _FORWARD[offsets]
 
 
 def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, task):
@@ -2556,6 +4098,9 @@ def _split_indices(n_rows, y, *, mode, validation_size, groups, random_state, ta
         val_idx = np.asarray([index for index, group in enumerate(group_ids.tolist()) if group in held], dtype=int)
         train_idx = np.asarray([index for index, group in enumerate(group_ids.tolist()) if group not in held], dtype=int)
         return train_idx, val_idx
+    if task in _LABELED_TASKS and np.ndim(y) == 2:
+        # Sets of classes: stratify on the set.
+        return _stratified_indices(np.asarray(["".join("1" if cell else "0" for cell in row) for row in np.asarray(y)]), validation_size, random_state)
     if task in _LABELED_TASKS:
         return _stratified_indices(np.asarray(y).reshape(-1), validation_size, random_state)
     if task == "tree":
@@ -2618,6 +4163,39 @@ def _take_rows(names, columns, indices):
     return {name: np.asarray(values)[indices] for name, values in zip(names, columns, strict=True)}
 
 
+def _row_count(X) -> int:
+    _names, columns = frame_columns(X)
+    return int(len(columns[0])) if columns else 0
+
+
+def _padded_rows(rows: int) -> int:
+    """The next size up on a ladder of powers of two from 64: the rows a group's prediction runs on."""
+    return max(64, 1 << (int(rows) - 1).bit_length())
+
+
+def _score_rows(scores: dict) -> int:
+    if "pit" in scores:
+        return int(len(scores["pit"]))
+    if "cqr" in scores:
+        return int(len(scores["cqr"][2]))
+    return int(scores["columns"].shape[0])
+
+
+def _calibration_table(scores: dict, rows=None) -> dict:
+    """The saved calibration of ``rows`` (all of them by default) from their scores (``_calibration_scores``)."""
+    take = slice(None) if rows is None else np.asarray(rows)
+    if "pit" in scores:
+        return pit_calibration(np.clip(np.asarray(scores["pit"])[take], 0.0, 1.0))
+    if "cqr" in scores:
+        low, high, y = scores["cqr"]
+        return cqr_calibration(low[take], high[take], y[take])
+    calibration = joint_calibration(
+        scores["columns"][take], {name: (spec, pit[take]) for name, (spec, pit) in scores["targets"].items()}
+    )
+    calibration["region"] = pit_calibration(np.clip(scores["region"][take], 0.0, 1.0))
+    return calibration
+
+
 def _entropy(probabilities):
     clipped = np.clip(probabilities, 1e-12, 1.0)
     return -np.sum(probabilities * np.log(clipped), axis=-1)
@@ -2659,7 +4237,7 @@ def _device_targets(task, y, weights):
     w = jnp.asarray(weights, dtype=jnp.float32)
     if observed.is_observed(y):
         return jnp.asarray(observed.fields(y), dtype=jnp.float32), w
-    if task in _CLASSIFIER_TASKS:
+    if task in _CLASSIFIER_TASKS and np.ndim(y) == 1:
         return jnp.asarray(y, dtype=jnp.int32), w
     return jnp.asarray(y, dtype=jnp.float32), w
 
@@ -2719,6 +4297,43 @@ def _ordinal_label_vector(y):
     return array
 
 
+def _candidate_classes(value):
+    """The classes a label names: every column of a set, the exact values of a range, or the values themselves."""
+    if isinstance(value, observed.Candidates):
+        return value.classes
+    array = target_array(value)
+    if observed.is_observed(array):
+        label = observed.as_observed(array)
+        exact = (label["lower"] == label["upper"]) & np.isfinite(label["lower"])
+        return np.unique(label["lower"][exact])
+    return np.unique(array)
+
+
+def _candidate_mask(value, classes):
+    """``(rows, classes)``: the classes each row may be."""
+    classes = np.asarray(classes)
+    if isinstance(value, observed.Candidates):
+        index = np.searchsorted(classes, value.classes)
+        mask = np.zeros((len(value.mask), len(classes)), dtype=bool)
+        mask[:, index] = value.mask
+        return mask
+    array = target_array(value)
+    if observed.is_observed(array):
+        label = observed.as_observed(array)
+        if label.ndim != 1:
+            raise AshlarError("a classifier reads one label per row, not a cell per column.")
+        if observed.is_truncated(label) or observed.is_noisy(label) or observed.has_groups(label):
+            raise AshlarError("a classifier takes a set or a range of classes; not truncated, noisy, or grouped labels.")
+        values = np.asarray(classes, dtype=np.float64)
+        mask = (values[None, :] >= label["lower"][:, None]) & (values[None, :] <= label["upper"][:, None])
+        if not mask.any(axis=1).all():
+            raise AshlarError("a range of classes holds no class seen as an exact label.")
+        return mask
+    if array.ndim == 2 and array.shape[1] == 1:
+        array = array[:, 0]
+    return np.eye(len(classes), dtype=bool)[_encode_known_labels(array, classes)]
+
+
 def _encode_known_labels(y, classes):
     y = np.asarray(y)
     index = np.searchsorted(classes, y)
@@ -2751,6 +4366,8 @@ def _json_class_weight(class_weight):
 
 def _saved_head_kwargs(estimator):
     payload = dict(estimator.head_kwargs or {})
+    if estimator.task == "chain":
+        payload["columns"] = [column.to_json() for column in estimator._chain_columns()]
     edge_prior = getattr(estimator, "edge_prior_", None)
     if edge_prior is not None and estimator.task == "tree":
         payload["edge_prior"] = [float(value) for value in np.asarray(edge_prior, dtype=np.float64).tolist()]
@@ -2758,6 +4375,18 @@ def _saved_head_kwargs(estimator):
     if prior is not None:
         payload["class_prior"] = [float(value) for value in np.asarray(prior, dtype=np.float64).tolist()]
     return payload or None
+
+
+def _saved_effects(spec):
+    """``random_effects`` as JSON: each column's checked terms, and the column it is nested ``within``."""
+    checked = check_random_effects(spec)
+    if not checked:
+        return None
+    parents = nesting(spec)
+    return {
+        name: {"terms": list(terms), "within": parents[name]} if name in parents else list(terms)
+        for name, terms in checked.items()
+    }
 
 
 def _category_tables(columns, dim: int, key, *, set_encoder: bool = False, hidden: bool = False):

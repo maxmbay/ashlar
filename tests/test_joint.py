@@ -9,9 +9,10 @@ import pytest
 
 from ashlar import ASRModel, ASRRegressor
 from ashlar.distributions import AffineTransformed, Independent, joint_normal_distribution
-from ashlar.errors import AshlarError, ShapeError
+from ashlar.errors import ShapeError
 from ashlar.heads import MultivariateNormalHead
 from ashlar.objectives import make_joint_objective
+from micro import MICRO
 
 
 def _shared_shock(n=2400, seed=0):
@@ -39,11 +40,12 @@ def test_objective_is_the_member_mean_joint_negative_log_density():
     assert np.isclose(make_joint_objective(3)(raw, y, jnp.ones(6)), expected, rtol=1e-6)
 
 
+@pytest.mark.slow
 def test_fit_learns_dependence_and_reports_in_target_units(tmp_path):
     x, y = _shared_shock()
     train, test = slice(0, 2000), slice(2000, None)
-    joint = ASRRegressor(task="multivariate_gaussian", max_epochs=25).fit(x[train], y[train])
-    loose = ASRRegressor(task="multivariate_gaussian", head_kwargs={"rank": 0}, max_epochs=25).fit(x[train], y[train])
+    joint = ASRRegressor(task="multivariate_gaussian", max_epochs=25, **MICRO).fit(x[train], y[train])
+    loose = ASRRegressor(task="multivariate_gaussian", head_kwargs={"rank": 0}, max_epochs=25, **MICRO).fit(x[train], y[train])
     assert joint.predict(x[test]).shape == (400, 3)
     # Modelling the shared shock is worth a lot of log density on held-out rows.
     assert joint.log_prob(x[test], y[test]).mean() > loose.log_prob(x[test], y[test]).mean() + 0.5
@@ -67,5 +69,3 @@ def test_fit_learns_dependence_and_reports_in_target_units(tmp_path):
 
     restored = ASRModel.load(joint.save(tmp_path / "joint"))
     assert np.allclose(restored.log_prob(x[test], y[test]), joint.log_prob(x[test], y[test]), atol=1e-4)
-    with pytest.raises(AshlarError):
-        joint.calibrate(x[test], y[test])

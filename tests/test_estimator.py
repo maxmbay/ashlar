@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import jax.numpy as jnp
 
@@ -19,6 +20,7 @@ from ashlar import ASRClassifier, ASROrdinalClassifier
 from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, tabm
 from ashlar.train import surface_learning_rate
 from ashlar.search import DEFAULT_SEARCH
+from micro import MICRO
 
 
 def _regression(task="regression", **kwargs):
@@ -64,6 +66,7 @@ def test_incompatible_head_is_rejected():
     raise AssertionError("logits head was accepted for a normal task")
 
 
+@pytest.mark.slow
 def test_weighted_outlier_changes_the_fit():
     rng = np.random.default_rng(0)
     x = rng.normal(size=(24, 1)).astype(np.float32)
@@ -131,6 +134,7 @@ def test_save_reload_and_resume(tmp_path):
     assert restored.history_["train_loss"]
 
 
+@pytest.mark.slow
 def test_classification_policies_and_explicit_none_weight():
     rng = np.random.default_rng(1)
     x = rng.normal(size=(30, 2)).astype(np.float32)
@@ -144,6 +148,7 @@ def test_classification_policies_and_explicit_none_weight():
     assert set(np.unique(labels)).issubset({0, 1})
 
 
+@pytest.mark.slow
 def test_gradient_flows_through_standardization():
     import jax
 
@@ -175,6 +180,7 @@ def test_default_recipe_is_the_no_argument_estimator():
     assert DEFAULT_SEARCH["space"]["weight_decay"] == [1e-4, 1e-3]
 
 
+@pytest.mark.slow
 def test_search_is_off_unless_requested_and_true_picks_a_listed_rate():
     rng = np.random.default_rng(0)
     x = rng.normal(size=(24, 1)).astype(np.float32)
@@ -197,6 +203,7 @@ def test_search_is_off_unless_requested_and_true_picks_a_listed_rate():
     assert plain_again.core_.feature_dropout == 0.0
 
 
+@pytest.mark.slow
 def test_learned_embedding_and_set_encoder_accept_unseen_and_empty():
     rng = np.random.default_rng(2)
     n = 20
@@ -229,6 +236,7 @@ def test_learned_embedding_and_set_encoder_accept_unseen_and_empty():
     assert widths == []
 
 
+@pytest.mark.slow
 def test_transformer_backbone_fits_a_feature_set():
     rng = np.random.default_rng(3)
     x = rng.normal(size=(16, 2)).astype(np.float32)
@@ -274,6 +282,7 @@ def test_classifier_recipe_predicts_binary_and_multiclass_labels():
     assert np.allclose(multi_probabilities.sum(axis=1), 1.0, atol=1e-5)
 
 
+@pytest.mark.slow
 def test_classification_search_scores_weighted_accuracy():
     rng = np.random.default_rng(5)
     x = rng.normal(size=(32, 2)).astype(np.float32)
@@ -292,6 +301,7 @@ def test_classification_search_scores_weighted_accuracy():
     assert "val_score" not in plain.history_
 
 
+@pytest.mark.slow
 def test_classification_embeddings_transformer_and_set():
     rng = np.random.default_rng(6)
     n = 24
@@ -325,6 +335,7 @@ def test_class_weight_and_sample_weight_multiply_once():
     assert abs(once - twice) > 1e-6
 
 
+@pytest.mark.slow
 def test_quantile_scaling_matches_sklearn_and_standard_stays_zscore():
     from sklearn.preprocessing import QuantileTransformer
 
@@ -369,6 +380,78 @@ def test_quantile_scaling_matches_sklearn_and_standard_stays_zscore():
     assert np.max(np.abs(got_q - expected_q)) < 1e-4
 
 
+def test_numeric_clip_widens_or_removes_the_clip_past_the_training_range():
+    from ashlar.preprocess import FeatureEncoder
+
+    rng = np.random.default_rng(0)
+    train = rng.normal(size=(400, 2))
+    query = jnp.asarray([[0.0, 0.0], [9.0, 0.0], [90.0, -30.0]], dtype=jnp.float32)
+    median, divisor = FeatureEncoder.fit(train).columns[0].median, FeatureEncoder.fit(train).columns[0].std
+    scaled = (np.asarray(query)[:, 0] - median) / divisor
+
+    def soft(z, clip):
+        return z / np.sqrt(1.0 + z * z / (clip * clip))
+
+    # Robust: 3 by default, a wider soft clip on request, and none at all.
+    for clip, expected in ((3.0, soft(scaled, 3.0)), (6.0, soft(scaled, 6.0)), (None, scaled)):
+        encoder = FeatureEncoder.fit(train, numeric_clip=clip)
+        got = np.asarray(encoder.numeric_transform(query))[:, 0]
+        assert np.allclose(got, expected, rtol=1e-5, atol=1e-5)
+        again = FeatureEncoder.from_json(encoder.to_json())
+        assert again.numeric_clip == clip
+        assert np.allclose(np.asarray(again.numeric_transform(query)), np.asarray(encoder.numeric_transform(query)))
+
+    # Quantile: the map stops at its edge by default; without the clip it goes on at 1.349 / IQR from there.
+    for scaling in ("quantile", "quantile_tabr"):
+        edge = FeatureEncoder.fit(train, numeric_scaling=scaling)
+        linear = FeatureEncoder.fit(train, numeric_scaling=scaling, numeric_clip=None)
+        inside = jnp.asarray(train[:50], dtype=jnp.float32)
+        assert np.allclose(np.asarray(edge.numeric_transform(inside)), np.asarray(linear.numeric_transform(inside)))
+        knots = np.asarray(linear.numeric_transform.quantiles, dtype=np.float64)[:, 0]
+        references = np.asarray(linear.numeric_transform.references, dtype=np.float64)
+        slope = 1.3489795003921634 / (np.interp(0.75, references, knots) - np.interp(0.25, references, knots))
+        clipped = np.asarray(edge.numeric_transform(query))
+        lines = np.asarray(linear.numeric_transform(query))
+        assert np.allclose(clipped[1:, 0], 5.199337582605575, atol=1e-4)
+        assert np.allclose(lines[1:, 0], 5.199337582605575 + (np.asarray(query)[1:, 0] - knots[-1]) * slope, rtol=1e-4)
+        assert lines[2, 1] < -5.2 and np.isfinite(lines).all()
+        assert FeatureEncoder.from_json(linear.to_json()).numeric_clip is None
+
+    # Standard scaling never clips, so the option changes nothing there.
+    standard = FeatureEncoder.fit(train, numeric_scaling="standard")
+    unclipped = FeatureEncoder.fit(train, numeric_scaling="standard", numeric_clip=None)
+    assert np.allclose(np.asarray(standard.numeric_transform(query)), np.asarray(unclipped.numeric_transform(query)))
+
+    # A schema saved before the option keeps the clip it was trained with.
+    old = FeatureEncoder.fit(train).to_json()
+    del old["numeric_clip"]
+    assert FeatureEncoder.from_json(old).numeric_clip == 3.0
+
+    for bad in (0, -1.0, float("nan"), float("inf"), True, "off"):
+        with pytest.raises(AshlarError, match="numeric_clip"):
+            FeatureEncoder.fit(train, numeric_clip=bad)
+    with pytest.raises(AshlarError, match="numeric_clip sizes the robust soft clip"):
+        FeatureEncoder.fit(train, numeric_scaling="quantile", numeric_clip=5.0)
+    with pytest.raises(AshlarError, match="numeric_clip"):
+        _regression(numeric_scaling="standard", numeric_clip=2.0).fit(train, train[:, 0])
+
+
+@pytest.mark.slow
+def test_numeric_clip_is_saved_and_extrapolates(tmp_path):
+    rng = np.random.default_rng(1)
+    x = rng.uniform(-1.0, 1.0, size=(256, 1))
+    y = 2.0 * x[:, 0]
+    far = np.array([[4.0], [8.0]])
+    clipped = _regression(task="gaussian", max_epochs=40, patience=40).fit(x, y)
+    linear = _regression(task="gaussian", numeric_clip=None, max_epochs=40, patience=40).fit(x, y)
+    # With the clip, 4 and 8 land almost on the same input; without it the fit keeps moving.
+    assert abs(float(np.diff(clipped.predict(far))[0])) < 0.5 * abs(float(np.diff(linear.predict(far))[0]))
+    linear.save(tmp_path / "linear")
+    loaded = ASRModel.load(tmp_path / "linear")
+    assert loaded.numeric_clip is None and loaded.numeric_transform_.clip is None
+    assert np.allclose(loaded.predict(far), linear.predict(far), atol=1e-5)
+
+
 def test_quantile_tabr_knot_count_skips_the_zscore():
     from ashlar.preprocess import FeatureEncoder
 
@@ -384,6 +467,7 @@ def test_quantile_tabr_knot_count_skips_the_zscore():
     assert np.max(np.abs(mapped - zscore)) > 0.2
 
 
+@pytest.mark.slow
 def test_regression_labels_are_standardized_unless_another_task_or_an_old_file(tmp_path):
     import json
 
@@ -492,6 +576,7 @@ def test_classification_tabm_shares_batches_and_skips_the_label_scale():
     assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
 
 
+@pytest.mark.slow
 def test_unshared_member_targets_and_a_small_tabm_fit():
     from ashlar.objectives import regression_objective
     from ashlar.recipes import tabm
@@ -550,6 +635,7 @@ def test_surface_learning_rate_shrinks_when_data_is_small_or_steep():
     assert DEFAULT_RECIPE["learning_rate"] == 2e-3
 
 
+@pytest.mark.slow
 def test_surface_schedule_sets_an_adamw_rate_from_the_batch(tmp_path):
     model = _regression(
         max_epochs=2,
@@ -605,12 +691,13 @@ def test_softmax_ordinal_head_can_peak_on_one_class():
     assert np.allclose(probabilities.sum(axis=-1), 1.0, atol=1e-5)
     assert np.all(probabilities.argmax(axis=-1) == 2)
     try:
-        ASROrdinalClassifier(head="logits", max_epochs=1, patience=0, validation_size=0).fit(np.ones((8, 1)), np.arange(8) % 3)
+        ASROrdinalClassifier(head="logits", max_epochs=1, patience=0, validation_size=0, **MICRO).fit(np.ones((8, 1)), np.arange(8) % 3)
     except AshlarError:
         return
     raise AssertionError("a logits head was accepted for an ordinal task")
 
 
+@pytest.mark.slow
 def test_empirical_bayes_cuts_match_the_prior_and_do_not_move():
     import equinox as eqx
     import jax
@@ -637,6 +724,7 @@ def test_empirical_bayes_cuts_match_the_prior_and_do_not_move():
     assert float(jnp.sum(jnp.abs(plain_grads.cut_raw))) > 0.0
 
 
+@pytest.mark.slow
 def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
     rng = np.random.default_rng(0)
     measure = rng.normal(size=80).astype(np.float32)
@@ -669,6 +757,7 @@ def test_ordinal_empirical_prior_embeds_a_category(tmp_path):
             patience=0,
             validation_size=0.25,
             head_kwargs={"class_prior": "empirical"},
+            **MICRO,
         ).fit(measure[:, None], measure)
     except AshlarError:
         return
@@ -720,12 +809,13 @@ def test_ordinal_recipe_returns_labels_and_expected_score(tmp_path):
     restored = type(model).load(model.save(tmp_path / "ordinal"))
     assert np.allclose(score, np.asarray(restored.predict_score(x), dtype=np.float64), atol=1e-5)
     try:
-        ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0).fit(x[:8], np.array(["low"] * 8, dtype=object))
+        ASROrdinalClassifier(max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x[:8], np.array(["low"] * 8, dtype=object))
     except AshlarError:
         return
     raise AssertionError("string labels were accepted for an ordinal task")
 
 
+@pytest.mark.slow
 def test_late_bottleneck_narrows_the_head_and_stays_off_the_residual_default(tmp_path):
     assert DEFAULT_BOTTLENECK_WIDTH == 32
     assert ASRModel().bottleneck is None
@@ -823,7 +913,7 @@ def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
     else:
         raise AssertionError("histogram variance was accepted on the cumulative head")
     try:
-        ASRModel(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", histogram_variance=0.5, max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x, y)
     except AshlarError:
         pass
     else:
@@ -839,6 +929,7 @@ def test_histogram_target_is_unimodal_and_ordinal_only(tmp_path):
     assert np.allclose(score, np.asarray(restored.predict_score(x), dtype=np.float64), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tmp_path):
     import equinox as eqx
     import jax
@@ -874,7 +965,7 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
         random_state=0,
     )
     try:
-        ASRModel(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0).fit(x, y)
+        ASRModel(task="regression", soft_stages=2, max_epochs=1, patience=0, validation_size=0, **MICRO).fit(x, y)
     except AshlarError:
         pass
     else:
@@ -919,6 +1010,7 @@ def test_soft_stage_histogram_passes_class_gradients_and_stays_off_by_default(tm
     assert np.allclose(model.predict_score(x), restored.predict_score(x), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_rare_class_stays_in_training_and_the_rest_is_stratified():
     import pytest
     from sklearn.model_selection import train_test_split
@@ -956,6 +1048,7 @@ def test_rare_class_stays_in_training_and_the_rest_is_stratified():
     assert ASRModel().task == "regression"
 
 
+@pytest.mark.slow
 def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_path):
     import jax
     import pytest
@@ -1004,6 +1097,7 @@ def test_expected_label_squared_error_sits_beside_the_ordinal_likelihood(tmp_pat
     assert np.allclose(score, np.asarray(restored.predict_score(x[:4]), dtype=np.float64), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_robust_scale_and_default_categorical_embeddings(tmp_path):
     import jax
     import pytest

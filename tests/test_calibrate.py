@@ -51,6 +51,7 @@ def test_overconfident_pit_widens_the_interval():
     assert recalibrated_levels(calibration, [0.5])[0] == pytest.approx(0.5, abs=0.05)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("task", ["gaussian", "mixture", "histogram"])
 def test_calibrated_interval_covers_on_new_rows(task, tmp_path):
     X, y = _heteroscedastic(900, 0)
@@ -60,6 +61,16 @@ def test_calibrated_interval_covers_on_new_rows(task, tmp_path):
     interval = model.predict_interval(X_new, 0.8, n_samples=400)
     covered = np.mean((y_new >= interval[:, 0]) & (y_new <= interval[:, 1]))
     assert 0.75 < covered < 0.86
+    # The calibrated chance of exceeding a threshold is close to how often new rows do. The map is
+    # the same for every row, so it cannot undo an error that differs from row to row: the
+    # three-epoch gaussian here gives 0.12 for 0.15 after calibration, and 0.13 before.
+    assert abs(model.predict_exceedance(X_new, np.median(y_new)).mean() - 0.5) < 0.02
+    threshold = np.quantile(y_new, 0.85)
+    assert abs(model.predict_exceedance(X_new, threshold).mean() - 0.15) < 0.04
+    raw = model.predict_exceedance(X_new[:50], threshold, calibrated=False)
+    assert np.allclose(raw, 1.0 - np.asarray(model.predict_dist(X_new[:50]).cdf(threshold)), atol=1e-6)
+    with pytest.raises(AshlarError):
+        model.predict_interval(X_new, target="sum")
     raw = model.predict_interval(X_new, 0.8, n_samples=400, calibrated=False)
     assert raw.shape == interval.shape
     model.save(tmp_path / "model")
@@ -83,8 +94,11 @@ def test_quantile_head_takes_the_cqr_margin():
     assert 0.75 < covered < 0.86
     with pytest.raises(AshlarError):
         model.predict_interval(X_new, 0.9)
+    with pytest.raises(AshlarError):
+        model.predict_exceedance(X_new, 0.0)
 
 
+@pytest.mark.slow
 def test_fit_clears_the_calibration_and_misuse_raises():
     X, y = _heteroscedastic(400, 0)
     model = _small("gaussian").fit(X, y)

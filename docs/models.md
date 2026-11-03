@@ -2,7 +2,7 @@
 
 [Ashlar](../README.md) builds a model from keyword arguments rather than from a class per architecture. `ASRModel` is the generic estimator; `ASRRegressor`, `ASRClassifier`, `ASROrdinalClassifier`, and `ASROutcomeTree` are the same estimator with a task and its recipe filled into the signature, the way `LGBMRegressor` is `LGBMModel` with `objective="regression"`.
 
-![Four courses of model choices: encode, backbone, head, and train, with one path lit.](images/architecture-light.svg)
+![Five courses of model choices: encode, backbone, head, label, and train, with one path lit.](images/architecture-light.svg)
 
 ```python
 from ashlar import ASRRegressor
@@ -29,6 +29,7 @@ Every other column is categorical and gets a learned vector, 8 wide by default. 
 | `"tabm"` | A batch ensemble: k members that share most weights and train together. `tabm()` and `tabm_piecewise()` are the paper-shaped and accuracy recipes. |
 | `"transformer"` | A feature transformer: attention over the columns rather than over a sequence. |
 | `"set"` | An encoder for set-valued columns. |
+| `"additive"` | One small network per column, and one per pair of columns you name. The head is linear in them, so every output of the distribution, a location, a scale, a zero probability, is a sum of one shape per column: a neural GAMLSS. `shape_functions(X)` reads the shapes. [docs/additive.md](additive.md) has the detail. |
 | your Equinox module | Any module with the same call signature. `backbone_kwargs` is passed to it. |
 
 ## Head
@@ -43,7 +44,7 @@ Recipes are plain dicts. `DEFAULT_RECIPE`, `TABM_PAPER`, `TABM_PIECEWISE`, `CLAS
 
 ## Research models
 
-Beyond the four slots, these are whole model families with the same `fit` and `predict` surface. They are research code: useful, benchmarked in [docs/benchmarks.md](benchmarks.md), and not the path most tables need.
+Beyond the four slots, these are whole model families with the same `fit` and `predict` surface. They are experimental research code: benchmarked in [docs/benchmarks.md](benchmarks.md), and not the path most tables need. Each has its own `fit(X, y, task)` for a point or class probabilities, most read numeric columns only, and none is connected to the heads, `predict_dist`, observed labels, or `calibrate`. Their API may change or go. For an additive model of a whole distribution, use `backbone="additive"` instead of `ASRAdditive` ([docs/additive.md](additive.md)).
 
 | Class | What it fits |
 |---|---|

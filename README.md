@@ -1,15 +1,41 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-dark.svg">
-    <img alt="ashlar" src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/logo-light.svg" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+    <img alt="ashlar" src="docs/images/logo-light.svg" width="720">
   </picture>
 </p>
 
-Ashlar fits tables and forecasts series with JAX neural networks. You call `fit` and `predict`. Categorical columns become learned vectors. A regression or a forecast can return a whole distribution, not just a point: a Gaussian, a mixture, a spline flow, a histogram, a Student-t, a set of quantiles, a Poisson or negative binomial for counts, a hurdle for targets that are often zero, or a joint distribution over several targets. Calibration makes its intervals hold the coverage they promise. A label can also say what was observed instead of an exact value, such as a sale capped by a sold-out shelf, a range, or only a weekly total. The model trains on the probability of what was observed, so it learns the demand, not the sales.
+<p align="center">
+  <a href="https://pypi.org/project/ashlar-tabular/"><img alt="PyPI" src="https://img.shields.io/pypi/v/ashlar-tabular?color=147a72"></a>
+  <a href="https://pypi.org/project/ashlar-tabular/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/ashlar-tabular?color=147a72"></a>
+  <a href="https://github.com/maxmbay/ashlar/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/maxmbay/ashlar/actions/workflows/tests.yml/badge.svg?branch=main"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-147a72"></a>
+</p>
 
-It slots in wherever a gradient-boosted model does. Swap `LGBMRegressor()` for `ASRRegressor()` and `LGBMClassifier()` for `ASRClassifier()`: the scikit-learn interface, a pandas or Polars frame as it is, string columns included, and `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` all work. On eight public tables of half a million to two million rows the defaults win or tie on five, and for a predictive distribution they beat the trees on most tables. [The benchmarks](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) have every number, including where the trees still win.
+Ashlar is a Python library for regression and classification on tabular data. It trains neural networks with JAX, and for regression it predicts a probability distribution for each row instead of a single value. You choose the distribution family to suit the target, for example a negative binomial for counts, a mixture of normals for skewed or multimodal targets, or a hurdle model for targets with many zeros. Labels do not have to be exact. A survival time can be censored, a day's sales can be capped by a stock-out, and a value can be known only as a range or as a total over several rows. A model can also predict several targets at once, with a joint distribution over them.
 
-It needs no GPU. Every number on this page was trained on a CPU, most of them on a laptop, where the default model fits two million rows in just a few minutes.
+The estimators follow the scikit-learn API and take NumPy arrays or pandas and Polars data frames. On eight public tables with half a million to two million rows, Ashlar's point predictions are within 0.3% of the best of LightGBM, XGBoost, and CatBoost on three tables, better on two, and worse on three; the largest shortfall is an 11% higher RMSE on taxi tips. On the four regression tables, its predicted distributions were also compared with LightGBMLSS, the best tree-based distributional model on these tables. By CRPS, Ashlar is better on song release years (by 3.5%) and Zurich transport (1.7%), slightly worse on airline delays (0.2%), and much worse on taxi tips (27%).
+
+![Sixteen held-out flights from the airline delay table, one ridge each: the predicted distribution of departure delay from ASRRegressor(task="mixture") for that flight, skewed to the right, some with two peaks, each with a narrow spike at zero for leaving exactly on time. Under each ridge, the 80% interval from LightGBMLSS's mixture of three normals for the same flight, and a dot for the actual delay. At the right, both models' predicted probability of a delay of more than an hour.](docs/images/readme/hero-flights.png)
+
+The figure shows predicted departure delays for 16 flights from the test set of the airline delay table. The model, `ASRRegressor(task="mixture")`, was trained on 1.6 million US flights from 1987 to 2008, using schedule information only and no weather data. Each curve is one flight's predicted distribution, with the central 80% shaded dark and a narrow spike at zero for leaving exactly on time. Under each curve are the 80% interval predicted by LightGBMLSS's mixture of three normals and a dot for the actual delay.
+
+On 100,000 test flights the two models have almost the same CRPS (continuous ranked probability score, the error of a predicted distribution in minutes; lower is better): 9.17 for Ashlar and 9.14 for LightGBMLSS, which is also slightly ahead on the benchmark's other two splits. When both are calibrated to cover 80% of flights, Ashlar's intervals are 7% wider on average, but their coverage depends less on how risky a flight is. Ranked into fifths by each model's predicted probability of an hour's delay, Ashlar's intervals cover between 79% and 81% of the flights in each fifth, and LightGBMLSS's between 77% and 86%. Ashlar's predicted probability of a delay of more than an hour is within 0.6 percentage points of the observed rate in every group of 1,000 or more flights with similar predictions; LightGBMLSS's is off by up to 8.3 points. On this split, training took 4 minutes for Ashlar on the 12 cores of a laptop and 20 minutes for LightGBMLSS on six threads.
+
+## How a model is specified
+
+An Ashlar model is defined by five choices, shown in the diagram below: how the input columns are encoded, the backbone network, the output head, the type of label, and the training schedule. The head sets what the model predicts, such as a distribution family, class probabilities, or a single value. Four of the choices are keyword arguments to the estimator. The fifth, the label type, is set by what you pass to `fit`: a plain array for exact values, or a label built with `ashlar.observed` for censored, interval, rounded, truncated, noisy, or summed values. The choices are independent of each other, so they can be combined. The highlighted path is one example, an additive backbone with a negative binomial head, fitted to sales that were censored on days a product sold out.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+    <img alt="The five choices that define a model: encode, backbone, head, label, and train, with one combination highlighted." src="docs/images/architecture-light.svg" width="100%">
+  </picture>
+</p>
+
+Every configuration is an instance of the same class, `ASRModel`, with different arguments; `ASRRegressor` and `ASRClassifier` are `ASRModel` with the task already set. A model is therefore fully described by its arguments, which makes it easy to save, version, and tune. [docs/models.md](docs/models.md) describes the keyword arguments and [docs/observed.md](docs/observed.md) the label types.
+
+Many of these features are available in other packages, spread across several of them. LightGBMLSS and NGBoost fit distributions with gradient-boosted trees, XGBoost and CatBoost fit censored survival times, R's `gamlss` fits additive models for each parameter of a distribution, GPBoost and mixed-model packages fit random effects, and MAPIE adds conformal prediction intervals. In R, brms fits many of the same likelihoods, including censoring, truncation, mixtures, hurdles, and random effects, in Bayesian regression models. Ashlar provides them in one estimator with a neural network backbone, so they can be used together. Some of its features we have not found in other libraries, such as labels that are totals over several rows, and calibrated intervals for a function of several predicted outcomes, like the total cost of a policy's claims.
 
 ## Install
 
@@ -17,233 +43,126 @@ It needs no GPU. Every number on this page was trained on a CPU, most of them on
 pip install "ashlar-tabular[dataframes]"
 ```
 
-The import name is `ashlar`. This installs JAX's CPU build, which is all Ashlar needs.
+The package is imported as `ashlar`. This installs the CPU version of JAX, which is all Ashlar needs; every result on this page was computed on CPUs.
 
-To train on an NVIDIA GPU (Linux), add JAX's CUDA build. It brings its own CUDA libraries, so only the NVIDIA driver has to be on the machine:
+<details>
+<summary>Training on an NVIDIA GPU</summary>
+
+On Linux, also install JAX's CUDA build. It includes the CUDA libraries, so only the NVIDIA driver needs to be installed:
 
 ```bash
 pip install "ashlar-tabular[dataframes]" "jax[cuda12]"
 python -c "import jax; print(jax.devices())"   # should list a CudaDevice
 ```
 
-Ashlar code does not change: JAX puts the arrays on the GPU when it finds one. For other CUDA versions and platforms, see [JAX's install guide](https://docs.jax.dev/en/latest/installation.html).
+No code changes are needed, because JAX uses the GPU when one is available. For other CUDA versions and platforms, see [JAX's install guide](https://docs.jax.dev/en/latest/installation.html).
+
+</details>
 
 ## Quick start
 
-If you have an XGBoost or LightGBM call, you already have an Ashlar one. Regression:
-
-```python
-from ashlar import ASRRegressor
-from xgboost import XGBRegressor
-
-model = XGBRegressor().fit(X, y)                  # before
-model = ASRRegressor().fit(X, y)                  # after
-model.predict(X_new)
-```
-
-Classification:
-
-```python
-from ashlar import ASRClassifier
-from xgboost import XGBClassifier
-
-model = XGBClassifier().fit(X, labels)            # before
-model = ASRClassifier().fit(X, labels)            # after
-model.predict(X_new), model.predict_proba(X_new), model.score(X_new, labels_new)
-```
-
-`X` is a NumPy array, a dict of columns, or a pandas or Polars frame. Numeric columns are imputed and scaled, string columns get a learned embedding, and a category that never appeared in training is not an error. `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV` work as they did.
-
-One argument turns the same model into a conditional predictive distribution, which a gradient-boosted tree cannot return from a single fit:
-
-```python
-from ashlar import ASRRegressor
-
-model = ASRRegressor(task="mixture").fit(X, y)
-
-model.predict(X_new)                        # still the mean
-model.predict_quantiles(X_new, [0.1, 0.9])  # an interval, on the scale of y
-model.sample(X_new, n=1000)                 # draws
-model.log_prob(X_new, y_new)                # log density of what happened
-```
-
-No second model per quantile, and no fixed-width normal around the mean.
-
-To guarantee the coverage, calibrate on rows the model did not see: `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` is a split-conformal interval. On five public tables it brought the mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6%. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#calibrated-intervals) has the detail.
-
-With an ensemble backbone, `model.predict_uncertainty(X_new)` splits that spread into the noise in the target (`aleatoric`) and the disagreement between members (`epistemic`). On rows past the training range of one column the epistemic part rose 1.6 to 4 times, more than the noise did, so it flags rows the model has not seen; it does not size their error. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md#where-the-members-disagree) has the detail.
-
-## Architecture is set by keyword arguments
-
-A model is one set of keyword arguments with four independent slots: how the columns are encoded, the backbone that reads them, the head that answers, and the training schedule. Changing the head makes the same network return a density instead of a number. Changing the backbone leaves the head unchanged.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-dark.svg">
-    <img alt="Four courses of model choices: encode, backbone, head, and train, with one path lit." src="https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/architecture-light.svg" width="900">
-  </picture>
-</p>
+Ashlar's estimators are used the same way as XGBoost's or LightGBM's:
 
 ```python
 from ashlar import ASRClassifier, ASRRegressor
+from xgboost import XGBClassifier, XGBRegressor
 
-ASRRegressor()                                      # the defaults above
-ASRRegressor(task="mixture")                        # same net, now a predictive density
-ASRRegressor(task="flow", backbone="tabm")          # skewed target, ensemble trunk
-ASRClassifier(backbone="transformer")               # attention over the columns
+model = XGBRegressor().fit(X, y)          # XGBoost
+model = ASRRegressor().fit(X, y)          # Ashlar
+model.predict(X_new)
+
+model = XGBClassifier().fit(X, labels)    # XGBoost
+model = ASRClassifier().fit(X, labels)    # Ashlar
+model.predict_proba(X_new)
 ```
 
-None of these are wrapper classes: every line is `ASRModel` with different arguments, so a configuration is a dict you can save, version, or sweep. `backbone=` also takes your own Equinox module, and `task="custom"` takes your own head and objective. [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md) is the tour of what goes in each slot.
+`X` can be a NumPy array, a dict of columns, or a pandas or Polars data frame, and needs no preprocessing. The model imputes and scales numeric columns, learns embeddings for string columns, and accepts categories at prediction time that it did not see in training. The estimators work with scikit-learn tools such as `clone`, `Pipeline`, `cross_val_score`, and `GridSearchCV`.
 
-## Conditional predictive distributions, one head per target shape
-
-The distribution is conditional on the row, so one fitted model returns a different shape for every row, and the head sets which shapes it can represent.
-
-![Four heads on taxi fare, under three conditions.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/fare-heads.png)
-
-One fit per head on taxi fares, given the zones, the hour, the weekday, the passengers, and the cab color, with distance and the total held out. The best head changes with the condition, by held-out log density: the `mixture` on Manhattan hops, and the `histogram` on Brooklyn trips and on the Queens corridor, where 32% of trips run at the $52 airport flat fare. Only the histogram grows a real spike there, 23% of its mass against the flow's 15% and the mixture's 5%, because a smooth density can only approach a spike at one value. Its resolution is yours: `head_kwargs={"bins": 48}`, 16 by default.
-
-`gaussian`, `mixture`, `flow`, `histogram`, `quantile`, and `student_t` for a number; `poisson` and `negative_binomial`, optionally zero-inflated, for a count (on hourly bike rentals the negative binomial's 80% interval holds 80% of counts, where LightGBM's Poisson objective holds 54%); `hurdle` for a target that is often exactly zero and otherwise a positive amount; `multivariate_gaussian`, `multivariate_mixture`, and `multivariate_flow` for several columns at once; `ASRClassifier` for classes, `ASROrdinalClassifier` for an ordered scale, and `ASROutcomeTree` for nested outcomes. [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md) says which to reach for and why.
-
-## Labels that say what was observed
-
-A day that sold out recorded the stock, not the demand. An income survey recorded a bracket, a lab a reading below its detection limit, a churn table customers who are still active, a ledger a weekly total for seven days. Pass a label from `ashlar.observed` as `y`, and the head trains on the probability it gives to what was actually seen:
+To predict a distribution rather than a mean, set `task` to a distribution head. The fitted model then gives quantiles, tail probabilities, samples, and log-likelihoods for each row:
 
 ```python
-from ashlar import ASRRegressor, observed
+model = ASRRegressor(task="mixture").fit(X, y)
 
-y = observed.censored(sales, sold_out)   # a sold-out day says demand >= sales
-model = ASRRegressor(task="negative_binomial").fit(X, y)
-model.predict_quantiles(X_new, [0.9])    # the 90% quantile of demand, not of sales
+model.predict(X_new)                          # the mean
+model.predict_quantiles(X_new, [0.1, 0.9])    # quantiles
+model.predict_exceedance(X_new, 60)           # P(y > 60) for each row
+model.sample(X_new, n=1000)                   # samples
+model.log_prob(X_new, y_new)                  # log-likelihood of observed values
+
+model.calibrate(X_holdout, y_holdout)         # calibrate on held-out rows
+model.predict_interval(X_new, coverage=0.8)   # split-conformal 80% intervals
 ```
 
-![Sales against true demand at quiet, average, and busy stores, and the fits to sales, to censored sales, and to the true demand.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/sold-out-demand.png)
+All of these are computed from the same predicted distribution, so they are consistent with each other; for example, the quantiles never cross.
 
-On simulated store-days where a third of the days sell out, the censored negative binomial matches a model trained on the true demand, which no shop has: the same log-likelihood, and a 90% quantile that is above the true demand on 90.9% of days. The same head fitted to sales as if they were demand manages 79.5%, and LightGBM's quantile regression on sales 73.0%. Stocking each day's 75% quantile costs 1.1% more than stocking the true one, against 7.9% for the fit on sales. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#labels-that-say-what-was-observed) has the tables.
+![One held-out flight, Delta from Washington Dulles to Atlanta at 17:25 on a Friday in August: its predicted delay distribution with the calibrated 80% interval shaded dark, the median and mean marked, LightGBMLSS's uncalibrated 80% interval under it, and the actual delay of 49 minutes. Under the distribution, each call from the quick start with its result on the same delay axis: predict 16.4 beside LightGBM's 21.4, predict_quantiles −3.4 to 53.5, predict_exceedance 0.086, five samples, log_prob −6.17, predict_interval after calibrate −3.4 to 52.5, and the three largest attributions from explain for the 0.9 quantile.](docs/images/readme/one-flight.png)
 
-Ranges, rounding, truncation, survival times with delayed entry, known measurement noise, and totals over groups of rows work the same way, and compose. Every head with a CDF takes the first four, the normal-based heads take noise, and `gaussian`, `normal`, and `poisson` take totals. The joint heads take a label with a cell per column, so a day when two of four products sold out still teaches the model all four demands and how they move together. On four simulated products whose shelves empty together, censored fits made one product at a time expect every shelf to empty on 0.7% of days, where it happened on 11%, and joint fits to the same sales expect 9% to 12%. `calibrate` accepts censored rows, and a label is a NumPy array that scikit-learn splits like any `y`. [docs/observed.md](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md) has the detail.
+The figure shows what these calls, and `explain`, return for one test flight, using the model from the first figure.
 
-## Forecasting
+## Multivariate targets
 
-A series reaches Ashlar two ways. `ASRForecaster` reads a window of the series itself and emits the next steps:
-
-```python
-import jax
-from ashlar import ASRForecaster
-
-model = ASRForecaster(lookback=48, horizon=24, head="mixture").fit(series)
-model.predict(history)                            # one point per horizon step
-model.sample(history, jax.random.key(0), n=1000)  # draws
-```
-
-Or the series is already a table of lags and calendar columns, and every tabular head applies to it. `cyclical=` turns a calendar column into a sine and a cosine, so hour 23 sits beside hour 0 and days near each other in the year share what the model learns about them:
+A joint head predicts one distribution over several targets, given as the columns of `y`, including how the targets vary together. `task="multivariate_gaussian"` predicts a normal distribution whose covariance changes from row to row, and `"multivariate_mixture"` and `"multivariate_flow"` allow other shapes. Questions about several targets at once, such as the distribution of their total or the chance that all of them are high, depend on how the targets vary together, which separate models for each target do not estimate. For targets of different kinds, `task="chain"` gives each one its own head, conditioned on the targets before it, such as a claim count followed by the cost per claim.
 
 ```python
-from ashlar import tabm_piecewise
-
-model = tabm_piecewise(task="mixture", cyclical={"hour": 24.0, "weekday": 7.0, "day_of_year": 365.25})
-model.fit(lags, pickups)
-```
-
-![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/forecast-fan.png)
-
-Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours.
-
-`ASRHistoryForecaster` reads the whole prefix instead of a window. [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md) covers both, call by call.
-
-## Several targets, one joint distribution
-
-`task="multivariate_gaussian"` takes one column per outcome and predicts how they vary together, with a covariance that changes from row to row. Draws from it are coherent scenarios, so a question about the columns together, such as a total, has an answer:
-
-```python
-import jax
 from ashlar import ASRRegressor
 
-model = ASRRegressor(task="multivariate_gaussian").fit(X, loads)   # one column per site
-draws = model.predict_dist(X_new).sample(jax.random.key(0), (4000,))
-p_over = (draws.sum(axis=-1) > capacity).mean(axis=0)              # P(total > capacity), per row
+# Y has one column per target, for example casual and registered riders
+model = ASRRegressor(task="multivariate_gaussian").fit(X, Y)
+
+model.predict(X_new)                                       # the mean of each target
+model.sample(X_new, n=1000)                                # joint samples
+model.log_prob(X_new, Y_new)                               # joint log-likelihood
+model.calibrate(X_holdout, Y_holdout)                      # each target and their sum
+model.predict_interval(X_new, coverage=0.8, target="sum")  # 80% interval for the total
+model.predict_exceedance(X_new, 500, target="sum")         # P(total > 500) per row
 ```
 
-![The 80% band for the total load of eight clients, joint against independent, and the reliability of P(total > capacity).](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/joint-demand.png)
+On hourly bike rentals, with casual and registered riders as the two targets, the joint model's 80% interval for the total contains 81% of held-out hours. An Ashlar model that treats the two as independent contains 78%, and LightGBM quantile regression on the total 68%. After calibration on hours set aside, all three contain 80%, and the intervals are 80 riders wide for the joint model, 79 for the independent model, and 85 for LightGBM with conformalized quantile regression. So the dependence gives the right coverage without calibration, but not a narrower interval after it. In a simulation of four products that often sell out on the same days, joint models fitted to the censored sales predict that all four sell out on 9% to 12% of days, against 11.1% observed, and separate censored models for each product predict 0.7%.
 
-Eight electricity clients, a day ahead, from the calendar and each client's load a day and a week earlier, at 25 rolling forecast origins of four held-out weeks each. Every client's own forecast is the same with or without the covariance; their total is not. The joint model's 80% interval for the total holds 81% of held-out hours, and the same model with its covariance dropped holds 72%, because errors that move together do not cancel. A fixed correlation fitted to the residuals of independent per-client models also reaches 81%, so on these loads most of the gain comes from modelling the dependence at all rather than from letting it change with the row. When the dependence comes in regimes, such as a rush day when every column jumps together, `task="multivariate_mixture"` takes the same `y` and fits a mixture of joint normals, and when it is curved or skewed, `task="multivariate_flow"` fits an autoregressive flow over the columns. All three take [a joint label](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md#several-products-that-sell-out-together) with a cell per column. [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md#several-targets-at-once) has the API, and [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md#joint-demand-across-locations) every score.
+[docs/showcase.md](docs/showcase.md#multivariate-targets) has the bike-rental example in full and a chained model of insurance claims, and [docs/benchmarks.md](docs/benchmarks.md#several-products-that-sell-out-together) has the sell-out simulation.
 
-## Nested outcomes as a tree of labels
+## Benchmarks on eight large tables
 
-Some targets are a tree, not a flat set of classes: a ball is a wicket, a dot, or runs, and runs are a four or a six. `ASROutcomeTree` fits one backbone with a softmax per split, so a label that stops early (`"runs"`, with no detail recorded) still trains the splits above it.
+![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
 
-![One backbone with a softmax per split, over a tree of ball outcomes.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/outcome-tree.png)
+Each dot shows how Ashlar's score differs from that of the best tree-based model on one table; left of zero means Ashlar is better. The left panel compares test error, and the right panel compares the predicted distributions by CRPS or log loss. LightGBM trains much faster, in 4 seconds to 2 minutes per table on six threads, while Ashlar takes 2 to 5 minutes on all 12 cores of a laptop. [docs/showcase.md](docs/showcase.md#benchmarks-on-eight-large-tables) has the full tables, training times, and results on five smaller tables.
 
-```python
-from ashlar import ASROutcomeTree
+## Examples
 
-model = ASROutcomeTree({"wicket": None, "dot": None, "runs": ["four", "six"]}).fit(X, outcomes)
-model.predict_proba(X_new)                  # the leaves
-model.predict_conditional(X_new, "runs")    # P(four or six | runs, x)
-```
+Each example compares Ashlar with a tool commonly used for the same task: a gradient-boosted tree model, a mixed model, R's `gamlss`, XGBoost's survival model, or DeepAR. Select a tile to see the full example in [docs/showcase.md](docs/showcase.md), with the code, the results, and the cases where the other tool does better.
 
-Every categorical column in that model is a learned vector, and the branch probabilities are a function of those vectors together with the rest of the row, not of either alone:
-
-![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](https://raw.githubusercontent.com/maxmbay/ashlar/main/docs/images/outcome-embeddings.png)
-
-An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
-
-## Save and load
-
-```python
-from ashlar import ASRModel
-
-model.save("models/fare")              # a directory: metadata.json and the weights
-model = ASRModel.load("models/fare")   # comes back as the class it was saved as
-```
-
-A saved model is JSON plus Equinox weight files, not a pickle. Every model saves this way, distributional heads included, and reloads with identical predictions. The forecasters load with their own class: `ASRForecaster.load(path)`. Pass `save_optimizer=False` to a tabular model to leave out the optimizer state when you only need to predict. A custom head or backbone is recorded by its module path and imported on load, so load only models you trust.
-
-## Results
-
-Eight public tables of half a million to two million rows, against LightGBM, XGBoost, and CatBoost, all trained on a laptop CPU. Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments.
-
-| Table | Rows | Target, metric | Ashlar | Best tree |
-|---|---:|---|---:|---:|
-| Higgs | 2,000,000 | signal, accuracy ↑ | **0.762** | 0.752 |
-| Covertype | 581,012 | 7 forest types, accuracy ↑ | **0.967** | 0.963 |
-| Year (MSD) | 515,345 | release year, RMSE ↓ | **8.698** | 8.710 |
-| Airline delay | 2,000,000 | delay in minutes, RMSE ↓ | **29.04** | 29.05 |
-| Zurich transport | 2,000,000 | delay, RMSE ↓ | 3.052 | **3.047** |
-| Click prediction | 1,997,410 | click, accuracy ↑ | 0.842 | **0.844** |
-| Airlines | 539,383 | delayed, accuracy ↑ | 0.660 | **0.668** |
-| NYC green taxi | 581,835 | tip in $, RMSE ↓ | 1.977 | **1.752** |
-
-Four wins, one tie within a thousandth, two a few tenths of a point behind, and one clear loss. Higgs and covertype are not close: on Higgs the defaults beat every tree by more than a point of accuracy (AUC 0.846 against 0.835), and on covertype by half a point against the best tree and five points against CatBoost.
-
-Ask for a distribution and the gap widens. CRPS scores a whole predictive distribution in the target's units, NLL is the negative log density of what happened, and both are lower-is-better:
-
-| Table | Score | Ashlar `mixture` | Best tree distribution |
-|---|---|---:|---:|
-| Airline delay, minutes | CRPS | **9.17** | 11.46 |
-| | NLL | **2.66** | 4.72 |
-| Year (MSD) | CRPS | **4.05** | 4.41 |
-| | NLL | **3.08** | 3.42 |
-| Zurich transport | CRPS | **1.62** | 1.74 |
-| | NLL | **2.00** | 2.53 |
-| NYC green taxi tips, $ | CRPS | 0.59 | **0.46** |
-| | NLL | **−1.97** | 0.70 |
-
-The best likelihood on all four, and the best CRPS on three. The intervals are honest too: an Ashlar interval that promises 80% holds about 80% of held-out values, where a tree mean with a fitted normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide, 33 minutes against 75, and still covers 80%.
-
-On five smaller tables the defaults win two (Ames, abalone) and trail LightGBM on the rest, where `tabm_piecewise()` closes most of the gap. [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md) has every number: all eight large tables per metric, the five small ones, RealMLP, TabM, and FT-Transformer, the ablation behind the defaults, the forecast heads, calibrated intervals, count heads, the hurdle head, censored and total labels, joint demand across locations, and member uncertainty.
+<table>
+  <tr>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#distribution-heads"><img src="docs/images/readme/thumbs/shapes.png" alt="Distribution heads"></a><br><a href="docs/showcase.md#distribution-heads"><b>Distribution heads</b></a><br><sub>Claims at four fixed amounts: 42% observed, 33% predicted, CatBoost 3%</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#survival-analysis"><img src="docs/images/readme/thumbs/survival.png" alt="Survival analysis"></a><br><a href="docs/showcase.md#survival-analysis"><b>Survival analysis</b></a><br><sub>Passes D-calibration on 4 of 5 splits; tuned XGBoost AFT on none</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#partially-observed-labels"><img src="docs/images/readme/thumbs/observed.png" alt="Partially observed labels"></a><br><a href="docs/showcase.md#partially-observed-labels"><b>Partially observed labels</b></a><br><sub>Days when four products all sell out (simulated): 11.4% predicted, 11.1% observed, 0.7% from separate models</sub></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#multivariate-targets"><img src="docs/images/readme/thumbs/outcomes.png" alt="Multivariate targets"></a><br><a href="docs/showcase.md#multivariate-targets"><b>Multivariate targets</b></a><br><sub>Calibrated 80% intervals for hourly bike rentals: 80 riders wide, LightGBM with CQR 85</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#random-effects"><img src="docs/images/readme/thumbs/pooling.png" alt="Random effects"></a><br><a href="docs/showcase.md#random-effects"><b>Random effects</b></a><br><sub>CRPS for stores with 1 to 5 days of data: 0.096, GPBoost 0.125</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#additive-models"><img src="docs/images/readme/thumbs/additive.png" alt="Additive models"></a><br><a href="docs/showcase.md#additive-models"><b>Additive models</b></a><br><sub>Same terms as R's gamlss; 10 seconds per fit on 12 cores, gamlss 4 to 6 minutes on one thread</sub></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#calibrated-intervals-and-missing-inputs"><img src="docs/images/readme/thumbs/intervals.png" alt="Calibrated intervals and missing inputs"></a><br><a href="docs/showcase.md#calibrated-intervals-and-missing-inputs"><b>Calibrated intervals</b></a><br><sub>Coverage between 75% and 85% in 21 of 24 hours; LightGBM with CQR in 10</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#decisions-and-explanations"><img src="docs/images/readme/thumbs/act.png" alt="Decisions and explanations"></a><br><a href="docs/showcase.md#decisions-and-explanations"><b>Decisions and explanations</b></a><br><sub>Orders for any cost ratio from one model; LightGBM refitted per ratio costs up to 23% more</sub></td>
+    <td align="center" valign="top" width="33%"><a href="docs/showcase.md#forecasting-work-in-progress"><img src="docs/images/readme/thumbs/forecast.png" alt="Forecasting (work in progress)"></a><br><a href="docs/showcase.md#forecasting-work-in-progress"><b>Forecasting (in progress)</b></a><br><sub>CRPS of 12-day sales totals: 2,623, DeepAR 3,881</sub></td>
+  </tr>
+</table>
 
 ## Documentation
 
-- [docs/models.md](https://github.com/maxmbay/ashlar/blob/main/docs/models.md): the four slots, and the research models beyond the defaults.
-- [docs/heads.md](https://github.com/maxmbay/ashlar/blob/main/docs/heads.md): every head and the shape of target it suits, calibrated intervals, and member uncertainty.
-- [docs/distributions.md](https://github.com/maxmbay/ashlar/blob/main/docs/distributions.md): the one distribution object every head returns, its shapes, and JAX transforms.
-- [docs/observed.md](https://github.com/maxmbay/ashlar/blob/main/docs/observed.md): censored, interval, rounded, truncated, noisy, and total labels, and which heads take them.
-- [docs/tabular.md](https://github.com/maxmbay/ashlar/blob/main/docs/tabular.md): fitting a table. Defaults, recipes, tasks, embeddings, set columns, and search.
-- [docs/forecast.md](https://github.com/maxmbay/ashlar/blob/main/docs/forecast.md): the two forecasters, call by call.
-- [docs/benchmarks.md](https://github.com/maxmbay/ashlar/blob/main/docs/benchmarks.md): every number, per table and per metric, and how it was run.
-- [`examples/`](https://github.com/maxmbay/ashlar/tree/main/examples): runnable scripts, including the benchmarks and the figures on this page.
-- [CHANGELOG.md](https://github.com/maxmbay/ashlar/blob/main/CHANGELOG.md): what changed in each release.
+- [docs/showcase.md](docs/showcase.md): the full benchmark results and the examples from the gallery, with figures, code, and comparisons.
+- [docs/models.md](docs/models.md): the keyword arguments that define a model, and the research models beyond the defaults.
+- [docs/heads.md](docs/heads.md): each head and the targets it suits, calibrated intervals, and uncertainty across ensemble members.
+- [docs/distributions.md](docs/distributions.md): the distribution object returned by every head, joint heads, constraints, missing inputs, decisions, explanations, and JAX transforms.
+- [docs/observed.md](docs/observed.md): censored, interval, survival, rounded, truncated, noisy, and total labels, and which heads support them.
+- [docs/additive.md](docs/additive.md): additive models for every parameter of a distribution (a neural GAMLSS), and how to read the fitted terms with `shape_functions`.
+- [docs/effects.md](docs/effects.md): random effects for groups such as stores, patients, or products, including predictions for new groups from a few rows.
+- [docs/tabular.md](docs/tabular.md): defaults, recipes, tasks, embeddings, set-valued columns, and hyperparameter search.
+- [docs/forecast.md](docs/forecast.md): the two single-series forecasters, and forecasting many series with covariates using a joint head over the forecast horizon.
+- [docs/benchmarks.md](docs/benchmarks.md): all benchmark results, per table and metric, with the baselines, how each was run, and the cases where the baselines do better.
+- [`examples/`](examples/): runnable scripts, including the benchmarks, and [`examples/readme/`](examples/readme/), which redraws the figures in the README and the showcase from saved results.
+- [CHANGELOG.md](CHANGELOG.md): changes in each release.
 
 ## Acknowledgements
 

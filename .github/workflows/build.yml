@@ -13,6 +13,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install build twine
+      - name: Check the README's and the showcase's links, then point the README's at this commit for PyPI
+        run: |
+          python examples/readme/absolute_urls.py --check
+          python examples/readme/absolute_urls.py --check docs/showcase.md
+          python examples/readme/absolute_urls.py --ref "${{ github.sha }}"
       - run: python -m build
       - run: twine check --strict dist/*
       - name: Install the wheel in a clean venv and import it

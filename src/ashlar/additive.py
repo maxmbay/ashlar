@@ -10,6 +10,12 @@ The ridge grid, the eight quantile knots, and the pair cap are fixed. Gradients
 flow through the linear map of those bases.
 
 The residual regression default does not use this module.
+
+Experimental: these research models predict a point or class probabilities
+with their own ``fit(X, y, task)``, and are not connected to the heads,
+``predict_dist``, observed labels, or ``calibrate``. For an additive model of
+a whole distribution, use ``ASRRegressor(task=..., backbone="additive")``
+(``ashlar.shapes``).
 """
 
 from __future__ import annotations
@@ -518,7 +524,10 @@ def _update_embedding(ids: np.ndarray, table: np.ndarray, design_numeric: np.nda
 
 
 class ASRAdditive:
-    """Main effects, a width-8 embedding per categorical, and at most ten pairs."""
+    """Main effects, a width-8 embedding per categorical, and at most ten pairs.
+
+    Experimental. For an additive model of a distribution, use ``backbone="additive"``.
+    """
 
     def __init__(self, random_state: int = 0, verbose: bool = False):
         self.random_state = int(random_state)
@@ -725,7 +734,10 @@ def _mode(labels: np.ndarray):
 
 
 class ASRGatedAdditive:
-    """Two additive specialists behind a gate learned from the training labels or one feature."""
+    """Two additive specialists behind a gate learned from the training labels or one feature.
+
+    Experimental. For an additive model of a distribution, use ``backbone="additive"``.
+    """
 
     def __init__(self, random_state: int = 0, verbose: bool = False):
         self.random_state = int(random_state)

@@ -14,11 +14,11 @@ One numeric column, a few epochs, then `predict` on a grid. The line is the fit.
 
 `fit(X, y)` with no other arguments does the following.
 
-Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. An integer column stays numeric unless you name it as a category.
+Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. `numeric_clip` sets the clip's size, and `numeric_clip=None` turns it off, along with the stop at the edge of the training range in the quantile maps, so a value past the range keeps moving the model instead of reading as the edge. That helps where a trend continues past the data and hurts where it bends or stops; [docs/benchmarks.md](benchmarks.md#spread-past-the-training-range) has both. An integer column stays numeric unless you name it as a category.
 
 Regression labels are z-scored on the training rows. `predict` maps them back. `standardize_target=False` leaves `y` alone. Classification and ordinal labels stay on their original scale.
 
-Every other column is categorical. It gets a learned embedding of width 8. Pass `categorical_embeddings=[]` for one-hot, or a list of names to embed those columns and one-hot the rest. Index 0 is the row for a missing value or a category that was not in the training rows. `categorical_embedding_hidden=True` passes each category vector through its own dense layer and ReLU, with a residual, so a column's contribution is not a fixed linear read of the one-hot.
+Every other column is categorical. It gets a learned embedding of width 8. Pass `categorical_embeddings=[]` for one-hot, or a list of names to embed those columns and one-hot the rest. Index 0 is the row for a missing value or a category that was not in the training rows. `categorical_embedding_hidden=True` passes each category vector through its own dense layer and ReLU, with a residual, so a column's contribution is not a fixed linear read of the one-hot. A column with many groups and few rows for most of them, such as a store or a patient, can instead be pooled across its groups with `random_effects`, so a group with little data is pulled towards the rest and a new group starts from the population ([docs/effects.md](effects.md)).
 
 Each numeric column gets a piecewise-linear embedding of width 16. Its 48 bins are training-row quantiles of the scaled column. A value becomes its fill fraction of each bin, and a per-column linear map of that encoding is added to a plain linear embedding of the value. The piecewise part starts at zero, so training begins from the linear embedding and bends it where the data asks. The bin edges are fitted, not trained. `num_embeddings="periodic"` uses learned sine and cosine features instead, `"piecewise_relu"` adds a ReLU, `"linear_relu"` is one linear map and a ReLU per column, and `None` feeds the scaled numbers straight to the backbone. `num_embedding_bins` and `num_embedding_dim` set the bins and the width.
 
@@ -62,6 +62,16 @@ An ordinal label has to be a real number. The sorted values are the class order.
 `predict_score` is the expected label: class probabilities times the integer class values. The mean for each label sits on that integer.
 
 `ASROutcomeTree(spec)` fits a nested outcome: one shared backbone and one branch softmax per internal node of a tree of labels, such as `{"wicket": None, "runs": {"dot": None, "scoring": ["boundary", "run"]}}`. A leaf's probability is the product of the branch probabilities on its path. A label may stop at an internal node, and then only the splits above it train. `predict_proba` returns the leaves, `predict_node_proba` every node, and `predict_conditional(X, node)` the split at one node. [`examples/benchmark_outcome_tree.py`](../examples/benchmark_outcome_tree.py) runs it on IPL ball-by-ball data.
+
+![One backbone with a softmax per split, over a tree of ball outcomes.](images/outcome-tree.png)
+
+```python
+from ashlar import ASROutcomeTree
+
+model = ASROutcomeTree({"wicket": None, "dot": None, "runs": ["four", "six"]}).fit(X, outcomes)
+model.predict_proba(X_new)                  # the leaves
+model.predict_conditional(X_new, "runs")    # P(four or six | runs, x)
+```
 
 `task="normal"` fits a diagonal normal. `predict_dist` returns the distribution. The default regression `predict` is the mean of the member outputs.
 
@@ -113,6 +123,12 @@ zones = model.core_.categorical_embeddings.tables[names.index("pickup_zone")]   
 That table is a model of NYC taxi trip duration from the pickup and drop-off zones, 191 and 203 levels, plus the hour, the weekday, and the borough. There is no distance column. The model was never told where a zone is, yet the first principal component of the learned vectors tracks how long trips from that zone run (correlation 0.73), and both airports land far from everything else.
 
 On accuracy alone the embeddings are no magic. With 5,000 training rows spread over about 200 zones on each side, a learned vector per zone has little data behind it, and one-hot with a longer schedule does better: log-duration RMSE 0.580 against 0.681, with LightGBM's native categorical splits best at 0.520 ([docs/benchmarks.md](benchmarks.md#learned-embeddings) has the table). What the embeddings add is a representation: 8 numbers per zone instead of a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen.
+
+In an outcome tree, the branch probabilities are a function of those vectors together with the rest of the row, not of either alone:
+
+![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](images/outcome-embeddings.png)
+
+An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
 
 A set column is a cell that holds a list of labels. Pass `set_features=["tags"]`. The model mean-pools a learned token embedding. Lists longer than `set_max_length` (default 8) are truncated to the longest list in the training rows, capped by that maximum. An empty list becomes a zero vector.
 

@@ -47,6 +47,7 @@ def test_task_models_keep_their_task():
         ASRRegressor(task="classification")
 
 
+@pytest.mark.slow
 def test_load_returns_the_saved_class(tmp_path):
     x = np.random.default_rng(0).normal(size=(24, 2))
     model = ASRClassifier(backbone_kwargs={"n_blocks": 1, "d_block": 8, "dropout": 0.0}, max_epochs=1, patience=0, validation_size=0, batch_size=8)

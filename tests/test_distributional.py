@@ -84,6 +84,7 @@ def _history_loss(net, series, mean: float, std: float) -> float:
     return total / count
 
 
+@pytest.mark.slow
 def test_default_forecast_head_is_squared_error():
     assert ASRForecaster().head == "mse"
     assert ASRHistoryForecaster().head == "mse"
@@ -116,6 +117,7 @@ def test_pinball_and_gaussian_match_their_formulas():
     assert abs(float(loss - manual)) < 1e-6
 
 
+@pytest.mark.slow
 def test_spline_identity_roundtrip_and_density():
     width = flow_parameter_count()
     raw = jnp.zeros((width,), dtype=jnp.float32)
@@ -149,6 +151,7 @@ def test_spline_identity_roundtrip_and_density():
     assert np.array_equal(np.asarray(histogram_bin(edges)), np.asarray([0, 0, 8, 15, 15]))
 
 
+@pytest.mark.slow
 def test_flow_shift_and_scale_give_each_row_its_own_spread_and_tail():
     from scipy.stats import norm
 
@@ -194,6 +197,7 @@ def test_flow_reads_a_bare_spline_as_shift_zero_scale_one():
         decode("flow", jnp.zeros((2, 2 * count + 1)), 2)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("head", HEADS)
 def test_distributional_loss_is_finite_and_reaches_the_head(head):
     horizon = 3
@@ -209,6 +213,7 @@ def test_distributional_loss_is_finite_and_reaches_the_head(head):
     _assert_parameters(head, decoded, target)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("head", HEADS)
 def test_full_history_loss_reaches_the_distributional_head(head):
     horizon = 2
@@ -226,6 +231,7 @@ def test_full_history_loss_reaches_the_distributional_head(head):
     assert float(jnp.sum(jnp.abs(grads.patch_weight))) > 0.0
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("head", HEADS)
 def test_window_fit_lowers_the_distributional_loss(head):
     series = _sine(360)
@@ -248,6 +254,7 @@ def test_window_fit_lowers_the_distributional_loss(head):
     _assert_fitted_api(model, series[-16:], single)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("head", HEADS)
 def test_full_history_fit_lowers_the_distributional_loss(head):
     series = _sine(220, seed=1)
@@ -333,6 +340,7 @@ def _assert_fitted_api(model, history, single, origins=None):
         assert np.all(scale > 0.0)
 
 
+@pytest.mark.slow
 def test_histogram_bin_count_is_configurable():
     """A wider histogram head keeps every density law, at finer resolution."""
     bins = 48

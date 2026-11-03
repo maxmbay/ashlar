@@ -9,6 +9,7 @@
 | Skewed or lumpy, with a spread that moves with the inputs | `flow` | A monotone spline bends a normal into a skewed or many-humped shape, and each row gets its own shift and scale, so its spread and its tails are its own. Past the spline's range the tails are normal; for heavier ones use `student_t`. The density is exact. |
 | Any shape, including a spike at one value | `histogram` | A softmax over fixed bins across ±4 standard deviations. No shape assumption, and the resolution is yours: `head_kwargs={"bins": 48}`, 16 by default. The two end bins are open-ended. |
 | Only the interval matters | `quantile` | Pinball loss at 0.1, 0.5, and 0.9. No density and no draws. |
+| Skewed, with a quantile function you want to read or constrain | `quantile_spline` | A median and eight slopes per row: the quantile function is piecewise linear in the logistic score, so its CDF, density, and quantiles are exact without bisection, and its tails past the last break are exponential, so an outlier costs a likelihood linear in its distance. With `monotone=` it is the head whose whole spread can move with a constrained feature. |
 | Heavy tails, outliers you should not chase | `student_t` | A location, a scale, and degrees of freedom (above 2, so the variance is finite) per row. The point is the location, not the mean. |
 | Counts: visits, claims, goals | `poisson` | One rate per row. The target stays raw and must hold non-negative whole numbers. |
 | Counts with more spread than their mean | `negative_binomial` | A mean and a dispersion per row, the variance being mean + dispersion × mean². |
@@ -16,6 +17,7 @@
 | Several columns that move together | `multivariate_gaussian` | A joint normal with a learned low-rank covariance, so totals and joint events come out right. |
 | Several columns that move together in a few distinct ways, such as a day when everything spikes at once | `multivariate_mixture` | Five joint normals with learned weights (`head_kwargs={"components": 5}`), each with its own location and low-rank covariance. |
 | Several columns whose dependence is curved, skewed, or heavier in the tails | `multivariate_flow` | An autoregressive flow: each column's whole conditional shape can change with the columns before it. |
+| Several columns of different kinds, such as a claim count and its cost, or a cause and a time | `chain` | One head per column, each of its own kind, each reading the columns before it: `head_kwargs={"columns": ["negative_binomial", "hurdle"]}`. |
 
 ```python
 from ashlar import ASRRegressor
@@ -47,9 +49,28 @@ model = ASRRegressor(task="mixture").fit(X_train, y_train)
 model.calibrate(X_holdout, y_holdout)
 model.predict_interval(X_new, coverage=0.8)   # split-conformal, shape (rows, 2)
 model.predict_quantiles(X_new, [0.1, 0.9])     # each level recalibrated
+model.predict_exceedance(X_new, threshold)     # P(y > threshold) per row, recalibrated
 ```
 
-A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
+A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The same table recalibrates a probability: `predict_exceedance` replaces the model's own `P(y ≤ threshold)` with the share of held-out rows whose transform was at most that much, so an overconfident model's small probabilities move up and its large ones down. The map is the same for every row, so it corrects a model that is wrong the same way everywhere, not one that is too narrow on some rows and too wide on others. The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
+
+One calibration of every row holds its coverage over those rows on average, not within each kind of row: an interval can hold 95% of quiet rows and 50% of loud ones and still average 80%. `calibrate` can calibrate groups of rows on their own (Mondrian conformal prediction):
+
+```python
+model.calibrate(X_holdout, y_holdout, groups="store")       # a column of X, read again from X_new
+model.predict_interval(X_new, 0.8)                           # each row reads its store's table
+
+model.calibrate(X_holdout, y_holdout, groups=labels)         # one label per row
+model.predict_interval(X_new, 0.8, groups=new_labels)
+
+model.calibrate(X_holdout, y_holdout, localize="members")   # bins of member disagreement
+```
+
+Each group with at least 100 calibration rows (`min_group_rows`) gets tables of its own, so the interval holds within that group; a smaller group, and a group the calibration did not see, reads the table of every row. `localize="members"` makes the groups up to five equal bins of how much an ensemble's members disagree on a row, as a share of its predictive spread (`predict_uncertainty`), so a row the members disagree on is calibrated with rows they disagreed on as much. It needs a backbone with several members, such as `backbone="tabm"`. `predict_quantiles` and `predict_exceedance` read the groups the same way.
+
+On public tables one calibration often holds within groups already: after it, every group of California by distance to the ocean, diamonds by cut, abalone by sex, and taxi tips by taxi color held 77% to 82% of its rows. A table per group pays off where coverage moves with the group. By hour of day, one table left the electricity flow model's total between 67% and 91% across the hours, and a table per hour put every hour between 77% and 83%. A group's own table is noisier, so a group with only a hundred or so rows is better off with it only where the table of every row is far off for it. [docs/benchmarks.md](benchmarks.md#coverage-within-groups) has the numbers.
+
+The joint heads calibrate each column, the sum of the columns, any function of them you name, such as the largest column, and a joint region; [docs/distributions.md](distributions.md#calibrating-the-columns-and-the-total) has the detail.
 
 On five public tables, three splits each, calibration brought the default mixture's 80% interval to between 79.4% and 80.7% of held-out rows, from between 75.9% and 88.6% before. It widened the intervals that were too narrow (California, 75.9% → 80.7%; bike rentals, 76.8% → 79.7%), narrowed the one that was too wide (taxi tips, 88.6% → 79.9%), and left the ones that were right alone. The same conformal step on LightGBM's quantile models gives about the same coverage with a wider interval on three of the four tables where it applies. [docs/benchmarks.md](benchmarks.md#calibrated-intervals) has every number.
 
@@ -57,24 +78,20 @@ For labels rather than numbers, `ASRClassifier` fits a softmax, `ASROrdinalClass
 
 ## Large tables
 
-CRPS scores the whole predictive distribution in the target's units, lower is better. NLL is the negative log density at the value that happened. The trees have two ways to give a distribution: the early-stopped mean with a normal whose width is the validation residual, and CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance per row.
+CRPS scores the whole predictive distribution in the target's units, lower is better. The trees give a distribution three ways here: the early-stopped mean with a normal whose width is the validation residual; CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance per row; and LightGBMLSS, which grows a LightGBM tree per parameter of a mixture of three normals. Each cell is the mean over three random splits; [docs/benchmarks.md](benchmarks.md#large-tables) has the spread across them, every model, and the NLL.
 
-| Table | Score | Ashlar `mixture` | CatBoost mean + variance | Best tree mean + normal |
-|---|---|---:|---:|---:|
-| Airline delay, minutes | CRPS | **9.17** | 11.46 | 12.17 |
-| | NLL | **2.66** | 4.72 | 4.81 |
-| | 80% coverage | 80% | 94% | 94% |
-| Year | CRPS | **4.05** | 4.41 | 4.61 |
-| | NLL | **3.08** | 3.42 | 3.58 |
-| | 80% coverage | 77% | 83% | 85% |
-| Zurich transport | CRPS | **1.62** | 1.74 | 1.75 |
-| | NLL | **2.00** | 2.53 | 2.53 |
-| | 80% coverage | 79% | 80% | 79% |
-| NYC green taxi tips, $ | CRPS | 0.59 | **0.46** | 0.66 |
-| | NLL | **−1.97** | 0.70 | 1.98 |
-| | 80% coverage | 82% | 83% | 95% |
+| Table | Score | Ashlar `mixture` | LightGBMLSS mixture | CatBoost mean + variance | Best tree mean + normal |
+|---|---|---:|---:|---:|---:|
+| Airline delay, minutes | CRPS | 9.24 | **9.22** | 11.53 | 12.20 |
+| | 80% coverage | 80% | 79% | 94% | 94% |
+| Year | CRPS | **4.03** | 4.17 | 4.40 | 4.60 |
+| | 80% coverage | 78% | 76% | 83% | 85% |
+| Zurich transport | CRPS | **1.62** | 1.65 | 1.74 | 1.74 |
+| | 80% coverage | 79% | 75% | 80% | 79% |
+| NYC green taxi tips, $ | CRPS | 0.55 | **0.44** | 0.46 | 0.67 |
+| | 80% coverage | 82% | 75% | 83% | 95% |
 
-The mixture has the best likelihood on every table and the best CRPS on three of four. Its intervals are honest: an interval that promises 80% holds about 80% of held-out values, where the trees' normal holds 94% of airline delays because one width has to serve every flight. On airline delay the mixture's 80% interval is less than half as wide as the trees' (33 minutes against 75) and still covers 80%. The taxi tips are the exception on CRPS: the trees' mean is so much closer there (RMSE 1.75 against 1.98) that CatBoost's mean and variance win on CRPS, while the mixture still puts far more density on the tips that happened, many of them exactly zero.
+Against a normal of one width or CatBoost's per-row normal, the mixture has the lower CRPS on three of the four tables. LightGBMLSS's mixture is the strongest baseline. It is 0.2% ahead of Ashlar on airline delay, ahead on each split; it trails Ashlar by 3.5% on release years and 1.7% on Zurich; and it wins on taxi tips, a spike at $0 and a long tail, where the trees' mean is much closer (RMSE 1.77 against the mixture's 2.04) and Ashlar's CRPS is 27% higher on average and 6% to 41% higher from split to split: Ashlar's mixture scores 0.46 to 0.61 there, where LightGBMLSS's stays between 0.43 and 0.44. The trees' normal holds 94% of airline delays in its 80% interval because one width has to serve every flight; Ashlar's mixture holds 80% and LightGBMLSS's 79%. NLL is left out here: on airline delay's on-time minute and taxi tips' $0 it turns on how narrow a model makes the spike.
 
 ## Conditional predictive distributions
 
@@ -117,3 +134,5 @@ parts["total"]       # both, by the law of total variance
 A point regression or the quantile head has no noise model, so it returns `epistemic` and `total` only. A classifier or an ordinal model returns entropies in nats instead: `total` is the entropy of the mean probabilities, `aleatoric` the members' mean entropy, and `epistemic` the mutual information between the label and the member. The default `residual_mlp` has one member, so its `epistemic` is zero: use `backbone="tabm"`, or any backbone with `k` above 1.
 
 On three public tables with `tabm_piecewise(task="gaussian")` (32 members), every part ranks rows by error well: keeping the half the model is surest of halves the RMSE on California housing and cuts it by more than 80% on diamond prices. In range, the noise ranks errors a little better than the member spread, because most of the error there is noise. Trained below the 80th percentile of one column and tested above it, the epistemic part rose 2.5 times on California, 4 times on diamonds, and 1.6 times on bike rentals, more than the aleatoric part did on each. That makes it a flag for rows unlike the training data, not an error bar: on diamonds above the training carats the RMSE grew 21 times. These are two splits on California and one on the others, so read them as indicative. [docs/benchmarks.md](benchmarks.md#member-uncertainty) has every number.
+
+Calibrating by the members' disagreement does not make it an error bar either. `calibrate(..., localize="members")` evens out coverage across bins of disagreement on rows like the calibration rows: on diamonds one calibration covered 75% of the rows the members agreed on most and 85% of those they disagreed on most, and a table per bin put every bin between 79% and 82%. Above the training range its 80% interval covered 59% of the rows on California and 11% on diamonds, as one calibration did, because the calibration rows never show errors that large. An interval scaled by the member spread reached 77% on California but only 19% on diamonds, and in range it covered 60% to 94% from bin to bin ([the numbers](benchmarks.md#calibrating-where-the-members-disagree)).

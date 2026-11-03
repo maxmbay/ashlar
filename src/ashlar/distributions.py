@@ -25,6 +25,9 @@ Methods, with ``value`` broadcasting against ``batch_shape + event_shape``:
   precision and still differentiable.
 - ``marginals()``: the univariate marginal of every coordinate, with the event
   axis moved into the batch. A univariate distribution returns itself.
+- ``project(weights)``: for a joint outcome, the univariate distribution of
+  the weighted sum ``weights · Y``, such as the total, where it has a closed
+  form: the joint normal, a mixture of them, and an affine map of either.
 - ``log_cdf(value)`` and ``log_survival(value)``: ``log P(Y <= value)`` and
   ``log P(Y > value)``, computed in log space so a far tail stays finite.
   ``log_cdf_left`` and ``log_survival_left`` are ``log P(Y < value)`` and
@@ -55,6 +58,7 @@ from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from equinox import Module, field
 from jax.scipy.special import betainc, betaln, gammainc, gammaincc, log_ndtr, ndtr, ndtri
 
@@ -71,6 +75,8 @@ class Distribution(Module):
     support: ClassVar[str] = "real"
     # True for a family with a density and no atom, where ``P(Y < v) = P(Y <= v)``.
     atomless: ClassVar[bool] = False
+    # True where some mass sits beyond every finite value, as for a time that never comes (``Cured``).
+    defective: ClassVar[bool] = False
 
     @property
     def batch_shape(self) -> tuple[int, ...]:
@@ -200,6 +206,17 @@ class Distribution(Module):
         if self.event_shape:
             raise NotImplementedError(f"{type(self).__name__} does not expose its marginals.")
         return self
+
+    def project(self, weights) -> "Distribution":
+        """For a joint outcome, the distribution of the weighted sum ``weights · Y``, batch ``batch_shape``.
+
+        ``weights`` is one number per column, or broadcasts against
+        ``batch_shape + event_shape``. A weighted sum of jointly normal columns
+        is normal, so the joint normal, a mixture of them, and an affine map
+        of either have it in closed form; a flow does not, and its sum is read
+        from draws.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no closed form for a weighted sum of its columns.")
 
     def __getitem__(self, index):
         index = index if isinstance(index, tuple) else (index,)
@@ -429,6 +446,9 @@ class StudentT(Distribution):
         t, tail = self._tail(value)
         return jnp.where(t > 0, _safe_log(tail), jnp.log1p(-jnp.minimum(tail, 0.5)))
 
+    def convolve_normal(self, scale):
+        return NormalNoise(self, scale)
+
 
 class Mixture(Distribution):
     """Finite mixture over the last batch axis of ``components``.
@@ -464,6 +484,10 @@ class Mixture(Distribution):
     @property
     def support(self):
         return self.components.support
+
+    @property
+    def defective(self):
+        return self.components.defective
 
     def _expand(self, value):
         """Add the component axis to a value shaped ``... + batch_shape + event_shape``."""
@@ -513,6 +537,12 @@ class Mixture(Distribution):
         """Each component's box likelihood, mixed by its weight."""
         lower, upper = _bounds(lower, upper)
         return self._log_mix(self.components.log_box(self._expand(lower), self._expand(upper), points))
+
+    def project(self, weights):
+        """Each component's weighted sum, mixed with the same weights."""
+        if len(self.event_shape) != 1:
+            raise NotImplementedError("a weighted sum is for a joint outcome over one event axis.")
+        return Mixture(self.components.project(self._expand(jnp.asarray(weights, dtype=jnp.float32))), self.logits)
 
     def convolve_normal(self, scale):
         return Mixture(self.components.convolve_normal(self._expand(scale)), self.logits)
@@ -617,6 +647,10 @@ class AffineTransformed(Distribution):
     def support(self):
         return self.base.support
 
+    @property
+    def defective(self):
+        return self.base.defective
+
     def _log_scale(self):
         log_scale = jnp.log(self.scale)
         for _ in self.event_shape:
@@ -675,6 +709,13 @@ class AffineTransformed(Distribution):
 
     def convolve_normal(self, scale):
         return AffineTransformed(self.base.convolve_normal(jnp.asarray(scale, dtype=jnp.float32) / self.scale), self.loc, self.scale)
+
+    def project(self, weights):
+        """``weights · (loc + scale x)`` is ``weights · loc`` plus the base's sum with weights ``weights * scale``."""
+        if len(self.event_shape) != 1:
+            raise NotImplementedError("a weighted sum is for a joint outcome over one event axis.")
+        weights = jnp.asarray(weights, dtype=jnp.float32)
+        return AffineTransformed(self.base.project(weights * self.scale), jnp.sum(weights * self.loc, axis=-1), 1.0)
 
     def quantile(self, q):
         return self.loc + self.scale * self.base.quantile(q)
@@ -746,6 +787,14 @@ class Independent(Distribution):
     def covariance(self):
         variance = self.variance()
         return variance[..., :, None] * jnp.eye(variance.shape[-1], dtype=variance.dtype)
+
+    def project(self, weights):
+        """A weighted sum of independent normal columns is normal; other columns have no closed form."""
+        if not isinstance(self.base, Normal):
+            raise NotImplementedError(f"a weighted sum of independent {type(self.base).__name__} columns has no closed form.")
+        weights = jnp.asarray(weights, dtype=jnp.float32)
+        spread = jnp.sqrt(jnp.sum(jnp.square(weights * self.base.scale), axis=-1))
+        return Normal(jnp.sum(weights * self.base.loc, axis=-1), spread)
 
     def marginals(self):
         return self.base
@@ -861,9 +910,10 @@ class LowRankMultivariateNormal(Distribution):
     """Joint normal over ``d`` coordinates with covariance ``W Wᵀ + diag(D)``.
 
     ``loc`` is ``(..., d)``, ``cov_factor`` (``W``) is ``(..., d, rank)``, and
-    ``cov_diag`` (``D``, variances) is ``(..., d)``. The density uses the
-    Woodbury identity and the matrix determinant lemma, so it costs ``O(d r²)``
-    per row instead of ``O(d³)``. A rank of 0 is independent coordinates.
+    ``cov_diag`` (``D``, variances) is ``(..., d)``. The density whitens by
+    ``D`` and takes the QR of ``[D^(-1/2) W; I]``, so it costs ``O(d r²)`` per
+    row instead of ``O(d³)`` and stays accurate in float32 when a variance in
+    ``D`` is tiny next to ``W``. A rank of 0 is independent coordinates.
     """
 
     loc: jax.Array
@@ -900,17 +950,28 @@ class LowRankMultivariateNormal(Distribution):
     def log_prob(self, value):
         diff = jnp.asarray(value) - self.loc
         d = self.loc.shape[-1]
+        scale = jnp.sqrt(self.cov_diag)
+        z = diff / scale
         log_det = jnp.sum(jnp.log(self.cov_diag), axis=-1)
-        mahalanobis = jnp.sum(jnp.square(diff) / self.cov_diag, axis=-1)
-        if self.rank:
-            scaled = self.cov_factor / self.cov_diag[..., :, None]
-            capacitance = jnp.eye(self.rank, dtype=diff.dtype) + jnp.einsum("...dr,...ds->...rs", self.cov_factor, scaled)
-            chol = jnp.linalg.cholesky(capacitance)
-            log_det = log_det + 2.0 * jnp.sum(jnp.log(jnp.diagonal(chol, axis1=-2, axis2=-1)), axis=-1)
-            projected = jnp.einsum("...dr,...d->...r", jnp.broadcast_to(scaled, diff.shape + (self.rank,)), diff)
-            chol = jnp.broadcast_to(chol, projected.shape + (self.rank,))
-            solved = jax.scipy.linalg.solve_triangular(chol, projected[..., None], lower=True)[..., 0]
-            mahalanobis = mahalanobis - jnp.sum(jnp.square(solved), axis=-1)
+        if not self.rank:
+            return -0.5 * (d * math.log(2 * math.pi) + log_det + jnp.sum(jnp.square(z), axis=-1))
+        # Whitened by D, the covariance is I + A Aᵀ with A = D^(-1/2) W. The QR of [A; I] = [Q1; Q2] T gives
+        # TᵀT = I + AᵀA without forming AᵀA, which float32 cannot hold once a variance in D is tiny next to W,
+        # and (I + A Aᵀ)⁻¹ = I - Q1 Q1ᵀ, so the Mahalanobis term is a residual, |z - Q1 c|² + |Q2 c|² with
+        # c = Q1ᵀ z, rather than the difference of two huge numbers. T is well conditioned, every singular value
+        # at least 1, so its gradient is too.
+        whitened = self.cov_factor / scale[..., :, None]
+        batch = jnp.broadcast_shapes(whitened.shape[:-2], z.shape[:-1])
+        identity = jnp.broadcast_to(jnp.eye(self.rank, dtype=z.dtype), batch + (self.rank, self.rank))
+        stacked = jnp.concatenate([jnp.broadcast_to(whitened, batch + (d, self.rank)), identity], axis=-2)
+        q, triangle = jnp.linalg.qr(stacked)
+        log_det = log_det + 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diagonal(triangle, axis1=-2, axis2=-1))), axis=-1)
+        top, bottom = q[..., :d, :], q[..., d:, :]
+        z = jnp.broadcast_to(z, batch + (d,))
+        c = jnp.einsum("...dr,...d->...r", top, z)
+        residual = z - jnp.einsum("...dr,...r->...d", top, c)
+        rest = jnp.einsum("...sr,...r->...s", bottom, c)
+        mahalanobis = jnp.sum(jnp.square(residual), axis=-1) + jnp.sum(jnp.square(rest), axis=-1)
         return -0.5 * (d * math.log(2 * math.pi) + log_det + mahalanobis)
 
     def sample(self, key, sample_shape=()):
@@ -940,6 +1001,16 @@ class LowRankMultivariateNormal(Distribution):
 
     def marginals(self):
         return Normal(self.loc, jnp.sqrt(self.variance()))
+
+    def project(self, weights):
+        """``weights · Y`` is normal, with variance ``wᵀ D w + |Wᵀ w|²``."""
+        weights = jnp.asarray(weights, dtype=self.loc.dtype)
+        weights = jnp.broadcast_to(weights, jnp.broadcast_shapes(weights.shape, self.loc.shape))
+        variance = jnp.sum(jnp.square(weights) * self.cov_diag, axis=-1)
+        if self.rank:
+            factor = jnp.broadcast_to(self.cov_factor, weights.shape + (self.rank,))
+            variance = variance + jnp.sum(jnp.square(jnp.einsum("...d,...dr->...r", weights, factor)), axis=-1)
+        return Normal(jnp.sum(weights * self.loc, axis=-1), jnp.sqrt(variance))
 
     def log_box(self, lower, upper, points=None):
         """The GHK simulator (Geweke, Hajivassiliou, Keane), run on the ``rank`` shared factors.
@@ -1089,6 +1160,9 @@ class Flow(Distribution):
     def variance(self):
         return self._moments()[1]
 
+    def convolve_normal(self, scale):
+        return NormalNoise(self, scale)
+
 
 class Histogram(Distribution):
     """The ``histogram`` head: bin probabilities over fixed edges on the standardized axis.
@@ -1195,6 +1269,9 @@ class Histogram(Distribution):
         fraction = jnp.clip((q - below) / jnp.maximum(mass, 1e-30), 0.0, 1.0)
         left = edges[index]
         return left + fraction * (edges[1] - edges[0])
+
+    def convolve_normal(self, scale):
+        return NormalNoise(self, scale)
 
 
 def _count(sample_shape) -> int:
@@ -1443,6 +1520,9 @@ def _bisection_quantile(dist: Distribution, q):
         refined = jnp.where(frozen.cdf(jnp.zeros_like(x0)) >= level, 0.0, jnp.maximum(refined, 0.0))
     else:
         refined = jnp.where(level <= 0.0, -jnp.inf, refined)
+    if dist.defective:
+        # A level above the mass that ever happens is never reached.
+        refined = jnp.where(frozen.cdf(jnp.full_like(x0, jnp.inf)) < level, jnp.inf, refined)
     return jnp.where(level >= 1.0, jnp.inf, refined)
 
 
@@ -1479,17 +1559,151 @@ def randomized_pit(dist: Distribution, value, key):
     return lower + jax.random.uniform(key, jnp.shape(upper), dtype=upper.dtype) * (upper - lower)
 
 
+# Where the quantile spline's slope may change, in logistic scores on each side of the median: the levels
+# 0.5, 0.75, 0.91, and 0.977, a normal's median and 0.67, 1.34, and 2 standard deviations.
+SPLINE_BREAKS = (0.0, 1.1, 2.3, 3.75)
+# The slope that gives a logistic score unit variance: sqrt(3) / pi.
+SPLINE_UNIT_SLOPE = math.sqrt(3.0) / math.pi
+SPLINE_VARIANCE_POINTS = 2048
+
+
+def _spline_widths(dtype=jnp.float32):
+    breaks = jnp.asarray(SPLINE_BREAKS, dtype=dtype)
+    return breaks, jnp.concatenate([jnp.diff(breaks), jnp.asarray([jnp.inf], dtype=dtype)])
+
+
+class QuantileSpline(Distribution):
+    """A quantile function piecewise linear in the logistic score: ``Y = Q(Z)``, ``Z`` standard logistic.
+
+    ``median`` is ``Q(0)``; ``upper[..., k]`` is the slope of ``Q`` on the
+    ``k``-th piece above the median and ``lower[..., k]`` on the ``k``-th
+    below, the pieces breaking at the logistic scores ``SPLINE_BREAKS`` and
+    the last running to infinity. Every slope is positive, so ``Q`` rises
+    and its inverse is the sum of each piece's clipped share, in closed
+    form: ``cdf``, ``log_prob``, and ``quantile`` need no bisection. Equal
+    slopes give a logistic distribution, close to a normal in the middle;
+    unequal slopes give skew and either tail heavier or lighter. Beyond the
+    last break each tail is exponential, so a far value costs a likelihood
+    linear in its distance, not quadratic: an outlier cannot swamp the fit.
+
+    Because each quantile is the median plus or minus a sum of slopes, a
+    quantile rises with the median, with every upper slope, and as every
+    lower slope falls. The ``quantile_spline`` head with ``monotone=``
+    builds those three directions in, which is first-order stochastic
+    dominance in the constrained features.
+    """
+
+    median: jax.Array
+    upper: jax.Array
+    lower: jax.Array
+    reparameterized: ClassVar[bool] = True
+    atomless: ClassVar[bool] = True
+
+    def __init__(self, median, upper, lower):
+        self.median = jnp.asarray(median, dtype=jnp.float32)
+        self.upper = jnp.broadcast_to(jnp.asarray(upper, dtype=jnp.float32), self.median.shape + (len(SPLINE_BREAKS),))
+        self.lower = jnp.broadcast_to(jnp.asarray(lower, dtype=jnp.float32), self.median.shape + (len(SPLINE_BREAKS),))
+
+    @property
+    def batch_shape(self):
+        return self.median.shape
+
+    def _knots(self):
+        """Values of ``Q`` at the breaks above and below the median, ``batch + (pieces,)``."""
+        _breaks, widths = _spline_widths(self.median.dtype)
+        finite = jnp.where(jnp.isfinite(widths), widths, 0.0)
+        above = self.median[..., None] + jnp.cumsum(self.upper * finite, axis=-1) - self.upper * finite
+        below = self.median[..., None] - jnp.cumsum(self.lower * finite, axis=-1) + self.lower * finite
+        return above, below, widths
+
+    def score(self, value):
+        """The logistic score ``Q^{-1}(value)`` and the slope of ``Q`` there."""
+        value = jnp.asarray(value, dtype=self.median.dtype)[..., None]
+        above, below, widths = self._knots()
+        up = jnp.clip((value - above) / self.upper, 0.0, widths)
+        down = jnp.clip((below - value) / self.lower, 0.0, widths)
+        z = jnp.sum(up, axis=-1) - jnp.sum(down, axis=-1)
+        # The piece the score falls in gives the slope: read from z, not from the knots, so rounding at a
+        # knot cannot leave a value in no piece (and a zero slope).
+        breaks, _widths = _spline_widths(self.median.dtype)
+        piece = jnp.sum(jnp.abs(z)[..., None] >= breaks, axis=-1) - 1
+        shape = z.shape + self.upper.shape[-1:]
+        upper = jnp.take_along_axis(jnp.broadcast_to(self.upper, shape), piece[..., None], axis=-1)[..., 0]
+        lower = jnp.take_along_axis(jnp.broadcast_to(self.lower, shape), piece[..., None], axis=-1)[..., 0]
+        slope = jnp.where(z >= 0, upper, lower)
+        return z, slope
+
+    def quantile_of_score(self, z):
+        z = jnp.asarray(z, dtype=self.median.dtype)
+        breaks, widths = _spline_widths(self.median.dtype)
+        up = jnp.clip(jnp.maximum(z, 0.0)[..., None] - breaks, 0.0, widths)
+        down = jnp.clip(jnp.maximum(-z, 0.0)[..., None] - breaks, 0.0, widths)
+        return self.median + jnp.sum(self.upper * up, axis=-1) - jnp.sum(self.lower * down, axis=-1)
+
+    def log_prob(self, value):
+        z, slope = self.score(value)
+        return -z - 2.0 * jax.nn.softplus(-z) - jnp.log(slope)
+
+    def cdf(self, value):
+        return jax.nn.sigmoid(self.score(value)[0])
+
+    def log_cdf(self, value):
+        return -jax.nn.softplus(-self.score(value)[0])
+
+    def log_survival(self, value):
+        return -jax.nn.softplus(self.score(value)[0])
+
+    def quantile(self, q):
+        q = jnp.asarray(q, dtype=self.median.dtype)
+        return self.quantile_of_score(jnp.log(q) - jnp.log1p(-q))
+
+    def sample(self, key, sample_shape=()):
+        z = jax.random.logistic(key, tuple(sample_shape) + self.batch_shape, dtype=self.median.dtype)
+        return self.quantile_of_score(z)
+
+    def mean(self):
+        # E[clip(Z - b, 0, w)] = the integral of P(Z > t) from b to b + w; the lower side mirrors it.
+        breaks, widths = _spline_widths(self.median.dtype)
+        end = jnp.where(jnp.isfinite(widths), breaks + jnp.where(jnp.isfinite(widths), widths, 0.0), 0.0)
+        piece = jax.nn.softplus(-breaks) - jnp.where(jnp.isfinite(widths), jax.nn.softplus(-end), 0.0)
+        return self.median + jnp.sum((self.upper - self.lower) * piece, axis=-1)
+
+    def variance(self):
+        # The midpoints of SPLINE_VARIANCE_POINTS equal slices of probability.
+        levels = (jnp.arange(SPLINE_VARIANCE_POINTS, dtype=self.median.dtype) + 0.5) / SPLINE_VARIANCE_POINTS
+        z = (jnp.log(levels) - jnp.log1p(-levels)).reshape((-1,) + (1,) * len(self.batch_shape))
+        values = self.quantile_of_score(z)
+        mean = self.mean()
+        return jnp.mean(jnp.square(values - mean), axis=0)
+
+    def convolve_normal(self, scale):
+        return NormalNoise(self, scale)
+
+
+CURE_HEADS = ("gaussian", "mixture", "flow", "student_t")
+
+
+def cure_width(kind: str, flat) -> bool:
+    """Whether ``flat`` carries one more output than ``kind``'s head: the logit of never happening."""
+    from ashlar.distributional import output_width
+
+    return kind in CURE_HEADS and int(jnp.shape(flat)[-1]) == output_width(kind, 1) + 1
+
+
 def head_distribution(kind: str, flat, horizon: int = 1) -> Distribution:
     """The distribution of one ``ashlar.distributional`` head from its flat projection.
 
     ``flat`` is ``batch + (width,)`` on the standardized axis (the raw count
     for a count head). With ``horizon > 1`` the steps of a forecast become the
     last batch axis; each step is its own marginal, and nothing is claimed
-    about the dependence between steps.
+    about the dependence between steps. A head built with ``cure=True`` has
+    one more output, the logit of never happening, and gives a ``Cured``.
     """
     from ashlar.distributional import QUANTILE_LEVELS, decode
 
     flat = jnp.asarray(flat)
+    if int(horizon) == 1 and cure_width(kind, flat):
+        return Cured(head_distribution(kind, flat[..., :-1]), jax.nn.sigmoid(flat[..., -1]))
     batch = flat.shape[:-1]
     decoded = decode(kind, flat.reshape((-1, flat.shape[-1])), int(horizon))
     steps = (int(horizon),) if int(horizon) > 1 else ()
@@ -1510,6 +1724,8 @@ def head_distribution(kind: str, flat, horizon: int = 1) -> Distribution:
         return Histogram(shaped(decoded))
     if kind == "student_t":
         return StudentT(*(shaped(part) for part in decoded))
+    if kind == "quantile_spline":
+        return QuantileSpline(*(shaped(part) for part in decoded))
     if kind == "poisson":
         return Poisson(*(shaped(part) for part in decoded))
     if kind == "negative_binomial":
@@ -2027,6 +2243,9 @@ class Hurdle(Distribution):
     def mean(self):
         return (1.0 - self.zero) * self.severity.mean()
 
+    def convolve_normal(self, scale):
+        return HurdleNoise(self, scale)
+
     def variance(self):
         keep = 1.0 - self.zero
         severity_mean = self.severity.mean()
@@ -2072,6 +2291,215 @@ class Hurdle(Distribution):
 
 
 HURDLE_SEVERITIES = ("lognormal", "gamma")
+
+# Gauss-Hermite nodes for a value plus normal noise with no closed form.
+NOISE_NODES = 32
+
+
+def _hermite(count: int = NOISE_NODES):
+    nodes, weights = np.polynomial.hermite.hermgauss(int(count))
+    return nodes.astype(np.float32), np.log(weights / math.sqrt(math.pi)).astype(np.float32)
+
+
+class NormalNoise(Distribution):
+    """``Y + e`` for ``Y`` from ``base`` and independent ``e ~ Normal(0, scale)``, by Gauss-Hermite quadrature.
+
+    The density, CDF, and interval probabilities are means over
+    ``NOISE_NODES`` points of the noise, ``E_e[p(y - e)]``, taken in log
+    space so the tails stay finite. Exact where the closed forms exist, and
+    accurate when the noise is no wider than the spread of ``base``; where
+    the noise is far wider than a narrow peak, the points can step over it.
+    ``scale`` may be 0 for a row with no noise.
+    """
+
+    base: Distribution
+    scale: jax.Array
+    atomless: ClassVar[bool] = True
+
+    def __init__(self, base: Distribution, scale):
+        self.base = base
+        self.scale = jnp.broadcast_to(jnp.asarray(scale, dtype=jnp.float32), base.batch_shape)
+
+    @property
+    def batch_shape(self):
+        return self.scale.shape
+
+    def _offsets(self, value):
+        nodes, log_weights = _hermite()
+        shape = (-1,) + (1,) * jnp.ndim(jnp.broadcast_to(jnp.asarray(value, jnp.float32), jnp.broadcast_shapes(jnp.shape(value), self.batch_shape)))
+        offsets = math.sqrt(2.0) * self.scale * jnp.asarray(nodes).reshape(shape)
+        return offsets, jnp.asarray(log_weights).reshape(shape)
+
+    def _mean_log(self, fn, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        offsets, log_weights = self._offsets(value)
+        return jax.nn.logsumexp(fn(value - offsets) + log_weights, axis=0)
+
+    def log_prob(self, value):
+        return self._mean_log(self.base.log_prob, value)
+
+    def cdf(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        offsets, log_weights = self._offsets(value)
+        return jnp.sum(jnp.exp(log_weights) * self.base.cdf(value - offsets), axis=0)
+
+    def log_cdf(self, value):
+        return self._mean_log(self.base.log_cdf, value)
+
+    def log_survival(self, value):
+        return self._mean_log(self.base.log_survival, value)
+
+    def log_interval(self, lower, upper):
+        lower, upper = _bounds(lower, upper)
+        offsets, log_weights = self._offsets(jnp.broadcast_to(lower, jnp.broadcast_shapes(lower.shape, upper.shape)))
+        inner = self.base.log_interval(lower - offsets, upper - offsets)
+        return jax.nn.logsumexp(inner + log_weights, axis=0)
+
+    def sample(self, key, sample_shape=()):
+        base_key, noise_key = jax.random.split(key)
+        shape = tuple(sample_shape) + self.batch_shape
+        return self.base.sample(base_key, sample_shape) + self.scale * jax.random.normal(noise_key, shape)
+
+    def mean(self):
+        return self.base.mean()
+
+    def variance(self):
+        return self.base.variance() + jnp.square(self.scale)
+
+
+class HurdleNoise(Distribution):
+    """A hurdle outcome plus normal noise: the zero becomes a normal at 0, and the amount a ``NormalNoise``."""
+
+    zero: jax.Array
+    noise: Normal
+    amount: NormalNoise
+    hurdle: Distribution
+    atomless: ClassVar[bool] = True
+
+    def __init__(self, hurdle, scale):
+        self.hurdle = hurdle
+        self.zero = hurdle.zero
+        scale = jnp.broadcast_to(jnp.asarray(scale, dtype=jnp.float32), hurdle.batch_shape)
+        self.noise = Normal(jnp.zeros_like(scale), jnp.maximum(scale, 1e-6))
+        self.amount = NormalNoise(hurdle.severity, scale)
+
+    @property
+    def batch_shape(self):
+        return self.zero.shape
+
+    def _mix(self, at_zero, amount):
+        log_zero = jnp.log(jnp.clip(self.zero, 1e-30, 1.0))
+        log_keep = jnp.log1p(-jnp.minimum(self.zero, 1.0 - 1e-7))
+        return jnp.logaddexp(log_zero + at_zero, log_keep + amount)
+
+    def log_prob(self, value):
+        # A row recorded without noise keeps the hurdle's own likelihood: the mass of the zero, not a density.
+        noisy = self._mix(self.noise.log_prob(value), self.amount.log_prob(value))
+        return jnp.where(self.amount.scale > 0, noisy, self.hurdle.log_prob(value))
+
+    def cdf(self, value):
+        return self.zero * self.noise.cdf(value) + (1.0 - self.zero) * self.amount.cdf(value)
+
+    def log_cdf(self, value):
+        return self._mix(self.noise.log_cdf(value), self.amount.log_cdf(value))
+
+    def log_survival(self, value):
+        return self._mix(self.noise.log_survival(value), self.amount.log_survival(value))
+
+    def log_interval(self, lower, upper):
+        return self._mix(self.noise.log_interval(lower, upper), self.amount.log_interval(lower, upper))
+
+    def sample(self, key, sample_shape=()):
+        zero_key, amount_key, noise_key = jax.random.split(key, 3)
+        shape = tuple(sample_shape) + self.batch_shape
+        draw = self.amount.base.sample(amount_key, sample_shape)
+        draw = jnp.where(jax.random.bernoulli(zero_key, jnp.broadcast_to(self.zero, shape)), 0.0, draw)
+        return draw + self.amount.scale * jax.random.normal(noise_key, shape)
+
+    def mean(self):
+        return (1.0 - self.zero) * self.amount.mean()
+
+
+class Cured(Distribution):
+    """A time that never comes with probability ``never``, and otherwise follows ``base``.
+
+    The cure model of survival analysis (Boag, 1949; Farewell, 1982), and a
+    conversion that may never happen: some patients are cured, some
+    customers never buy, some machines never fail in the units watched. It is
+    a defective distribution: ``cdf(t) = (1 - never) F(t)`` never reaches 1
+    at any finite ``t``, and ``cdf(inf)`` is ``1 - never``, so ``P(Y > inf)``,
+    ``1 - cdf(inf)``, is the probability of never. A censored row at ``t``
+    scores ``never + (1 - never) S(t)``, an event its density times ``1 -
+    never``. A draw is ``inf`` where it never happens, and a quantile above
+    ``1 - never`` is ``inf``. ``mean`` and ``variance`` are those of the time
+    given that it happens; the time itself has no finite mean.
+    """
+
+    base: Distribution
+    never: jax.Array
+    atomless: ClassVar[bool] = True
+    defective: ClassVar[bool] = True
+
+    def __init__(self, base: Distribution, never):
+        self.base = base
+        self.never = jnp.broadcast_to(jnp.asarray(never, dtype=jnp.float32), base.batch_shape)
+
+    @property
+    def batch_shape(self):
+        return self.never.shape
+
+    def _log_never(self):
+        return jnp.log(jnp.clip(self.never, 1e-30, 1.0))
+
+    def _log_happens(self):
+        return jnp.log1p(-jnp.minimum(self.never, 1.0 - 1e-7))
+
+    def _finite(self, value):
+        value = jnp.asarray(value, dtype=jnp.float32)
+        return value, jnp.isposinf(value), jnp.where(jnp.isposinf(value), 0.0, value)
+
+    def log_prob(self, value):
+        return self._log_happens() + self.base.log_prob(value)
+
+    def cdf(self, value):
+        value, top, inner = self._finite(value)
+        return (1.0 - self.never) * jnp.where(top, 1.0, self.base.cdf(inner))
+
+    def log_cdf(self, value):
+        value, top, inner = self._finite(value)
+        return self._log_happens() + jnp.where(top, 0.0, self.base.log_cdf(inner))
+
+    def log_cdf_left(self, value):
+        return self.log_cdf(value)
+
+    def log_survival(self, value):
+        value, top, inner = self._finite(value)
+        tail = jnp.where(top, -jnp.inf, self.base.log_survival(inner))
+        return jnp.logaddexp(self._log_never(), self._log_happens() + tail)
+
+    def log_survival_left(self, value):
+        return self.log_survival(value)
+
+    def sample(self, key, sample_shape=()):
+        never_key, base_key = jax.random.split(key)
+        shape = tuple(sample_shape) + self.batch_shape
+        draw = self.base.sample(base_key, sample_shape)
+        return jnp.where(jax.random.bernoulli(never_key, jnp.broadcast_to(self.never, shape)), jnp.inf, draw)
+
+    def quantile(self, q):
+        q = jnp.asarray(q, dtype=jnp.float32)
+        happens = 1.0 - self.never
+        level = jnp.clip(q / jnp.maximum(happens, 1e-30), 1e-7, 1.0 - 1e-7)
+        return jnp.where(q < happens, self.base.quantile(level), jnp.inf)
+
+    def mean(self):
+        return self.base.mean()
+
+    def variance(self):
+        return self.base.variance()
+
+    def _index(self, index):
+        return Cured(self.base._index(index), self.never[index])
 
 
 def hurdle_distribution(flat, severity: str = "lognormal") -> Hurdle:

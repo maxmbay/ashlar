@@ -8,3 +8,4 @@ dist/
 .venv/
 catboost_info/
 rtdl_checkpoints/
+.jax-cache/

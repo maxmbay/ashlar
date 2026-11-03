@@ -1,18 +1,74 @@
 name: tests
 
+# Two tiers. Pull requests run the smoke tier: every test not marked `slow`, which
+# keeps the cheap math checks and one fit, predict, and save test per head. The
+# full suite runs on pushes to dev and main, nightly, and on demand (Actions >
+# tests > Run workflow). The publish workflow runs the full suite again before a
+# release. Most of the suite's time is XLA compilation of many small models.
+#
+# JAX's persistent compilation cache is kept between runs; it cuts a warm local
+# run by about two thirds, though on hosted runners its hit rate is unproven.
+
 on:
-  push:
   pull_request:
+  push:
+    branches: [main, dev]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full suite, slow tests included"
+        type: boolean
+        default: true
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  JAX_PLATFORMS: cpu
+  JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/.jax-cache
+  JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
+  JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES: "0"
 
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python -m pip install ".[dev]"
-      - run: pytest
+      - name: Restore the JAX compilation cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .jax-cache
+          key: jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-
+            jax-${{ runner.os }}-
+      - name: Run the tests
         env:
-          JAX_PLATFORMS: cpu
+          FAST: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.full) }}
+        run: |
+          if [ "$FAST" = "true" ]; then
+            pytest -n auto --durations=15 -m "not slow"
+          else
+            pytest -n auto --durations=15
+          fi
+      - name: Keep the compilation cache small
+        if: always()
+        run: |
+          # Entries for code that no longer exists pile up; start over past 1 GB.
+          if [ -d .jax-cache ] && [ "$(du -sm .jax-cache | cut -f1)" -gt 1024 ]; then rm -rf .jax-cache; fi
+      - name: Save the JAX compilation cache
+        if: always() && hashFiles('.jax-cache/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .jax-cache
+          key: jax-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-${{ github.run_id }}

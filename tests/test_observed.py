@@ -24,6 +24,7 @@ from ashlar.distributions import (
     StudentT,
 )
 from ashlar.errors import AshlarError
+from micro import MICRO
 
 INF = np.inf
 
@@ -109,6 +110,7 @@ LOWER = np.array([-INF, -9.0, -3.0, 0.5, 4.0, 7.5, -1.0, -2.0])
 UPPER = np.array([-6.0, -8.0, INF, 0.7, 4.5, INF, 1.0, INF])
 
 
+@pytest.mark.slow
 def test_normal_and_student_t_intervals_hold_in_the_far_tails():
     normal = Normal(jnp.zeros(8), jnp.ones(8))
     expected = _reference(lambda v, left=False: stats.norm.cdf(v), lambda v, left=False: stats.norm.sf(v), LOWER, UPPER)
@@ -122,6 +124,7 @@ def test_normal_and_student_t_intervals_hold_in_the_far_tails():
     assert np.isclose(far, stats.norm.logsf(40.0), rtol=1e-4)
 
 
+@pytest.mark.slow
 def test_count_intervals_with_a_structural_zero_and_a_far_tail():
     lower = np.array([0.0, 3.0, 40.0, 0.0, 7.0, 120.0])
     upper = np.array([0.0, INF, INF, 2.0, 7.0, 130.0])
@@ -153,6 +156,7 @@ def test_count_intervals_with_a_structural_zero_and_a_far_tail():
     assert np.allclose(got, expected, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.slow
 def test_shape_parameters_now_have_gradients():
     """JAX's betainc has no gradient in its shape arguments; the Student-t's df and the negative binomial's dispersion need one."""
     lower, upper = jnp.array([1.5, -INF, 0.2]), jnp.array([INF, -2.0, 0.9])
@@ -184,6 +188,7 @@ def test_shape_parameters_now_have_gradients():
     assert np.isclose(float(jax.grad(nb_tail)(0.5)), numeric, rtol=2e-2)
 
 
+@pytest.mark.slow
 def test_positive_and_mixed_families():
     lower, upper = np.array([0.0, 1.0, 30.0]), np.array([1.0, 2.0, INF])
     gamma = stats.gamma(3.0, scale=2.0 / 3.0)
@@ -210,6 +215,7 @@ def test_positive_and_mixed_families():
     assert np.isfinite(float(loc_grad))
 
 
+@pytest.mark.slow
 def test_flow_and_histogram_intervals():
     raw = jax.random.normal(jax.random.PRNGKey(0), (4, flow_output_count())) * 0.5
     flow = Flow(raw)
@@ -230,8 +236,9 @@ def test_flow_and_histogram_intervals():
 def test_noise_widens_a_normal_and_each_mixture_component():
     convolved = Mixture(Normal(jnp.array([[0.0, 2.0]]), jnp.array([[1.0, 0.5]]))).convolve_normal(jnp.array([0.5]))
     assert np.allclose(convolved.components.scale, [[np.sqrt(1.25), np.sqrt(0.5)]])
+    # A count has no density to widen.
     with pytest.raises(NotImplementedError):
-        StudentT(0.0, 1.0, 3.0).convolve_normal(1.0)
+        Poisson(jnp.array([2.0])).convolve_normal(1.0)
 
 
 # ---------------------------------------------------------------- likelihood and PIT
@@ -282,13 +289,14 @@ def _sold_out(n=3000, seed=0):
     return x, demand, np.minimum(demand, stock), sold_out
 
 
+@pytest.mark.slow
 def test_a_censored_fit_recovers_demand_that_the_usual_fit_misses():
     x, demand, sales, sold_out = _sold_out()
     train, test = slice(0, 2400), slice(2400, None)
     assert 0.3 < sold_out.mean() < 0.6
     label = observed.censored(sales, sold_out)
-    censored = ASRRegressor(task="negative_binomial", max_epochs=10, random_state=0).fit(x[train], label[train])
-    naive = ASRRegressor(task="negative_binomial", max_epochs=10, random_state=0).fit(x[train], sales[train])
+    censored = ASRRegressor(task="negative_binomial", max_epochs=20, learning_rate=1e-2, **MICRO).fit(x[train], label[train])
+    naive = ASRRegressor(task="negative_binomial", max_epochs=20, learning_rate=1e-2, **MICRO).fit(x[train], sales[train])
     covered = lambda model: np.mean(demand[test] <= model.predict_quantiles(x[test], [0.9])[:, 0])
     assert abs(covered(censored) - 0.9) < 0.04
     assert covered(naive) < 0.82
@@ -311,12 +319,13 @@ def test_an_exact_label_trains_like_plain_values():
     rng = np.random.default_rng(1)
     x = rng.normal(size=(600, 2)).astype(np.float32)
     y = x[:, 0] * 2.0 + rng.normal(size=600)
-    plain = ASRRegressor(task="gaussian", max_epochs=4, random_state=0).fit(x, y)
-    exact = ASRRegressor(task="gaussian", max_epochs=4, random_state=0).fit(x, observed.exact(y))
+    plain = ASRRegressor(task="gaussian", max_epochs=4, **MICRO).fit(x, y)
+    exact = ASRRegressor(task="gaussian", max_epochs=4, **MICRO).fit(x, observed.exact(y))
     assert np.allclose(plain.predict(x[:50]), exact.predict(x[:50]), atol=1e-4)
     assert np.allclose(plain.log_prob(x[:50], y[:50]), exact.log_prob(x[:50], observed.exact(y[:50])), atol=1e-4)
 
 
+@pytest.mark.slow
 def test_truncated_and_noisy_labels_recover_the_value_behind_them():
     rng = np.random.default_rng(2)
     n = 4000
@@ -326,20 +335,21 @@ def test_truncated_and_noisy_labels_recover_the_value_behind_them():
     counts = rng.poisson(rate)
     kept = counts >= 1
     label = observed.truncated(counts[kept], lower=1.0)
-    model = ASRRegressor(task="poisson", max_epochs=12, random_state=0).fit(x[kept], label)
-    naive = ASRRegressor(task="poisson", max_epochs=12, random_state=0).fit(x[kept], counts[kept])
+    model = ASRRegressor(task="poisson", max_epochs=12, **MICRO).fit(x[kept], label)
+    naive = ASRRegressor(task="poisson", max_epochs=12, **MICRO).fit(x[kept], counts[kept])
     assert abs(np.mean(model.predict(x) / rate) - 1.0) < 0.08
     assert np.mean(naive.predict(x) / rate) > 1.25
     # Known measurement noise: the head learns the spread of the value, not of the reading.
     value = 3.0 * x[:, 0] + rng.normal(size=n) * 0.5
     reading = value + rng.normal(size=n) * 1.5
-    model = ASRRegressor(task="gaussian", max_epochs=15, random_state=0).fit(x, observed.noisy(reading, 1.5))
-    naive = ASRRegressor(task="gaussian", max_epochs=15, random_state=0).fit(x, reading)
+    model = ASRRegressor(task="gaussian", max_epochs=15, **MICRO).fit(x, observed.noisy(reading, 1.5))
+    naive = ASRRegressor(task="gaussian", max_epochs=15, **MICRO).fit(x, reading)
     spread = lambda fitted: float(np.median(np.asarray(fitted.predict_dist(x[:500]).stddev())))
     assert abs(spread(model) - 0.5) < 0.2
     assert abs(spread(naive) - np.hypot(0.5, 1.5)) < 0.2
 
 
+@pytest.mark.slow
 def test_survival_on_the_log_scale_with_any_continuous_head():
     rng = np.random.default_rng(4)
     n = 3000
@@ -348,31 +358,33 @@ def test_survival_on_the_log_scale_with_any_continuous_head():
     log_cutoff = rng.uniform(0.0, 2.5, size=n)
     event = log_time <= log_cutoff
     label = observed.survival(np.minimum(log_time, log_cutoff), event)
-    model = ASRRegressor(task="mixture", max_epochs=12, random_state=0).fit(x, label)
+    model = ASRRegressor(task="mixture", max_epochs=12, **MICRO).fit(x, label)
     median = model.predict_quantiles(x[:400], [0.5])[:, 0]
     assert np.mean(np.abs(median - (1.0 + 0.8 * x[:400, 0]))) < 0.2
 
 
+@pytest.mark.slow
 def test_observed_models_save_and_load(tmp_path):
     x, _demand, sales, sold_out = _sold_out(600, seed=5)
-    model = ASRRegressor(task="mixture", max_epochs=3, random_state=0).fit(x, observed.censored(sales, sold_out))
+    model = ASRRegressor(task="mixture", max_epochs=3, **MICRO).fit(x, observed.censored(sales, sold_out))
     restored = ASRRegressor.load(model.save(tmp_path / "censored"))
     assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
     label = observed.censored(sales[:20], sold_out[:20])
     assert np.allclose(restored.log_prob(x[:20], label), model.log_prob(x[:20], label), atol=1e-5)
 
 
+@pytest.mark.slow
 def test_tasks_and_labels_that_cannot_be_scored_are_refused():
-    x, _demand, sales, sold_out = _sold_out(200, seed=6)
+    x, _demand, sales, sold_out = _sold_out(64, seed=6)
     label = observed.censored(sales, sold_out)
     for task in ("regression", "quantile", "classification"):
         with pytest.raises(AshlarError):
-            ASRRegressor(task=task, max_epochs=1).fit(x, label)
+            ASRRegressor(task=task, max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(AshlarError):
-        ASRRegressor(task="flow", max_epochs=1).fit(x, observed.noisy(sales, 1.0))
+        ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(x, observed.noisy(sales, 1.0))
     with pytest.raises(AshlarError):
-        ASRRegressor(task="poisson", max_epochs=1).fit(x, observed.interval(sales - 0.5, sales + 0.5))
-    model = ASRRegressor(task="poisson", max_epochs=1).fit(x, label)
+        ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(x, observed.interval(sales - 0.5, sales + 0.5))
+    model = ASRRegressor(task="poisson", max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(AshlarError):
         model.calibrate(x, observed.truncated(sales, lower=0.0))
     with pytest.raises(AshlarError):
@@ -424,6 +436,7 @@ def test_group_labels_record_their_size_and_catch_a_cut_group():
         observed.units(scattered)
 
 
+@pytest.mark.slow
 def test_the_total_objective_scores_the_distribution_of_each_sum():
     from ashlar.objectives import make_observed_objective, make_total_objective
 
@@ -474,11 +487,12 @@ def _weekly(n_weeks=1000, days=7, seed=9):
     return x, y, week, mean, spread
 
 
+@pytest.mark.slow
 def test_daily_distributions_are_learned_from_weekly_totals():
     x, y, week, mean, spread = _weekly()
     weekly = np.bincount(week, weights=y)[week]
-    model = ASRRegressor(task="gaussian", max_epochs=30, random_state=0).fit(x, observed.total(weekly, week))
-    naive = ASRRegressor(task="gaussian", max_epochs=30, random_state=0).fit(x, weekly / 7.0)
+    model = ASRRegressor(task="gaussian", max_epochs=30, learning_rate=1e-2, **MICRO).fit(x, observed.total(weekly, week))
+    naive = ASRRegressor(task="gaussian", max_epochs=30, learning_rate=1e-2, **MICRO).fit(x, weekly / 7.0)
     test = slice(0, 1400)
     fitted = model.predict_dist(x[test])
     assert np.sqrt(np.mean((np.asarray(fitted.mean()) - mean[test]) ** 2)) < 0.3
@@ -494,10 +508,11 @@ def test_daily_distributions_are_learned_from_weekly_totals():
     rate = np.exp(0.5 + 0.8 * np.clip(x[:, 0], -2.0, 2.0))
     counts = rng.poisson(rate)
     weekly_counts = np.bincount(week, weights=counts)[week]
-    poisson = ASRRegressor(task="poisson", max_epochs=30, random_state=0).fit(x, observed.total(weekly_counts, week))
+    poisson = ASRRegressor(task="poisson", max_epochs=30, learning_rate=1e-2, **MICRO).fit(x, observed.total(weekly_counts, week))
     assert np.mean(np.abs(np.log(poisson.predict(x[test]) / rate[test]))) < 0.15
 
 
+@pytest.mark.slow
 def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
     x, y, week, _mean, _spread = _weekly(n_weeks=300, seed=11)
     weekly = np.bincount(week, weights=y)[week]
@@ -505,7 +520,7 @@ def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
     label = observed.grouped(observed.exact(np.where(totals, weekly, y)), np.where(totals, week, -1))
     rng = np.random.default_rng(12)
     shuffled = rng.permutation(len(label))
-    model = ASRRegressor(task="normal", max_epochs=4, split="temporal", random_state=0).fit(x[shuffled], label[shuffled])
+    model = ASRRegressor(task="normal", max_epochs=4, split="temporal", **MICRO).fit(x[shuffled], label[shuffled])
     assert np.isfinite(model.history_["val_loss"]).all()
     # score is the mean log-likelihood per observation: each member sums its rows, then members mix.
     part = slice(0, 70)
@@ -528,22 +543,22 @@ def test_totals_mix_with_exact_rows_split_whole_and_score_per_group():
     with pytest.raises(AshlarError, match="GroupKFold"):
         model.score(x[:3], label[:3])
     with pytest.raises(AshlarError, match="GroupKFold"):
-        ASRRegressor(task="normal", max_epochs=1).fit(x[:3], label[:3])
+        ASRRegressor(task="normal", max_epochs=1, **MICRO).fit(x[:3], label[:3])
 
 
+@pytest.mark.slow
 def test_totals_that_cannot_be_trained_are_refused():
     x, y, week, _mean, _spread = _weekly(n_weeks=40, seed=13)
     label = observed.total(np.bincount(week, weights=y)[week], week)
     for kwargs in (
-        {"task": "mixture"},
-        {"task": "negative_binomial"},
-        {"task": "poisson", "head_kwargs": {"zero_inflated": True}},
+        {"task": "hurdle"},
+        {"task": "quantile"},
         {"task": "gaussian", "learning_rate_schedule": "surface"},
     ):
         with pytest.raises(AshlarError):
-            ASRRegressor(max_epochs=1, **kwargs).fit(x, observed.total(np.round(np.abs(label["lower"])), week))
+            ASRRegressor(max_epochs=1, **kwargs, **MICRO).fit(x, observed.total(np.round(np.abs(label["lower"])), week))
     with pytest.raises(AshlarError, match="split group"):
-        ASRRegressor(task="gaussian", max_epochs=1, split="group").fit(x, label, groups=np.arange(len(label)) % 3)
-    model = ASRRegressor(task="gaussian", max_epochs=1, random_state=0).fit(x, label)
+        ASRRegressor(task="gaussian", max_epochs=1, split="group", **MICRO).fit(x, label, groups=np.arange(len(label)) % 3)
+    model = ASRRegressor(task="gaussian", max_epochs=1, **MICRO).fit(x, label)
     with pytest.raises(AshlarError):
         model.log_prob(x, label)
