@@ -13,15 +13,37 @@ the classes when the runner is not in debug mode.
 
 ``time_limit`` is passed to Ashlar's ``time_limit`` (85% of it, to leave room
 for prediction): training stops at the first epoch end past it and keeps the
-best checkpoint. Known gap before a submission: ``num_cpus`` is not wired (JAX
-on CPU picks its thread count at import).
+best checkpoint. ``num_cpus`` holds the process to that many cores through CPU
+affinity (Linux only, and only before the process's first JAX computation;
+see ``_limit_cpus``).
 """
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 from autogluon.core.models import AbstractModel
+
+
+def _limit_cpus(num_cpus) -> None:
+    """Hold this process to ``num_cpus`` cores, which is how JAX on CPU can be limited.
+
+    XLA's CPU runtime has no thread-count setting (``XLA_FLAGS`` thread flags
+    are ignored by jax 0.12), but it sizes its thread pool from the process's
+    CPU affinity when the pool is first made. So this works only before the
+    process's first JAX computation, and only on Linux. Parallel workers
+    spread over disjoint blocks of the allowed cores by process id.
+    """
+    if not num_cpus or not hasattr(os, "sched_setaffinity"):
+        return
+    allowed = sorted(os.sched_getaffinity(0))
+    n = int(num_cpus)
+    if n >= len(allowed):
+        return
+    start = (os.getpid() % (len(allowed) // n)) * n
+    os.sched_setaffinity(0, allowed[start : start + n])
 
 def _tabm_batch_size(n_train: int) -> int:
     """TabArena TabM's batch size rule (tabm_utils.get_tabm_auto_batch_size)."""
@@ -101,6 +123,7 @@ class AshlarModel(AbstractModel):
         num_gpus: float = 0,
         **kwargs,
     ) -> None:
+        _limit_cpus(num_cpus)
         X = self.preprocess(X, is_train=True)
         y = np.asarray(y, dtype=np.float32 if self.problem_type == "regression" else np.int64)
         validation = None
