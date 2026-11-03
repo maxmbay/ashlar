@@ -64,8 +64,13 @@ class AshlarModel(AbstractModel):
         # Ashlar embeds non-numeric columns. AutoGluon hands categoricals as
         # pandas ``category``, whose integer categories would read as numeric,
         # so pass them as strings. Missing becomes its own "nan" level.
+        if is_train:
+            # AutoGluon recodes two-valued columns as uint8 0/1 ("bool" special type); keep them categorical so they
+            # get an embedding, not piecewise numeric bins over two points.
+            self._bool_features = [str(c) for c in self._feature_metadata.get_features(required_special_types=["bool"])]
+        flags = set(getattr(self, "_bool_features", []))
         for col in X.columns:
-            if isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == bool:
+            if isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == bool or col in flags:
                 X[col] = X[col].astype(str).astype(object)
         return X
 
