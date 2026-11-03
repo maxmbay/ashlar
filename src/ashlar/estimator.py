@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from copy import copy, deepcopy
 from pathlib import Path
 
@@ -605,6 +606,11 @@ class ASRModel(BaseEstimator):
         stopping, and the fitted model use the average, which is usually
         smoother than any single epoch. ``0.9`` averages roughly the last ten
         epochs.
+    time_limit:
+        ``None`` (default) trains until ``max_epochs`` or early stopping. A
+        number of seconds is a wall-clock budget for the whole ``fit``,
+        counted from its start: training stops at the first epoch end past
+        it and keeps the best checkpoint so far. Not saved with the model.
     early_stopping_metric:
         What picks the checkpoint and stops training. ``None`` or ``loss``
         (default) is the validation loss. For classification, ``accuracy``
@@ -676,6 +682,7 @@ class ASRModel(BaseEstimator):
         random_effects: dict | None = None,
         weight_average: float | None = None,
         early_stopping_metric: str | None = None,
+        time_limit: float | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -724,6 +731,7 @@ class ASRModel(BaseEstimator):
         self.tree = tree
         self.weight_average = weight_average
         self.early_stopping_metric = early_stopping_metric
+        self.time_limit = time_limit
 
     def _check_config(self):
         if check_monotone(self.monotone):
@@ -760,6 +768,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError("patience must be non-negative.")
         if self.weight_average is not None and not 0.0 <= float(self.weight_average) < 1.0:
             raise AshlarError("weight_average is a per-epoch decay in [0, 1), or None.")
+        if self.time_limit is not None and (isinstance(self.time_limit, bool) or not float(self.time_limit) > 0):
+            raise AshlarError("time_limit is a positive number of seconds, or None.")
         if self.early_stopping_metric not in _STOPPING_METRICS:
             raise AshlarError("early_stopping_metric must be None, 'loss', 'accuracy', or 'roc_auc'.")
         if self.early_stopping_metric in {"accuracy", "roc_auc"} and self.task != "classification":
@@ -897,6 +907,7 @@ class ASRModel(BaseEstimator):
         A dict widens that grid. See ``ashlar.search.DEFAULT_SEARCH``.
         """
         self._check_config()
+        self._deadline = None if self.time_limit is None else time.monotonic() + float(self.time_limit)
         self.tree_ = parse_tree(tree_json(self.tree)) if self.task == "tree" else None
         if resume and search not in (None, False):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
@@ -1235,6 +1246,7 @@ class ASRModel(BaseEstimator):
             units=units,
             weight_average=None if self.weight_average is None else float(self.weight_average),
             validation_score=self._validation_score(validation, n_classes),
+            deadline=getattr(self, "_deadline", None),
         )
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]

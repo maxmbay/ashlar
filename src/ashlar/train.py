@@ -12,6 +12,8 @@ validation loss uses the same formula on the whole validation partition.
 
 from __future__ import annotations
 
+import time
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -254,6 +256,7 @@ def fit_loop(
     units=None,
     weight_average: float | None = None,
     validation_score=None,
+    deadline: float | None = None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
 
@@ -360,6 +363,7 @@ def fit_loop(
             units=units,
             weight_average=weight_average,
             validation_score=validation_score,
+            deadline=deadline,
         )
     history = {"train_loss": [], "val_loss": []}
     best_core = core
@@ -452,6 +456,8 @@ def fit_loop(
         averaged = _average_weights(averaged, core, weight_average) if averaged is not None else core
         if validation is None:
             best_core, best_state = averaged, opt_state
+            if _past(deadline):
+                break
             continue
         val_loss = float(evaluate(averaged, *validation))
         if val_loss != val_loss:
@@ -476,9 +482,16 @@ def fit_loop(
             stale += 1
             if patience > 0 and stale >= patience:
                 break
+        if _past(deadline):
+            break
     if surface and not surface_ready:
         raise WeightError("the surface schedule finished before its warmup, so no learning rate was set.")
     return best_core, best_state, history
+
+
+def _past(deadline: float | None) -> bool:
+    """Whether the wall-clock budget (a ``time.monotonic()`` deadline) has run out."""
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def np_mean(values: list[float]) -> float:
@@ -564,6 +577,7 @@ def _fit_scanned(
     units=None,
     weight_average: float | None = None,
     validation_score=None,
+    deadline: float | None = None,
 ):
     """Shared-minibatch training with one compiled scan per epoch.
 
@@ -666,6 +680,8 @@ def _fit_scanned(
         core = raw_core if epoch == 0 else _average_weights(core, raw_core, weight_average)
         if validation is None:
             best_core, best_state = core, opt_state
+            if _past(deadline):
+                break
             continue
         val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1], eval_rows)
         if val_loss != val_loss:
@@ -693,4 +709,6 @@ def _fit_scanned(
             stale += 1
             if patience > 0 and stale >= patience:
                 break
+        if _past(deadline):
+            break
     return best_core, best_state, history

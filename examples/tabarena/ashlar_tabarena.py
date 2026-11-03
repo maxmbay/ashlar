@@ -11,10 +11,10 @@ leaderboard:
 This module must be importable (not ``__main__``) so Ray workers can unpickle
 the classes when the runner is not in debug mode.
 
-Known gaps against the TabArena contract, fine for a local Lite test but to
-close before a submission: ``time_limit`` is not enforced (Ashlar has no
-wall-clock budget, only ``max_epochs`` and ``patience``), and ``num_cpus`` is
-not wired (JAX on CPU picks its thread count at import).
+``time_limit`` is passed to Ashlar's ``time_limit`` (85% of it, to leave room
+for prediction): training stops at the first epoch end past it and keeps the
+best checkpoint. Known gap before a submission: ``num_cpus`` is not wired (JAX
+on CPU picks its thread count at import).
 """
 
 from __future__ import annotations
@@ -121,6 +121,9 @@ class AshlarModel(AbstractModel):
             }
             if pooled:
                 params["random_effects"] = pooled
+        if time_limit is not None and "time_limit" not in params:
+            # Leave room for the post-training finish, pickling and out-of-fold prediction.
+            params["time_limit"] = max(1.0, 0.85 * float(time_limit))
         self.model = self._build(params)
         self.model.fit(X, y, validation=validation)
 

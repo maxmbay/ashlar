@@ -1250,6 +1250,20 @@ def test_weight_average_trains_saves_and_validates(tmp_path):
         ASRRegressor(weight_average=1.0).fit(X, y)
 
 
+def test_time_limit_stops_training_at_the_budget():
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(64, 2))
+    y = X[:, 0] + rng.normal(scale=0.1, size=64)
+    model = ASRRegressor(max_epochs=500, patience=0, batch_size=32, time_limit=1e-6).fit(X, y)
+    assert len(model.history_["train_loss"]) == 1
+    assert np.isfinite(model.predict(X)).all()
+    assert ASRRegressor(max_epochs=3, patience=0, batch_size=32).fit(X, y).history_["train_loss"].__len__() == 3
+    with pytest.raises(AshlarError):
+        ASRRegressor(time_limit=0).fit(X, y)
+
+
 def test_early_stopping_metric_roc_auc_picks_a_checkpoint(tmp_path):
     from ashlar import ASRClassifier
 
