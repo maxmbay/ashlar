@@ -91,6 +91,8 @@ class AshlarModel(AbstractModel):
         if not any(pd.api.types.is_numeric_dtype(X[c]) and X[c].dtype != bool for c in X.columns):
             # Ashlar raises on numeric embeddings with no numeric columns.
             params["num_embeddings"] = None
+            # Quantile scaling (tabm_piecewise) also needs a numeric column.
+            params["numeric_scaling"] = "robust"
         self.model = self._build(params)
         self.model.fit(X, y, validation=validation)
 
