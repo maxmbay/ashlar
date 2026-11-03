@@ -87,7 +87,11 @@ class AshlarModel(AbstractModel):
             X_val = self.preprocess(X_val)
             y_val = np.asarray(y_val, dtype=y.dtype)
             validation = (X_val, y_val)
-        self.model = self._build(self._get_model_params())
+        params = self._get_model_params()
+        if not any(pd.api.types.is_numeric_dtype(X[c]) and X[c].dtype != bool for c in X.columns):
+            # Ashlar raises on numeric embeddings with no numeric columns.
+            params["num_embeddings"] = None
+        self.model = self._build(params)
         self.model.fit(X, y, validation=validation)
 
     def _predict_proba(self, X, **kwargs) -> np.ndarray:
