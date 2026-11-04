@@ -104,10 +104,11 @@ class _OutOfFoldFeatures:
         prior: float = 10.0,
         pairs: bool = False,
         max_pairs: int = 64,
+        triples: bool = False,
     ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
         self.min_levels, self.prior = min_levels, prior
-        self.pairs, self.max_pairs = pairs, max_pairs
+        self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
 
     def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
         from sklearn.model_selection import KFold
@@ -119,12 +120,13 @@ class _OutOfFoldFeatures:
             if self.target_stats
             else []
         )
-        # CatBoost also scores combinations of categorical columns; pairs of the qualifying columns, as one key each.
-        self.pair_cols = (
-            [(a, b) for i, a in enumerate(self.cat_cols) for b in self.cat_cols[i + 1 :]][: self.max_pairs]
-            if self.pairs
-            else []
-        )
+        # CatBoost also scores combinations of categorical columns; pairs (and optionally triples) of the qualifying
+        # columns, as one key each, up to max_pairs of each kind.
+        from itertools import combinations
+
+        self.pair_cols = list(combinations(self.cat_cols, 2))[: self.max_pairs] if self.pairs else []
+        if self.triples:
+            self.pair_cols += list(combinations(self.cat_cols, 3))[: self.max_pairs]
         self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
         if self.num_cols:
             values = X[self.num_cols].to_numpy(dtype=np.float64)
@@ -281,6 +283,7 @@ class AshlarModel(AbstractModel):
     #: Minimum training levels for target statistics, and whether pairs of those columns get their own.
     target_stats_min_levels: int = 10
     target_stats_pairs: bool = False
+    target_stats_triples: bool = False
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -425,6 +428,7 @@ class AshlarModel(AbstractModel):
                 self.neighbour_targets,
                 min_levels=self.target_stats_min_levels,
                 pairs=self.target_stats_pairs,
+                triples=self.target_stats_triples,
             )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
@@ -738,6 +742,12 @@ AshlarTabMRipBsIdPairsModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDP", "Ashl
 AshlarTabMRipBsIdPairsModel.target_stats = True
 AshlarTabMRipBsIdPairsModel.target_stats_min_levels = 100
 AshlarTabMRipBsIdPairsModel.target_stats_pairs = True
+# The Amazon Kaggle winners also used triples of the ID columns.
+AshlarTabMRipBsIdTriplesModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDT", "AshlarTabMRipBsIdTriples")
+AshlarTabMRipBsIdTriplesModel.target_stats = True
+AshlarTabMRipBsIdTriplesModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdTriplesModel.target_stats_pairs = True
+AshlarTabMRipBsIdTriplesModel.target_stats_triples = True
 
 # Round 3 (Nov 4), all on ensloss: TabArena TabM's minimal architecture, alone and as a replica of TabArena TabM's
 # default training (also width 512, weight decay 3e-4, clipping 1.0, per-member batches); pooling of exact duplicate
@@ -779,6 +789,7 @@ LOCAL_SWEEP_MODELS = {
     "tabm_bs_counts": AshlarTabMRipBsCountsModel,
     "tabm_bs_idstats": AshlarTabMRipBsIdStatsModel,
     "tabm_bs_idpairs": AshlarTabMRipBsIdPairsModel,
+    "tabm_bs_idtriples": AshlarTabMRipBsIdTriplesModel,
     "tabm_bs_stumps": AshlarTabMRipBsStumpsModel,
     "tabm_bs_creative": AshlarTabMRipBsCreativeModel,
     "tabm_bs_stats": AshlarTabMRipBsStatsModel,
