@@ -781,7 +781,21 @@ for _cls in (
 ):
     _cls.stop_on_metric = _ENSEMBLE_STOP
 
+# Candidate defaults built from the panel's keepers, for the 25 dev datasets: ensemble-metric stopping and target
+# statistics for ID-like columns and their pairs, with and without duplicate pooling. Each is a no-op where its data
+# condition is absent (binary tasks, no 100+ level columns, no repeated rows), so those datasets need no rerun.
+AshlarTabMV2Model = _variant(AshlarTabMRipModel, "ASRTABMV2", "AshlarTabMV2")
+AshlarTabMV2DupsModel = _variant(AshlarTabMRipModel, "ASRTABMV2D", "AshlarTabMV2Dups")
+AshlarTabMV2DupsModel.duplicate_pooling = True
+for _cls in (AshlarTabMV2Model, AshlarTabMV2DupsModel):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_v2": AshlarTabMV2Model,
+    "tabm_v2_dups": AshlarTabMV2DupsModel,
     "tabm_bs_mini": AshlarTabMRipBsMiniModel,
     "tabm_bs_replica": AshlarTabMRipBsReplicaModel,
     "tabm_bs_dups": AshlarTabMRipBsDupsModel,
