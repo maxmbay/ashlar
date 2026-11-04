@@ -57,6 +57,7 @@ from ashlar.layers import (
     SetEncoder,
     TabMBackbone,
     quantile_edges,
+    tree_edges,
 )
 from ashlar.objectives import (
     classification_accuracy,
@@ -607,6 +608,13 @@ class ASRModel(BaseEstimator):
         stopping, and the fitted model use the average, which is usually
         smoother than any single epoch. ``0.9`` averages roughly the last ten
         epochs.
+    num_embedding_bin_method:
+        Where piecewise numeric embeddings put their bin edges. ``quantile``
+        (default) uses training quantiles of each feature. ``tree`` uses the
+        split points of a small decision tree fit from that feature to the
+        target (Gorishniy et al. 2022), so bins are narrow where the target
+        changes and wide where it does not. At most ``num_embedding_bins``
+        bins; the edges are saved with the model, so ``load`` needs no target.
     label_smoothing:
         ``0`` (default) trains classification on the plain cross-entropy. A
         share in ``(0, 1)`` moves that much of each label's mass evenly over
@@ -696,6 +704,7 @@ class ASRModel(BaseEstimator):
         early_stopping_metric: str | None = None,
         time_limit: float | None = None,
         label_smoothing: float = 0.0,
+        num_embedding_bin_method: str = "quantile",
     ):
         self.task = task
         self.backbone = backbone
@@ -746,6 +755,7 @@ class ASRModel(BaseEstimator):
         self.early_stopping_metric = early_stopping_metric
         self.time_limit = time_limit
         self.label_smoothing = label_smoothing
+        self.num_embedding_bin_method = num_embedding_bin_method
 
     def _check_config(self):
         if check_monotone(self.monotone):
@@ -782,6 +792,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError("patience must be non-negative.")
         if self.weight_average is not None and not 0.0 <= float(self.weight_average) < 1.0:
             raise AshlarError("weight_average is a per-epoch decay in [0, 1), or None.")
+        if self.num_embedding_bin_method not in {"quantile", "tree"}:
+            raise AshlarError("num_embedding_bin_method must be 'quantile' or 'tree'.")
         if not 0.0 <= float(self.label_smoothing) < 1.0:
             raise AshlarError("label_smoothing is a share in [0, 1).")
         if float(self.label_smoothing) > 0 and self.task != "classification":
@@ -1235,6 +1247,7 @@ class ASRModel(BaseEstimator):
                 init_key,
                 head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
                 numeric_z=numeric_z,
+                bin_target=y_train_model,
             )
             opt_state = None
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
@@ -1393,6 +1406,7 @@ class ASRModel(BaseEstimator):
             init_key,
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
             numeric_z=numeric_z,
+            bin_target=y_train_model,
         )
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
@@ -1958,7 +1972,14 @@ class ASRModel(BaseEstimator):
         return None if encoder.n_numeric == 0 else self.num_embeddings
 
     def _build_core(
-        self, encoder: FeatureEncoder, n_events: int, n_classes: int, key, head_kwargs=None, numeric_z=None
+        self,
+        encoder: FeatureEncoder,
+        n_events: int,
+        n_classes: int,
+        key,
+        head_kwargs=None,
+        numeric_z=None,
+        bin_target=None,
     ):
         """Initial core. ``numeric_z`` is the scaled training partition; piecewise bins come from it.
 
@@ -1990,6 +2011,14 @@ class ASRModel(BaseEstimator):
         elif num_embeddings in {"piecewise", "piecewise_relu"}:
             if numeric_z is None:
                 edges = jnp.tile(jnp.linspace(-1.0, 1.0, int(self.num_embedding_bins) + 1), (encoder.n_numeric, 1))
+            elif self.num_embedding_bin_method == "tree" and bin_target is not None:
+                edges = tree_edges(
+                    numeric_z,
+                    bin_target,
+                    int(self.num_embedding_bins),
+                    classification=self.task in {"classification", "ordinal"},
+                    seed=int(self.random_state),
+                )
             else:
                 edges = quantile_edges(numeric_z, int(self.num_embedding_bins), seed=int(self.random_state))
             embeddings = PiecewiseLinearEmbeddings(
@@ -3904,6 +3933,7 @@ class ASRModel(BaseEstimator):
             "weight_average": None if self.weight_average is None else float(self.weight_average),
             "early_stopping_metric": self.early_stopping_metric,
             "label_smoothing": float(self.label_smoothing),
+            "num_embedding_bin_method": self.num_embedding_bin_method,
             "bottleneck": self._bottleneck_width(),
             "histogram_variance": None if self.histogram_variance is None else float(self.histogram_variance),
             "expectation_weight": self._expectation_weight(),
@@ -3982,6 +4012,7 @@ class ASRModel(BaseEstimator):
             weight_average=payload.get("weight_average"),
             early_stopping_metric=payload.get("early_stopping_metric"),
             label_smoothing=float(payload.get("label_smoothing", 0.0)),
+            num_embedding_bin_method=payload.get("num_embedding_bin_method", "quantile"),
             bottleneck=payload.get("bottleneck"),
             histogram_variance=payload.get("histogram_variance"),
             expectation_weight=payload.get("expectation_weight"),

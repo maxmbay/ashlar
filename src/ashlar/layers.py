@@ -468,6 +468,51 @@ def quantile_edges(numeric_z, n_bins: int, max_rows: int = 200_000, seed: int = 
     return jnp.asarray(edges)
 
 
+def tree_edges(
+    numeric_z,
+    target,
+    n_bins: int,
+    *,
+    classification: bool,
+    min_samples_leaf: int = 64,
+    max_rows: int = 200_000,
+    seed: int = 0,
+):
+    """Target-aware bin edges, shape ``(n_features, n_bins + 1)``, from one decision tree per feature.
+
+    Each feature's edges are its observed minimum and maximum plus the split
+    thresholds of a tree with at most ``n_bins`` leaves fit from that feature
+    alone to ``target`` (class indices, or a regression target whose first
+    column is used). Leaves keep at least ``min_samples_leaf`` rows, or a
+    tenth of the rows on a small table. Padding repeats the top edge, as in
+    ``quantile_edges``.
+    """
+    import numpy as np
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+    values = np.asarray(numeric_z, dtype=np.float64)
+    y = np.asarray(target)
+    if y.ndim > 1:
+        y = y.reshape(y.shape[0], -1)[:, 0]
+    if values.shape[0] > max_rows:
+        rows = np.random.default_rng(seed).choice(values.shape[0], size=max_rows, replace=False)
+        values, y = values[rows], y[rows]
+    leaf = max(1, min(min_samples_leaf, values.shape[0] // 10))
+    edges = np.empty((values.shape[1], n_bins + 1), dtype=np.float32)
+    for column in range(values.shape[1]):
+        x = values[:, column : column + 1]
+        tree_cls = DecisionTreeClassifier if classification else DecisionTreeRegressor
+        tree = tree_cls(max_leaf_nodes=max(2, n_bins), min_samples_leaf=leaf, random_state=seed).fit(x, y)
+        inner = tree.tree_.threshold[tree.tree_.feature >= 0]
+        unique = np.unique(np.concatenate([[x.min(), x.max()], inner]))
+        if unique.size < 2:
+            unique = np.array([unique[0] - 0.5, unique[0] + 0.5])
+        unique = unique[: n_bins + 1]
+        edges[column, : unique.size] = unique
+        edges[column, unique.size :] = unique[-1]
+    return jnp.asarray(edges)
+
+
 class PiecewiseLinearEmbeddings(Module):
     """Piecewise-linear numeric embeddings, version B of ``rtdl_num_embeddings``.
 

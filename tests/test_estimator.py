@@ -642,6 +642,24 @@ def test_label_smoothing_and_log_loss_stopping(tmp_path):
         ASRClassifier(early_stopping_metric="rmse").fit(X, labels)
 
 
+def test_tree_bins_follow_the_target(tmp_path):
+    from ashlar import ASRRegressor
+    from ashlar.layers import tree_edges
+
+    rng = np.random.default_rng(6)
+    x = rng.uniform(-1, 1, size=(400, 1))
+    y = (x[:, 0] > 0.3).astype(float)
+    edges = np.asarray(tree_edges(x, y, 4, classification=False))
+    assert edges.shape == (1, 5) and np.any(np.isclose(edges, 0.3, atol=0.05))
+    X = rng.normal(size=(96, 2))
+    target = np.where(X[:, 0] > 0, 2.0, -1.0)
+    model = ASRRegressor(max_epochs=2, batch_size=16, num_embedding_bin_method="tree").fit(X, target)
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict(X[:3]), model.predict(X[:3]))
+    with pytest.raises(AshlarError):
+        ASRRegressor(num_embedding_bin_method="kmeans").fit(X, target)
+
+
 def test_unshared_batches_train_a_classifier():
     import jax.numpy as jnp
 

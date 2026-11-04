@@ -9,6 +9,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - `time_limit`: a wall-clock budget in seconds for `fit`. Training stops at the first epoch end past it and keeps the best checkpoint.
 - `early_stopping_metric="log_loss"` (classification) and `"rmse"` (regression) stop on the averaged ensemble's prediction, the way TabM is scored, instead of the mean member loss.
 - `label_smoothing=` for classification.
+- `num_embedding_bin_method="tree"` places piecewise embedding bins at decision-tree splits on the target instead of at quantiles.
 - `share_training_batches=False` (each TabM member draws its own minibatches) now works for classification as well as regression.
 - `random_effects` on `ASRClassifier`: each class after the first gets a pooled offset on its logit per group, shrunk toward the average group, as a chain's categorical column already did. Useful for high-cardinality ID columns.
 - `early_stopping_metric="roc_auc"` (or `"accuracy"`) picks the checkpoint and stops training on that metric over the whole validation partition, instead of the validation loss.

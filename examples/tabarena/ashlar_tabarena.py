@@ -72,6 +72,87 @@ def _fit_temperature(proba: np.ndarray, y: np.ndarray) -> float:
     return float(np.exp(minimize_scalar(loss, bounds=(np.log(0.25), np.log(4.0)), method="bounded").x))
 
 
+def _target_matrix(y: np.ndarray, n_classes: int | None) -> np.ndarray:
+    """One column per statistic: the target for regression, a class indicator per class after the first otherwise."""
+    if not n_classes:
+        return np.asarray(y, dtype=np.float64)[:, None]
+    onehot = np.eye(n_classes)[np.asarray(y, dtype=np.int64)]
+    return onehot[:, 1:] if n_classes > 2 else onehot[:, 1:2]
+
+
+class _OutOfFoldFeatures:
+    """Leak-free numeric features from the target, for the wrapper's input.
+
+    * Target statistics (CatBoost's main trick): for every object column with
+      at least ``min_levels`` levels, the smoothed mean of each target column
+      within the row's level, toward the global mean with weight ``prior``.
+    * Neighbour targets (retrieval, as in TabR or the in-context models): the
+      mean of each target column over the row's ``k`` nearest training rows
+      in the scaled numeric columns.
+
+    Training rows get out-of-fold values from ``folds`` splits, so a row never
+    sees its own label. Other rows get values from the whole training set.
+    """
+
+    def __init__(self, target_stats: bool, neighbours: int, folds: int = 5, min_levels: int = 10, prior: float = 10.0):
+        self.target_stats, self.k, self.folds = target_stats, neighbours, folds
+        self.min_levels, self.prior = min_levels, prior
+
+    def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
+        from sklearn.model_selection import KFold
+
+        T = _target_matrix(y, n_classes)
+        self.prior_mean = T.mean(axis=0)
+        self.cat_cols = (
+            [c for c in X.columns if X[c].dtype == object and X[c].nunique(dropna=False) >= self.min_levels]
+            if self.target_stats
+            else []
+        )
+        self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
+        if self.num_cols:
+            values = X[self.num_cols].to_numpy(dtype=np.float64)
+            self.center = np.nanmedian(values, axis=0)
+            self.scale = np.nanstd(values, axis=0) + 1e-9
+        out = np.zeros((len(X), self._width(T)), dtype=np.float64)
+        for train, held in KFold(self.folds, shuffle=True, random_state=seed).split(X):
+            out[held] = self._features(X.iloc[train], T[train], X.iloc[held])
+        self.X_, self.T_ = X, T
+        return self._join(X, out)
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        return self._join(X, self._features(self.X_, self.T_, X))
+
+    def _width(self, T):
+        return T.shape[1] * (len(self.cat_cols) + (1 if self.num_cols else 0))
+
+    def _features(self, X_fit, T_fit, X_new):
+        parts = []
+        for col in self.cat_cols:
+            keys = X_fit[col].astype(str).to_numpy()
+            frame = pd.DataFrame(T_fit).assign(_key=keys).groupby("_key")
+            sums, counts = frame.sum(), frame.size()
+            means = (sums.to_numpy() + self.prior * self.prior_mean) / (counts.to_numpy()[:, None] + self.prior)
+            table = pd.DataFrame(means, index=sums.index)
+            looked = table.reindex(X_new[col].astype(str).to_numpy()).to_numpy()
+            parts.append(np.where(np.isnan(looked), self.prior_mean, looked))
+        if self.num_cols:
+            from sklearn.neighbors import NearestNeighbors
+
+            def scaled(frame):
+                values = (frame[self.num_cols].to_numpy(dtype=np.float64) - self.center) / self.scale
+                return np.nan_to_num(values)
+
+            k = min(self.k, len(X_fit))
+            index = NearestNeighbors(n_neighbors=k).fit(scaled(X_fit))
+            _, nearest = index.kneighbors(scaled(X_new))
+            parts.append(T_fit[nearest].mean(axis=1))
+        return np.concatenate(parts, axis=1) if parts else np.zeros((len(X_new), 0))
+
+    def _join(self, X, out):
+        names = [f"__oof{i}" for i in range(out.shape[1])]
+        return pd.concat([X.reset_index(drop=True), pd.DataFrame(out, columns=names)], axis=1).set_axis(X.index)
+
+
 # Flat hyperparameters the search space samples; they go into backbone_kwargs.
 _BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k")
 
@@ -103,6 +184,10 @@ class AshlarModel(AbstractModel):
     #: Add a 0/1 categorical "<column>__missing" for each numeric column with missing training values (TabM's
     #: SimpleImputer(add_indicator=True)). Ashlar alone fills them with the median.
     missing_indicators: bool = False
+    #: Out-of-fold CatBoost-style target statistics for object columns with 10+ levels.
+    target_stats: bool = False
+    #: Out-of-fold mean target of this many nearest training rows (0 = off).
+    neighbour_targets: int = 0
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -144,6 +229,7 @@ class AshlarModel(AbstractModel):
         if not classification:
             # Classification-only settings shared by a variant's defaults.
             params.pop("label_smoothing", None)
+            params.pop("soft_stages", None)
             if params.get("early_stopping_metric") in {"log_loss", "accuracy", "roc_auc"}:
                 params.pop("early_stopping_metric")
         # A distribution head for regression (its mean is the point prediction).
@@ -180,6 +266,14 @@ class AshlarModel(AbstractModel):
             X_val = self.preprocess(X_val)
             y_val = np.asarray(y_val, dtype=y.dtype)
             validation = (X_val, y_val)
+        self._oof = None
+        if self.target_stats or self.neighbour_targets:
+            n_classes = None if self.problem_type == "regression" else int(self.num_classes)
+            self._oof = _OutOfFoldFeatures(self.target_stats, self.neighbour_targets)
+            X = self._oof.fit_transform(X, y, n_classes)
+            if validation is not None:
+                X_val = self._oof.transform(X_val)
+                validation = (X_val, y_val)
         params = self._get_model_params()
         if self.batch_rule and "batch_size" not in params:
             params["batch_size"] = _tabm_batch_size(*X.shape)
@@ -205,6 +299,8 @@ class AshlarModel(AbstractModel):
 
     def _predict_proba(self, X, **kwargs) -> np.ndarray:
         X = self.preprocess(X, **kwargs)
+        if getattr(self, "_oof", None) is not None:
+            X = self._oof.transform(X)
         if self.problem_type == "regression":
             return np.asarray(self.model.predict(X), dtype=np.float32)
         full = self._aligned_proba(X)
@@ -433,7 +529,31 @@ AshlarTabMRipBsParityModel = _variant(
     AshlarTabMRipModel, "ASRTABMBSPAR", "AshlarTabMRipBsParity", d_block=512, weight_decay=3e-4, gradient_clip=1.0
 )
 
+# Creative round (Nov 4): retrieval and target-statistic features, target-aware bins, soft tree stages.
+AshlarTabMRipBsStatsModel = _variant(AshlarTabMRipModel, "ASRTABMBSTS", "AshlarTabMRipBsStats")
+AshlarTabMRipBsStatsModel.target_stats = True
+AshlarTabMRipBsNeighboursModel = _variant(AshlarTabMRipModel, "ASRTABMBSKNN", "AshlarTabMRipBsNeighbours")
+AshlarTabMRipBsNeighboursModel.neighbour_targets = 16
+AshlarTabMRipBsTreeBinsModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSTB", "AshlarTabMRipBsTreeBins", num_embedding_bin_method="tree"
+)
+
+# Soft stumps on the class logits (classification only; regression ignores the setting).
+AshlarTabMRipBsStumpsModel = _variant(AshlarTabMRipModel, "ASRTABMBSST", "AshlarTabMRipBsStumps", soft_stages=16)
+# Everything at once, with multiclass/regression ensemble stopping.
+AshlarTabMRipBsCreativeModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSCR", "AshlarTabMRipBsCreative", num_embedding_bin_method="tree"
+)
+AshlarTabMRipBsCreativeModel.target_stats = True
+AshlarTabMRipBsCreativeModel.neighbour_targets = 16
+AshlarTabMRipBsCreativeModel.stop_on_metric = {"multiclass": "log_loss", "regression": "rmse"}
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_stumps": AshlarTabMRipBsStumpsModel,
+    "tabm_bs_creative": AshlarTabMRipBsCreativeModel,
+    "tabm_bs_stats": AshlarTabMRipBsStatsModel,
+    "tabm_bs_knn": AshlarTabMRipBsNeighboursModel,
+    "tabm_bs_treebins": AshlarTabMRipBsTreeBinsModel,
     "tabm_bs_metric": AshlarTabMRipBsMetricModel,
     "tabm_bs_ensloss": AshlarTabMRipBsEnsembleLossModel,
     "tabm_bs_missing": AshlarTabMRipBsMissingModel,
