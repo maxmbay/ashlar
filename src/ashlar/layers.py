@@ -15,9 +15,13 @@ The TabM path follows the equations in ``tabm`` 0.0.3 (commit
 * The output ``LinearEnsemble`` is a head, not part of the backbone, so a
   residual MLP and TabM can use the same head.
 
-Deviations from a full paper run, recorded on purpose: no packed or mini
-architecture, no piecewise-linear or periodic embeddings, and no claim that a
-forward pass reproduces a published benchmark score.
+* ``arch_type="tabm-mini"`` is the paper's minimal variant: one per-member
+  scaling of the input (initialized like the first ``r`` above), then a plain
+  shared MLP. Only that scaling and the output head differ between members.
+
+Deviations from a full paper run, recorded on purpose: no packed
+architecture, and no claim that a forward pass reproduces a published
+benchmark score.
 """
 
 from __future__ import annotations
@@ -224,15 +228,25 @@ def _dropout(drop: nn.Dropout | None, x, key):
     return drop(x, key=key, inference=False)
 
 
-class TabMBackbone(Module):
-    """Batch-ensemble MLP trunk. Output shape ``(batch, member, d_block)``."""
+TABM_ARCH_TYPES = ("tabm", "tabm-mini")
 
-    layers: tuple[LinearBatchEnsemble, ...]
+
+class TabMBackbone(Module):
+    """Batch-ensemble MLP trunk. Output shape ``(batch, member, d_block)``.
+
+    ``arch_type="tabm"`` (default) gives every layer per-member scalings and
+    biases. ``"tabm-mini"`` scales the input once per member and shares the
+    rest of the trunk, as TabArena's TabM does.
+    """
+
+    layers: tuple[LinearBatchEnsemble | BatchedLinear, ...]
+    adapter: jax.Array | None
     dropout: nn.Dropout | None
     k: int = field(static=True)
     d_out: int = field(static=True)
     dropout_rate: float = field(static=True)
     share_training_batches: bool = field(static=True)
+    arch_type: str = field(static=True)
 
     def __init__(
         self,
@@ -246,13 +260,18 @@ class TabMBackbone(Module):
         start_scaling_init: str = "random-signs",
         scaling_chunks: list[int] | None = None,
         share_training_batches: bool = True,
+        arch_type: str = "tabm",
     ):
         if n_blocks < 1 or d_block < 1 or k < 1:
             raise ShapeError("TabM n_blocks, d_block, and k must be positive.")
         if not 0.0 <= dropout < 1.0:
             raise ShapeError("dropout must be in [0, 1).")
+        if arch_type not in TABM_ARCH_TYPES:
+            raise ShapeError(f"TabM arch_type must be one of {TABM_ARCH_TYPES}; received {arch_type!r}.")
+        mini = arch_type == "tabm-mini"
         keys = jax.random.split(key, n_blocks * 4)
         layers = []
+        adapter = None
         for index in range(n_blocks):
             in_features = d_in if index == 0 else d_block
             base = keys[index]
@@ -263,21 +282,30 @@ class TabMBackbone(Module):
             else:
                 r_dist = "ones"
                 r_chunks = None
+            weight = _rsqrt_uniform(weight_key, (d_block, in_features), in_features, jnp.float32)
             bias = _rsqrt_uniform(bias_key, (d_block,), in_features, jnp.float32)
+            if mini:
+                # One shared layer; the members differ only by the input scaling below and by the head.
+                if index == 0:
+                    adapter = _scaling(r_key, (k, in_features), r_dist, r_chunks, jnp.float32)
+                layers.append(BatchedLinear(weight=weight, bias=bias))
+                continue
             layers.append(
                 LinearBatchEnsemble(
-                    weight=_rsqrt_uniform(weight_key, (d_block, in_features), in_features, jnp.float32),
+                    weight=weight,
                     r=_scaling(r_key, (k, in_features), r_dist, r_chunks, jnp.float32),
                     s=jnp.ones((k, d_block), dtype=jnp.float32),
                     bias=jnp.repeat(bias[None, :], k, axis=0),
                 )
             )
         self.layers = tuple(layers)
+        self.adapter = adapter
         self.dropout = nn.Dropout(dropout) if dropout else None
         self.k = k
         self.d_out = d_block
         self.dropout_rate = dropout
         self.share_training_batches = bool(share_training_batches)
+        self.arch_type = arch_type
 
     def __call__(self, x, *, key):
         if x.ndim == 2 and not self.share_training_batches and key is not None:
@@ -288,6 +316,8 @@ class TabMBackbone(Module):
             x = x.reshape((x.shape[0] // self.k, self.k, x.shape[-1]))
         else:
             x = ensemble_view(x, self.k)
+        if self.adapter is not None:
+            x = x * self.adapter
         keys = None if key is None or self.dropout is None else jax.random.split(key, len(self.layers))
         for index, layer in enumerate(self.layers):
             x = jax.nn.relu(layer(x))

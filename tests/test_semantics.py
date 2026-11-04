@@ -92,6 +92,35 @@ def test_tabm_forward_matches_the_batch_ensemble_equation():
     assert jnp.all(layer.r[:, 1] == layer.r[:, 2])
 
 
+def test_tabm_mini_scales_the_input_once_and_shares_the_trunk():
+    key = jax.random.PRNGKey(7)
+    backbone = TabMBackbone(
+        3,
+        key=key,
+        n_blocks=2,
+        d_block=4,
+        dropout=0.0,
+        k=2,
+        start_scaling_init="normal",
+        scaling_chunks=[1, 2],
+        arch_type="tabm-mini",
+    )
+    first, second = backbone.layers
+    assert backbone.adapter.shape == (2, 3)
+    assert jnp.all(backbone.adapter[:, 1] == backbone.adapter[:, 2])
+    assert first.weight.shape == (4, 3) and first.bias.shape == (4,)
+    x = jnp.array([[0.2, -0.4, 0.6], [1.0, 0.0, -1.0]], dtype=jnp.float32)
+    viewed = jnp.broadcast_to(x[:, None, :], (2, 2, 3)) * backbone.adapter
+    hidden = jax.nn.relu(viewed @ first.weight.T + first.bias)
+    expected = jax.nn.relu(hidden @ second.weight.T + second.bias)
+    assert np.allclose(backbone(x, key=None), expected, atol=1e-6)
+    try:
+        TabMBackbone(3, key=key, arch_type="packed")
+    except ShapeError:
+        return
+    raise AssertionError("an unknown arch_type was accepted")
+
+
 def test_batch_ensemble_rejects_a_missing_member_axis():
     layer = LinearBatchEnsemble(
         weight=jnp.ones((2, 3)),

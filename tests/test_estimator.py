@@ -20,7 +20,7 @@ from ashlar import ASRClassifier, ASROrdinalClassifier
 from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, tabm
 from ashlar.train import surface_learning_rate
 from ashlar.search import DEFAULT_SEARCH
-from micro import MICRO
+from micro import MICRO, MICRO_TABM
 
 
 def _regression(task="regression", **kwargs):
@@ -1337,6 +1337,21 @@ def test_time_limit_stops_training_at_the_budget():
     assert ASRRegressor(max_epochs=3, patience=0, batch_size=32).fit(X, y).history_["train_loss"].__len__() == 3
     with pytest.raises(AshlarError):
         ASRRegressor(time_limit=0).fit(X, y)
+
+
+def test_tabm_mini_fits_and_reloads(tmp_path):
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(64, 3))
+    y = (X[:, 0] > 0).astype(int)
+    mini = {**MICRO_TABM, "backbone_kwargs": {**MICRO_TABM["backbone_kwargs"], "arch_type": "tabm-mini"}}
+    model = ASRClassifier(**mini, max_epochs=2, batch_size=32).fit(X, y)
+    assert model.core_.backbone.adapter.shape[0] == 4
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict_proba(X), model.predict_proba(X), atol=1e-6)
+    with pytest.raises(AshlarError):
+        ASRClassifier(backbone="residual_mlp", backbone_kwargs={"arch_type": "tabm-mini"}).fit(X, y)
 
 
 def test_early_stopping_metric_roc_auc_picks_a_checkpoint(tmp_path):

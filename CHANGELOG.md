@@ -6,6 +6,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Added
 
+- `backbone_kwargs={"arch_type": "tabm-mini"}` on `backbone="tabm"`: TabM's minimal architecture, as TabArena runs it. Each member scales the input once and the rest of the trunk is shared, instead of every layer carrying per-member scalings.
 - `time_limit`: a wall-clock budget in seconds for `fit`. Training stops at the first epoch end past it and keeps the best checkpoint.
 - `early_stopping_metric="log_loss"` (classification) and `"rmse"` (regression) stop on the averaged ensemble's prediction, the way TabM is scored, instead of the mean member loss.
 - `label_smoothing=` for classification.

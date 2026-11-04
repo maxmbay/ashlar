@@ -55,6 +55,7 @@ from ashlar.layers import (
     ResidualMLP,
     SetEmbeddings,
     SetEncoder,
+    TABM_ARCH_TYPES,
     TabMBackbone,
     quantile_edges,
     tree_edges,
@@ -478,7 +479,10 @@ class ASRModel(BaseEstimator):
     backbone:
         ``residual_mlp``, ``tabm``, ``transformer``, ``set``, ``additive``, or
         an Equinox class with ``__init__(d_in, *, key, **kwargs)`` and
-        attributes ``k`` and ``d_out``. ``additive`` gives each column, and
+        attributes ``k`` and ``d_out``. ``tabm`` takes
+        ``backbone_kwargs={"arch_type": "tabm-mini"}`` for the paper's minimal
+        variant: one per-member scaling of the input and a shared trunk,
+        instead of per-member scalings on every layer. ``additive`` gives each column, and
         each pair named in ``backbone_kwargs={"pairs": [[a, b], ...]}``, a
         network of its own, so every head output is a sum of one shape per
         term; ``shape_functions`` reads them (``ashlar.shapes``).
@@ -889,11 +893,14 @@ class ASRModel(BaseEstimator):
         self._expectation_weight()
         self._soft_stage_count()
         kwargs = dict(self.backbone_kwargs or {})
-        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
+        if "scaling_chunks" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
             raise AshlarError(
-                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema, and arch_type "
-                "other than batch-ensemble TabM is not implemented. Refusing to ignore those arguments."
+                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema. "
+                "Refusing to ignore those arguments."
             )
+        arch_type = kwargs.get("arch_type")
+        if "arch_type" in kwargs and (self._backbone_cls() is not TabMBackbone or arch_type not in TABM_ARCH_TYPES):
+            raise AshlarError(f"arch_type is a TabM backbone setting: backbone='tabm' with one of {TABM_ARCH_TYPES}.")
         if self._backbone_cls() is AdditiveBackbone:
             self._check_additive()
         elif isinstance(self.backbone, str) and "pairs" in kwargs:
@@ -4603,4 +4610,6 @@ def _resolved_backbone_kwargs(core):
     payload = {"k": int(backbone.k), "d_out": int(backbone.d_out), "dropout": float(backbone.dropout_rate)}
     if hasattr(backbone, "activation"):
         payload["activation"] = backbone.activation
+    if hasattr(backbone, "arch_type"):
+        payload["arch_type"] = backbone.arch_type
     return payload

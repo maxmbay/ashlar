@@ -175,8 +175,74 @@ class _OutOfFoldFeatures:
         return pd.concat([X.reset_index(drop=True), pd.DataFrame(out, columns=names)], axis=1).set_axis(X.index)
 
 
+def _row_keys(X: pd.DataFrame) -> np.ndarray:
+    """One 64-bit hash per row over every column, so rows with equal inputs share a key."""
+    return pd.util.hash_pandas_object(X, index=False).to_numpy()
+
+
+class _DuplicatePool:
+    """Partial pooling of exact duplicate rows toward their observed labels.
+
+    A row whose inputs equal those of ``n`` training rows is predicted as
+    ``(n * observed + m * model) / (n + m)``: the network's prediction is the
+    prior and the duplicates are the evidence, one empirical-Bayes effect per
+    distinct row. ``observed`` is the duplicates' class frequencies, or their
+    mean target for regression. The strength ``m`` is picked on the validation
+    fold by log loss or squared error, and pooling stays off when fewer than
+    ``min_matches`` validation rows have a duplicate in training, or when no
+    strength beats the network alone.
+    """
+
+    GRID = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+
+    def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, min_matches: int = 8):
+        T = np.eye(n_classes)[np.asarray(y, dtype=np.int64)] if n_classes else np.asarray(y, dtype=np.float64)[:, None]
+        grouped = pd.DataFrame(T).assign(_key=_row_keys(X)).groupby("_key", sort=False)
+        sizes = grouped.size()
+        self.index = pd.Index(sizes.index)
+        self.counts = sizes.to_numpy(dtype=np.float64)
+        self.sums = grouped.sum().reindex(sizes.index).to_numpy(dtype=np.float64)
+        self.n_classes, self.min_matches = n_classes, min_matches
+        self.strength: float | None = None
+        self.val_matches = 0
+
+    def _lookup(self, X: pd.DataFrame):
+        position = self.index.get_indexer(_row_keys(X))
+        found = position >= 0
+        n = np.where(found, self.counts[position], 0.0)
+        sums = np.where(found[:, None], self.sums[position], 0.0)
+        return n, sums
+
+    @staticmethod
+    def _blend(pred, n, sums, strength):
+        return (sums + strength * pred) / (n[:, None] + strength)
+
+    def _loss(self, pred, y):
+        if self.n_classes:
+            return -np.mean(np.log(np.clip(pred[np.arange(len(y)), np.asarray(y, dtype=np.int64)], 1e-12, None)))
+        return float(np.mean((pred[:, 0] - y) ** 2))
+
+    def choose(self, X_val: pd.DataFrame, y_val: np.ndarray, pred_val: np.ndarray) -> float | None:
+        n, sums = self._lookup(X_val)
+        self.val_matches = int((n > 0).sum())
+        if self.val_matches < self.min_matches:
+            return None
+        best = self._loss(pred_val, y_val)
+        for strength in self.GRID:
+            loss = self._loss(self._blend(pred_val, n, sums, strength), y_val)
+            if loss < best:
+                self.strength, best = strength, loss
+        return self.strength
+
+    def apply(self, X: pd.DataFrame, pred: np.ndarray) -> np.ndarray:
+        if self.strength is None:
+            return pred
+        n, sums = self._lookup(X)
+        return self._blend(pred, n, sums, self.strength)
+
+
 # Flat hyperparameters the search space samples; they go into backbone_kwargs.
-_BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k")
+_BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k", "arch_type")
 
 
 class AshlarModel(AbstractModel):
@@ -216,6 +282,19 @@ class AshlarModel(AbstractModel):
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
+    #: Pool rows that exactly repeat training rows toward the repeats' labels (see ``_DuplicatePool``).
+    duplicate_pooling: bool = False
+    _pool: _DuplicatePool | None = None
+    #: Give every categorical column whose 3 to ``numeric_categories_max_levels`` levels all read as numbers a
+    #: numeric copy, ``<column>__num``, so the network can order and interpolate them. The category stays.
+    numeric_categories: bool = False
+    numeric_categories_max_levels: int = 100
+    #: Merge levels seen fewer than this many times in training into one trained "__rare__" level, which also takes
+    #: levels never seen in training. Without it an unseen level gets the embedding's untrained unknown row.
+    rare_min_count: int = 0
+    #: Add log(1 + training count) of the level, ``<column>__count``, for object columns with at least this many
+    #: training levels (0 = off). Popularity is CatBoost's other categorical statistic, and it needs no labels.
+    count_min_levels: int = 0
 
     def _preprocess(self, X: pd.DataFrame, is_train: bool = False, **kwargs) -> pd.DataFrame:
         X = super()._preprocess(X, **kwargs)
@@ -238,11 +317,49 @@ class AshlarModel(AbstractModel):
                 and pd.api.types.is_numeric_dtype(X[col].dtype)
                 and X[col].isna().any()
             ]
+        if is_train:
+            self._numeric_copies = []
+            for col in X.columns if self.numeric_categories else []:
+                if col in flags or not isinstance(X[col].dtype, pd.CategoricalDtype):
+                    continue
+                levels = pd.Series(X[col].cat.categories).astype(str)
+                if 3 <= len(levels) <= self.numeric_categories_max_levels and pd.to_numeric(levels, errors="coerce").notna().all():
+                    self._numeric_copies.append(col)
+        copies = {
+            f"{col}__num": pd.to_numeric(X[col].astype(str), errors="coerce").astype(np.float64)
+            for col in getattr(self, "_numeric_copies", [])
+        }
         for col in X.columns:
             if isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == bool or col in flags:
                 X[col] = X[col].astype(str).astype(object)
+        for name, values in copies.items():
+            X[name] = values
         for col in getattr(self, "_missing_columns", []):
             X[f"{col}__missing"] = np.where(X[col].isna(), "1", "0").astype(object)
+        return X
+
+    def _level_features(self, X: pd.DataFrame, is_train: bool = False) -> pd.DataFrame:
+        """Level counts and the rare-level bucket, after ``preprocess`` (whose rows the duplicate pool compares)."""
+        if not (self.rare_min_count or self.count_min_levels):
+            return X
+        X = X.copy()
+        if is_train:
+            objects = [col for col in X.columns if X[col].dtype == object]
+            counts = {col: X[col].value_counts(dropna=False) for col in objects}
+            self._count_tables = (
+                {col: counts[col] for col in objects if len(counts[col]) >= self.count_min_levels}
+                if self.count_min_levels
+                else {}
+            )
+            self._kept_levels = {}
+            for col in objects if self.rare_min_count else []:
+                frequent = counts[col][counts[col] >= self.rare_min_count]
+                if len(frequent) < len(counts[col]):
+                    self._kept_levels[col] = set(frequent.index)
+        for col, table in getattr(self, "_count_tables", {}).items():
+            X[f"{col}__count"] = np.log1p(X[col].map(table).fillna(0).to_numpy(dtype=np.float64))
+        for col, kept in getattr(self, "_kept_levels", {}).items():
+            X[col] = X[col].where(X[col].isin(kept), "__rare__")
         return X
 
     def _build(self, params: dict):
@@ -267,6 +384,7 @@ class AshlarModel(AbstractModel):
             return tabm_piecewise(task=task, **params)
         if backbone:
             backbone.pop("k", None)
+            backbone.pop("arch_type", None)
             params["backbone_kwargs"] = {"n_blocks": 3, "d_block": 256, "dropout": 0.1, **backbone}
         if classification:
             return ASRClassifier(**params)
@@ -291,9 +409,15 @@ class AshlarModel(AbstractModel):
             X_val = self.preprocess(X_val)
             y_val = np.asarray(y_val, dtype=y.dtype)
             validation = (X_val, y_val)
+        n_classes = None if self.problem_type == "regression" else int(self.num_classes)
+        self._pool = _DuplicatePool(X, y, n_classes) if self.duplicate_pooling and validation is not None else None
+        raw_val = X_val
+        X = self._level_features(X, is_train=True)
+        if validation is not None:
+            X_val = self._level_features(X_val)
+            validation = (X_val, y_val)
         self._oof = None
         if self.target_stats or self.neighbour_targets:
-            n_classes = None if self.problem_type == "regression" else int(self.num_classes)
             self._oof = _OutOfFoldFeatures(
                 self.target_stats,
                 self.neighbour_targets,
@@ -326,17 +450,34 @@ class AshlarModel(AbstractModel):
         self.model.fit(X, y, validation=validation)
         if self.temperature_scaling and validation is not None and self.problem_type != "regression":
             self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
+        if self._pool is not None:
+            self._pool.choose(raw_val, y_val, self._network_prediction(X_val))
+            # One line per fold model in the run log, since TabArena keeps predictions, not models.
+            print(
+                f"[ashlar] duplicate pooling: {self._pool.val_matches} of {len(y_val)} validation rows repeat a "
+                f"training row; strength {self._pool.strength}",
+                flush=True,
+            )
+
+    def _network_prediction(self, X: pd.DataFrame) -> np.ndarray:
+        """The network's prediction on model-ready inputs: (rows, classes) probabilities, or (rows, 1) targets."""
+        if self.problem_type == "regression":
+            return np.asarray(self.model.predict(X), dtype=np.float64).reshape(-1, 1)
+        full = self._aligned_proba(X)
+        return _tempered(full, self.temperature_) if self.temperature_ != 1.0 else full
 
     def _predict_proba(self, X, **kwargs) -> np.ndarray:
         X = self.preprocess(X, **kwargs)
+        raw = X
+        X = self._level_features(X)
         if getattr(self, "_oof", None) is not None:
             X = self._oof.transform(X)
+        pred = self._network_prediction(X)
+        if getattr(self, "_pool", None) is not None:
+            pred = self._pool.apply(raw, pred)
         if self.problem_type == "regression":
-            return np.asarray(self.model.predict(X), dtype=np.float32)
-        full = self._aligned_proba(X)
-        if self.temperature_ != 1.0:
-            full = _tempered(full, self.temperature_)
-        return self._convert_proba_to_unified_form(full.astype(np.float32))
+            return pred[:, 0].astype(np.float32)
+        return self._convert_proba_to_unified_form(pred.astype(np.float32))
 
     def _aligned_proba(self, X: pd.DataFrame) -> np.ndarray:
         proba = np.asarray(self.model.predict_proba(X), dtype=np.float64)
@@ -587,7 +728,44 @@ AshlarTabMRipBsIdPairsModel.target_stats = True
 AshlarTabMRipBsIdPairsModel.target_stats_min_levels = 100
 AshlarTabMRipBsIdPairsModel.target_stats_pairs = True
 
+# Round 3 (Nov 4), all on ensloss: TabArena TabM's minimal architecture, alone and as a replica of TabArena TabM's
+# default training (also width 512, weight decay 3e-4, clipping 1.0, per-member batches); pooling of exact duplicate
+# rows toward their observed labels; numeric copies of number-like categories.
+_ENSEMBLE_STOP = {"multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsMiniModel = _variant(AshlarTabMRipModel, "ASRTABMBSMINI", "AshlarTabMRipBsMini", arch_type="tabm-mini")
+AshlarTabMRipBsReplicaModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMBSREP",
+    "AshlarTabMRipBsReplica",
+    arch_type="tabm-mini",
+    d_block=512,
+    weight_decay=3e-4,
+    gradient_clip=1.0,
+    share_training_batches=False,
+)
+AshlarTabMRipBsDupsModel = _variant(AshlarTabMRipModel, "ASRTABMBSDUP", "AshlarTabMRipBsDups")
+AshlarTabMRipBsDupsModel.duplicate_pooling = True
+AshlarTabMRipBsNumCatModel = _variant(AshlarTabMRipModel, "ASRTABMBSNUM", "AshlarTabMRipBsNumCat")
+AshlarTabMRipBsNumCatModel.numeric_categories = True
+# For high-cardinality categoricals: a trained bucket for rare and unseen levels, and each level's training count.
+AshlarTabMRipBsCountsModel = _variant(AshlarTabMRipModel, "ASRTABMBSCNT", "AshlarTabMRipBsCounts")
+AshlarTabMRipBsCountsModel.rare_min_count = 3
+AshlarTabMRipBsCountsModel.count_min_levels = 30
+for _cls in (
+    AshlarTabMRipBsMiniModel,
+    AshlarTabMRipBsReplicaModel,
+    AshlarTabMRipBsDupsModel,
+    AshlarTabMRipBsNumCatModel,
+    AshlarTabMRipBsCountsModel,
+):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_mini": AshlarTabMRipBsMiniModel,
+    "tabm_bs_replica": AshlarTabMRipBsReplicaModel,
+    "tabm_bs_dups": AshlarTabMRipBsDupsModel,
+    "tabm_bs_numcat": AshlarTabMRipBsNumCatModel,
+    "tabm_bs_counts": AshlarTabMRipBsCountsModel,
     "tabm_bs_idstats": AshlarTabMRipBsIdStatsModel,
     "tabm_bs_idpairs": AshlarTabMRipBsIdPairsModel,
     "tabm_bs_stumps": AshlarTabMRipBsStumpsModel,
