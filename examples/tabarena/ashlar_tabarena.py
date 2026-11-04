@@ -81,12 +81,39 @@ def _target_matrix(y: np.ndarray, n_classes: int | None) -> np.ndarray:
     return onehot[:, 1:] if n_classes > 2 else onehot[:, 1:2]
 
 
+def _stat_losses(S: np.ndarray, y: np.ndarray, n_classes: int | None) -> np.ndarray:
+    """Per-row loss of predicting ``y`` by a target statistic: squared error for regression, log loss otherwise.
+
+    ``S`` holds the statistic's columns as ``_target_matrix`` lays them out: the target, or the frequency of each
+    class after the first, so the first class gets the rest of the probability.
+    """
+    if not n_classes:
+        return (np.asarray(y, dtype=np.float64) - S[:, 0]) ** 2
+    rest = np.clip(S, 1e-6, 1.0)
+    first = np.clip(1.0 - S.sum(axis=1, keepdims=True), 1e-6, 1.0)
+    proba = np.concatenate([first, rest], axis=1)
+    proba /= proba.sum(axis=1, keepdims=True)
+    return -np.log(proba[np.arange(len(y)), np.asarray(y, dtype=np.int64)])
+
+
 class _OutOfFoldFeatures:
     """Leak-free numeric features from the target, for the wrapper's input.
 
     * Target statistics (CatBoost's main trick): for every object column with
       at least ``min_levels`` levels, the smoothed mean of each target column
       within the row's level, toward the global mean with weight ``prior``.
+      ``pairs`` (and ``triples``) add one statistic per combination of
+      columns with at least ``pair_min_levels`` levels.
+    * ``survey`` screens those statistics on the training rows before the
+      network trains, from the out-of-fold values themselves: a column is kept
+      when its statistic predicts the target better than the global mean, and
+      a combination when it beats the best of its parts. "Better" means the
+      loss falls by at least ``margin`` (as a share of the global mean's loss)
+      and the fall is ``z`` standard errors from zero, with the errors
+      clustered by level so a few large levels cannot pass on their own.
+      Survivors are ranked by that fall and the best ``max_pairs`` of each
+      kind are kept. Without the survey every candidate is kept, in column
+      order, up to ``max_pairs``.
     * Neighbour targets (retrieval, as in TabR or the in-context models): the
       mean of each target column over the row's ``k`` nearest training rows
       in the scaled numeric columns.
@@ -105,73 +132,129 @@ class _OutOfFoldFeatures:
         pairs: bool = False,
         max_pairs: int = 64,
         triples: bool = False,
+        survey: bool = False,
+        pair_min_levels: int | None = None,
+        margin: float = 0.001,
+        z: float = 1.0,
     ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
         self.min_levels, self.prior = min_levels, prior
         self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
+        self.survey, self.margin, self.z = survey, margin, z
+        self.pair_min_levels = min_levels if pair_min_levels is None else pair_min_levels
 
     def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
+        from itertools import combinations
+
         from sklearn.model_selection import KFold
 
         T = _target_matrix(y, n_classes)
         self.prior_mean = T.mean(axis=0)
-        self.cat_cols = (
-            [c for c in X.columns if X[c].dtype == object and X[c].nunique(dropna=False) >= self.min_levels]
-            if self.target_stats
-            else []
-        )
-        # CatBoost also scores combinations of categorical columns; pairs (and optionally triples) of the qualifying
-        # columns, as one key each, up to max_pairs of each kind.
-        from itertools import combinations
+        levels = {
+            col: X[col].nunique(dropna=False) for col in X.columns if self.target_stats and X[col].dtype == object
+        }
+        singles = [(col,) for col, n in levels.items() if n >= self.min_levels]
+        pool = [col for col, n in levels.items() if n >= self.pair_min_levels]
+        pairs = list(combinations(pool, 2)) if self.pairs else []
+        triples = list(combinations(pool, 3)) if self.triples else []
+        if not self.survey:
+            pairs, triples = pairs[: self.max_pairs], triples[: self.max_pairs]
+        # The survey also scores the single columns of the pool, as the parts a pair must beat.
+        scored = list(dict.fromkeys(singles + ([(col,) for col in pool] if self.survey else []) + pairs + triples))
+        self.levels = {col: pd.Index(pd.unique(X[col])) for col in {c for combo in scored for c in combo}}
+        codes = self._codes(X)
+        folds = list(KFold(self.folds, shuffle=True, random_state=seed).split(X))
+        oof, keys = {}, {}
+        for combo in scored:
+            key = keys[combo] = self._key(codes, combo)
+            values = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                values[held] = self._means(key[train], T[train], key[held])
+            oof[combo] = values
+        if self.survey and oof:
+            base = _stat_losses(np.broadcast_to(self.prior_mean, T.shape), y, n_classes)
+            losses = {combo: _stat_losses(values, y, n_classes) for combo, values in oof.items()}
+            mean = {combo: loss.mean() for combo, loss in losses.items()}
+            lifts = {}
+            for combo in scored:
+                # The reference is the best scored part (any smaller combination of its columns), else the global mean.
+                parts = [sub for r in range(1, len(combo)) for sub in combinations(combo, r) if sub in losses]
+                ref = losses[min(parts, key=mean.get)] if parts and min(map(mean.get, parts)) < base.mean() else base
+                fall = ref - losses[combo]
+                _, level = np.unique(keys[combo], return_inverse=True)
+                se = np.sqrt(np.sum(np.bincount(level, weights=fall - fall.mean()) ** 2)) / len(fall)
+                lifts[combo] = (fall.mean() / base.mean(), fall.mean() / se if se > 0 else 0.0)
 
-        self.pair_cols = list(combinations(self.cat_cols, 2))[: self.max_pairs] if self.pairs else []
-        if self.triples:
-            self.pair_cols += list(combinations(self.cat_cols, 3))[: self.max_pairs]
+            def passes(combo):
+                return lifts[combo][0] > self.margin and lifts[combo][1] > self.z
+
+            def kept(candidates):
+                return sorted(filter(passes, candidates), key=lambda c: lifts[c][0], reverse=True)[: self.max_pairs]
+
+            singles, kept_pairs, kept_triples = list(filter(passes, singles)), kept(pairs), kept(triples)
+            best = f"; best pair {' x '.join(kept_pairs[0])} lifts {lifts[kept_pairs[0]][0]:.2%}" if kept_pairs else ""
+            print(
+                f"[ashlar] target statistics survey: kept {len(singles)} columns, {len(kept_pairs)} of {len(pairs)} "
+                f"pairs and {len(kept_triples)} of {len(triples)} triples{best}",
+                flush=True,
+            )
+            pairs, triples = kept_pairs, kept_triples
+            self.survey_ = lifts
+        self.combos = singles + pairs + triples
         self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
+        parts = [oof[combo] for combo in self.combos]
         if self.num_cols:
             values = X[self.num_cols].to_numpy(dtype=np.float64)
             self.center = np.nanmedian(values, axis=0)
             self.scale = np.nanstd(values, axis=0) + 1e-9
-        out = np.zeros((len(X), self._width(T)), dtype=np.float64)
-        for train, held in KFold(self.folds, shuffle=True, random_state=seed).split(X):
-            out[held] = self._features(X.iloc[train], T[train], X.iloc[held])
-        self.X_, self.T_ = X, T
-        return self._join(X, out)
+            near = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                near[held] = self._neighbours(X.iloc[train], T[train], X.iloc[held])
+            parts.append(near)
+        # The training frame is kept only for neighbour lookups; the statistics need just the codes.
+        self.X_, self.T_, self.codes_ = (X if self.num_cols else None), T, codes
+        return self._join(X, np.concatenate(parts, axis=1) if parts else np.zeros((len(X), 0)))
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        return self._join(X, self._features(self.X_, self.T_, X))
-
-    def _width(self, T):
-        return T.shape[1] * (len(self.cat_cols) + len(self.pair_cols) + (1 if self.num_cols else 0))
-
-    def _features(self, X_fit, T_fit, X_new):
-        parts = []
-
-        def key(frame, cols):
-            out = frame[cols[0]].astype(str).to_numpy()
-            for col in cols[1:]:
-                out = np.char.add(np.char.add(out.astype(str), "\x1f"), frame[col].astype(str).to_numpy().astype(str))
-            return out
-
-        for cols in [(col,) for col in self.cat_cols] + list(self.pair_cols):
-            grouped = pd.DataFrame(T_fit).assign(_key=key(X_fit, cols)).groupby("_key")
-            sums, counts = grouped.sum(), grouped.size()
-            means = (sums.to_numpy() + self.prior * self.prior_mean) / (counts.to_numpy()[:, None] + self.prior)
-            table = pd.DataFrame(means, index=sums.index)
-            looked = table.reindex(key(X_new, cols)).to_numpy()
-            parts.append(np.where(np.isnan(looked), self.prior_mean, looked))
+        codes = self._codes(X)
+        parts = [self._means(self._key(self.codes_, combo), self.T_, self._key(codes, combo)) for combo in self.combos]
         if self.num_cols:
-            from sklearn.neighbors import NearestNeighbors
+            parts.append(self._neighbours(self.X_, self.T_, X))
+        return self._join(X, np.concatenate(parts, axis=1) if parts else np.zeros((len(X), 0)))
 
-            def scaled(frame):
-                values = (frame[self.num_cols].to_numpy(dtype=np.float64) - self.center) / self.scale
-                return np.nan_to_num(values)
+    def _codes(self, X):
+        """Each statistic column as integer codes over the training levels; -1 for a level not seen in training."""
+        return {col: index.get_indexer(X[col]) for col, index in self.levels.items()}
 
-            k = min(self.k, len(X_fit))
-            index = NearestNeighbors(n_neighbors=k).fit(scaled(X_fit))
-            _, nearest = index.kneighbors(scaled(X_new))
-            parts.append(T_fit[nearest].mean(axis=1))
-        return np.concatenate(parts, axis=1) if parts else np.zeros((len(X_new), 0))
+    def _key(self, codes, combo):
+        """One int64 key per row for a column or a combination; -1 when any part is unseen."""
+        key = codes[combo[0]].astype(np.int64)
+        unseen = key < 0
+        for col in combo[1:]:
+            key = key * len(self.levels[col]) + codes[col]
+            unseen |= codes[col] < 0
+        return np.where(unseen, -1, key)
+
+    def _means(self, key_fit, T_fit, key_new):
+        uniq, inverse = np.unique(key_fit, return_inverse=True)
+        counts = np.bincount(inverse, minlength=len(uniq)).astype(np.float64)
+        sums = np.stack(
+            [np.bincount(inverse, weights=T_fit[:, j], minlength=len(uniq)) for j in range(T_fit.shape[1])], axis=1
+        )
+        means = (sums + self.prior * self.prior_mean) / (counts[:, None] + self.prior)
+        position = np.clip(np.searchsorted(uniq, key_new), 0, len(uniq) - 1)
+        found = (uniq[position] == key_new) & (key_new >= 0)
+        return np.where(found[:, None], means[position], self.prior_mean)
+
+    def _neighbours(self, X_fit, T_fit, X_new):
+        from sklearn.neighbors import NearestNeighbors
+
+        def scaled(frame):
+            return np.nan_to_num((frame[self.num_cols].to_numpy(dtype=np.float64) - self.center) / self.scale)
+
+        k = min(self.k, len(X_fit))
+        _, nearest = NearestNeighbors(n_neighbors=k).fit(scaled(X_fit)).kneighbors(scaled(X_new))
+        return T_fit[nearest].mean(axis=1)
 
     def _join(self, X, out):
         names = [f"__oof{i}" for i in range(out.shape[1])]
@@ -284,6 +367,10 @@ class AshlarModel(AbstractModel):
     target_stats_min_levels: int = 10
     target_stats_pairs: bool = False
     target_stats_triples: bool = False
+    #: Screen the statistics before training and keep only those that predict the target (see _OutOfFoldFeatures),
+    #: and the level count from which a column may join a pair (default: target_stats_min_levels).
+    target_stats_survey: bool = False
+    target_stats_pair_min_levels: int | None = None
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -429,6 +516,8 @@ class AshlarModel(AbstractModel):
                 min_levels=self.target_stats_min_levels,
                 pairs=self.target_stats_pairs,
                 triples=self.target_stats_triples,
+                survey=self.target_stats_survey,
+                pair_min_levels=self.target_stats_pair_min_levels,
             )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
@@ -781,6 +870,18 @@ for _cls in (
 ):
     _cls.stop_on_metric = _ENSEMBLE_STOP
 
+# Max (Nov 4): decide automatically whether a table gets the pair statistics. The survey screens each column, pair
+# and triple on the training rows before the network trains and keeps only those that add signal over their parts.
+# idsurvey keeps the 100-level bar; survey30 lets columns with 30+ levels join pairs, which the screen makes safe.
+AshlarTabMRipBsIdSurveyModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDSV", "AshlarTabMRipBsIdSurvey")
+AshlarTabMRipBsSurvey30Model = _variant(AshlarTabMRipModel, "ASRTABMBSSV30", "AshlarTabMRipBsSurvey30")
+for _cls in (AshlarTabMRipBsIdSurveyModel, AshlarTabMRipBsSurvey30Model):
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_survey = True
+AshlarTabMRipBsSurvey30Model.target_stats_pair_min_levels = 30
+
 # Candidate defaults built from the panel's keepers, for the 25 dev datasets: ensemble-metric stopping and target
 # statistics for ID-like columns and their pairs, with and without duplicate pooling. Each is a no-op where its data
 # condition is absent (binary tasks, no 100+ level columns, no repeated rows), so those datasets need no rerun.
@@ -794,6 +895,8 @@ for _cls in (AshlarTabMV2Model, AshlarTabMV2DupsModel):
     _cls.target_stats_pairs = True
 
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_idsurvey": AshlarTabMRipBsIdSurveyModel,
+    "tabm_bs_survey30": AshlarTabMRipBsSurvey30Model,
     "tabm_v2": AshlarTabMV2Model,
     "tabm_v2_dups": AshlarTabMV2DupsModel,
     "tabm_bs_mini": AshlarTabMRipBsMiniModel,
