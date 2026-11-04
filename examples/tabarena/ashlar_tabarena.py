@@ -154,6 +154,7 @@ class _OutOfFoldFeatures:
             col: X[col].nunique(dropna=False) for col in X.columns if self.target_stats and X[col].dtype == object
         }
         singles = [(col,) for col, n in levels.items() if n >= self.min_levels]
+        self.id_cols = [col for (col,) in singles]
         pool = [col for col, n in levels.items() if n >= self.pair_min_levels]
         pairs = list(combinations(pool, 2)) if self.pairs else []
         triples = list(combinations(pool, 3)) if self.triples else []
@@ -371,6 +372,12 @@ class AshlarModel(AbstractModel):
     #: and the level count from which a column may join a pair (default: target_stats_min_levels).
     target_stats_survey: bool = False
     target_stats_pair_min_levels: int | None = None
+    #: Feed the network the statistics instead of the ID-like columns themselves (no embedding for those columns),
+    #: as CatBoost does for high-cardinality categoricals. A table keeps its columns if nothing else would be left.
+    target_stats_replace: bool = False
+    #: With per-member batches, fall back to shared batches when a network input column has this many levels.
+    #: Each member then updates a rare level's shared embedding on its own step, k times per epoch instead of once.
+    member_batches_max_levels: int | None = None
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -523,7 +530,27 @@ class AshlarModel(AbstractModel):
             if validation is not None:
                 X_val = self._oof.transform(X_val)
                 validation = (X_val, y_val)
+            self._replaced = []
+            if self.target_stats_replace and len(self._oof.id_cols) < X.shape[1]:
+                self._replaced = list(self._oof.id_cols)
+                X = X.drop(columns=self._replaced)
+                if validation is not None:
+                    X_val = X_val.drop(columns=self._replaced)
+                    validation = (X_val, y_val)
+                if self._replaced:
+                    print(f"[ashlar] statistics replace {len(self._replaced)} ID columns: {self._replaced}", flush=True)
         params = self._get_model_params()
+        if self.member_batches_max_levels is not None and not {**self.defaults, **params}.get(
+            "share_training_batches", True
+        ):
+            wide = {
+                col: n
+                for col in X.columns
+                if X[col].dtype == object and (n := X[col].nunique(dropna=False)) >= self.member_batches_max_levels
+            }
+            if wide:
+                params["share_training_batches"] = True
+                print(f"[ashlar] shared batches: {len(wide)} columns with {max(wide.values())}+ levels", flush=True)
         if self.batch_rule and "batch_size" not in params:
             params["batch_size"] = _tabm_batch_size(*X.shape)
         if self.stop_on_metric and self.problem_type in self.stop_on_metric:
@@ -576,6 +603,8 @@ class AshlarModel(AbstractModel):
         X = self._level_features(X)
         if getattr(self, "_oof", None) is not None:
             X = self._oof.transform(X)
+            if getattr(self, "_replaced", None):
+                X = X.drop(columns=self._replaced)
         pred = self._network_prediction(X)
         if getattr(self, "_pool", None) is not None:
             pred = self._pool.apply(raw, pred)
@@ -894,7 +923,42 @@ for _cls in (AshlarTabMV2Model, AshlarTabMV2DupsModel):
     _cls.target_stats_min_levels = 100
     _cls.target_stats_pairs = True
 
+# Round 4 (Nov 4), from the overnight keepers. replica (TabArena TabM's training recipe) won 4 of 5 panel datasets
+# but lost 22% on Amazon; replica_shared isolates its per-member batches there. v3 joins the keepers: the replica
+# recipe, ensemble-metric stopping, surveyed pair and triple statistics and duplicate pooling, with per-member batches
+# only when no input column has 100+ levels. nogate keeps per-member batches everywhere (do the statistics rescue
+# Amazon?), and replace feeds the statistics instead of the ID columns, which also lifts the gate.
+_REPLICA = {
+    "arch_type": "tabm-mini",
+    "d_block": 512,
+    "weight_decay": 3e-4,
+    "gradient_clip": 1.0,
+    "share_training_batches": False,
+}
+AshlarTabMRipBsReplicaSharedModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSREPS", "AshlarTabMRipBsReplicaShared", **{**_REPLICA, "share_training_batches": True}
+)
+AshlarTabMRipBsReplicaSharedModel.stop_on_metric = _ENSEMBLE_STOP
+AshlarTabMV3Model = _variant(AshlarTabMRipModel, "ASRTABMV3", "AshlarTabMV3", **_REPLICA)
+AshlarTabMV3NoGateModel = _variant(AshlarTabMRipModel, "ASRTABMV3NG", "AshlarTabMV3NoGate", **_REPLICA)
+AshlarTabMV3ReplaceModel = _variant(AshlarTabMRipModel, "ASRTABMV3RP", "AshlarTabMV3Replace", **_REPLICA)
+for _cls in (AshlarTabMV3Model, AshlarTabMV3NoGateModel, AshlarTabMV3ReplaceModel):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_triples = True
+    _cls.target_stats_survey = True
+    _cls.duplicate_pooling = True
+AshlarTabMV3Model.member_batches_max_levels = 100
+AshlarTabMV3ReplaceModel.member_batches_max_levels = 100
+AshlarTabMV3ReplaceModel.target_stats_replace = True
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_v3": AshlarTabMV3Model,
+    "tabm_v3_nogate": AshlarTabMV3NoGateModel,
+    "tabm_v3_replace": AshlarTabMV3ReplaceModel,
+    "tabm_bs_replica_shared": AshlarTabMRipBsReplicaSharedModel,
     "tabm_bs_idsurvey": AshlarTabMRipBsIdSurveyModel,
     "tabm_bs_survey30": AshlarTabMRipBsSurvey30Model,
     "tabm_v2": AshlarTabMV2Model,
