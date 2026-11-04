@@ -21,6 +21,7 @@ see ``_limit_cpus``).
 from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -193,7 +194,8 @@ class _DuplicatePool:
     strength beats the network alone.
     """
 
-    GRID = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+    # Down to 0.01 because some tables repeat rows with identical targets (wine_quality: a quarter of its test rows).
+    GRID = (0.01, 0.03, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
 
     def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, min_matches: int = 8):
         T = np.eye(n_classes)[np.asarray(y, dtype=np.int64)] if n_classes else np.asarray(y, dtype=np.float64)[:, None]
@@ -447,7 +449,16 @@ class AshlarModel(AbstractModel):
             # Leave room for the post-training finish, pickling and out-of-fold prediction.
             params["time_limit"] = max(1.0, 0.85 * float(time_limit))
         self.model = self._build(params)
+        started = time.monotonic()
         self.model.fit(X, y, validation=validation)
+        # One line per fold model in the run log: a fit cut short by the budget is not comparable across variants.
+        deadline = getattr(self.model, "_deadline", None)
+        stopped = deadline is not None and time.monotonic() >= deadline
+        print(
+            f"[ashlar] {len((getattr(self.model, 'history_', None) or {}).get('train_loss', []))} epochs in "
+            f"{time.monotonic() - started:.0f}s" + (f", stopped by the {params['time_limit']:.0f}s budget" if stopped else ""),
+            flush=True,
+        )
         if self.temperature_scaling and validation is not None and self.problem_type != "regression":
             self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
         if self._pool is not None:
