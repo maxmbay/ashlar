@@ -94,9 +94,19 @@ class _OutOfFoldFeatures:
     sees its own label. Other rows get values from the whole training set.
     """
 
-    def __init__(self, target_stats: bool, neighbours: int, folds: int = 5, min_levels: int = 10, prior: float = 10.0):
+    def __init__(
+        self,
+        target_stats: bool,
+        neighbours: int,
+        folds: int = 5,
+        min_levels: int = 10,
+        prior: float = 10.0,
+        pairs: bool = False,
+        max_pairs: int = 64,
+    ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
         self.min_levels, self.prior = min_levels, prior
+        self.pairs, self.max_pairs = pairs, max_pairs
 
     def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
         from sklearn.model_selection import KFold
@@ -106,6 +116,12 @@ class _OutOfFoldFeatures:
         self.cat_cols = (
             [c for c in X.columns if X[c].dtype == object and X[c].nunique(dropna=False) >= self.min_levels]
             if self.target_stats
+            else []
+        )
+        # CatBoost also scores combinations of categorical columns; pairs of the qualifying columns, as one key each.
+        self.pair_cols = (
+            [(a, b) for i, a in enumerate(self.cat_cols) for b in self.cat_cols[i + 1 :]][: self.max_pairs]
+            if self.pairs
             else []
         )
         self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
@@ -123,17 +139,23 @@ class _OutOfFoldFeatures:
         return self._join(X, self._features(self.X_, self.T_, X))
 
     def _width(self, T):
-        return T.shape[1] * (len(self.cat_cols) + (1 if self.num_cols else 0))
+        return T.shape[1] * (len(self.cat_cols) + len(self.pair_cols) + (1 if self.num_cols else 0))
 
     def _features(self, X_fit, T_fit, X_new):
         parts = []
-        for col in self.cat_cols:
-            keys = X_fit[col].astype(str).to_numpy()
-            frame = pd.DataFrame(T_fit).assign(_key=keys).groupby("_key")
-            sums, counts = frame.sum(), frame.size()
+
+        def key(frame, cols):
+            out = frame[cols[0]].astype(str).to_numpy()
+            for col in cols[1:]:
+                out = np.char.add(np.char.add(out.astype(str), "\x1f"), frame[col].astype(str).to_numpy().astype(str))
+            return out
+
+        for cols in [(col,) for col in self.cat_cols] + list(self.pair_cols):
+            grouped = pd.DataFrame(T_fit).assign(_key=key(X_fit, cols)).groupby("_key")
+            sums, counts = grouped.sum(), grouped.size()
             means = (sums.to_numpy() + self.prior * self.prior_mean) / (counts.to_numpy()[:, None] + self.prior)
             table = pd.DataFrame(means, index=sums.index)
-            looked = table.reindex(X_new[col].astype(str).to_numpy()).to_numpy()
+            looked = table.reindex(key(X_new, cols)).to_numpy()
             parts.append(np.where(np.isnan(looked), self.prior_mean, looked))
         if self.num_cols:
             from sklearn.neighbors import NearestNeighbors
@@ -188,6 +210,9 @@ class AshlarModel(AbstractModel):
     target_stats: bool = False
     #: Out-of-fold mean target of this many nearest training rows (0 = off).
     neighbour_targets: int = 0
+    #: Minimum training levels for target statistics, and whether pairs of those columns get their own.
+    target_stats_min_levels: int = 10
+    target_stats_pairs: bool = False
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -269,7 +294,12 @@ class AshlarModel(AbstractModel):
         self._oof = None
         if self.target_stats or self.neighbour_targets:
             n_classes = None if self.problem_type == "regression" else int(self.num_classes)
-            self._oof = _OutOfFoldFeatures(self.target_stats, self.neighbour_targets)
+            self._oof = _OutOfFoldFeatures(
+                self.target_stats,
+                self.neighbour_targets,
+                min_levels=self.target_stats_min_levels,
+                pairs=self.target_stats_pairs,
+            )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
                 X_val = self._oof.transform(X_val)
@@ -548,7 +578,18 @@ AshlarTabMRipBsCreativeModel.target_stats = True
 AshlarTabMRipBsCreativeModel.neighbour_targets = 16
 AshlarTabMRipBsCreativeModel.stop_on_metric = {"multiclass": "log_loss", "regression": "rmse"}
 
+# Target statistics for ID-like columns only (100+ levels), and for every pair of them, as CatBoost's combinations.
+AshlarTabMRipBsIdStatsModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDS", "AshlarTabMRipBsIdStats")
+AshlarTabMRipBsIdStatsModel.target_stats = True
+AshlarTabMRipBsIdStatsModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdPairsModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDP", "AshlarTabMRipBsIdPairs")
+AshlarTabMRipBsIdPairsModel.target_stats = True
+AshlarTabMRipBsIdPairsModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdPairsModel.target_stats_pairs = True
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_idstats": AshlarTabMRipBsIdStatsModel,
+    "tabm_bs_idpairs": AshlarTabMRipBsIdPairsModel,
     "tabm_bs_stumps": AshlarTabMRipBsStumpsModel,
     "tabm_bs_creative": AshlarTabMRipBsCreativeModel,
     "tabm_bs_stats": AshlarTabMRipBsStatsModel,
