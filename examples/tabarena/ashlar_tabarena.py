@@ -97,6 +97,12 @@ class AshlarModel(AbstractModel):
     pool_min_levels: int | None = None
     #: Early-stop binary tasks on validation ROC AUC, the metric TabArena scores them on.
     stop_on_auc: bool = False
+    #: Early-stop on the metric TabArena scores, of the averaged ensemble, as TabArena's TabM does. Maps the problem
+    #: type to an Ashlar early_stopping_metric; a missing type keeps the loss.
+    stop_on_metric: dict | None = None
+    #: Add a 0/1 categorical "<column>__missing" for each numeric column with missing training values (TabM's
+    #: SimpleImputer(add_indicator=True)). Ashlar alone fills them with the median.
+    missing_indicators: bool = False
     #: Fit a softmax temperature on the validation fold (classification).
     temperature_scaling: bool = False
     temperature_: float = 1.0
@@ -113,9 +119,20 @@ class AshlarModel(AbstractModel):
             # get an embedding, not piecewise numeric bins over two points.
             self._bool_features = [str(c) for c in self._feature_metadata.get_features(required_special_types=["bool"])]
         flags = set(getattr(self, "_bool_features", []))
+        if is_train:
+            self._missing_columns = [
+                col
+                for col in X.columns
+                if self.missing_indicators
+                and col not in flags
+                and pd.api.types.is_numeric_dtype(X[col].dtype)
+                and X[col].isna().any()
+            ]
         for col in X.columns:
             if isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == bool or col in flags:
                 X[col] = X[col].astype(str).astype(object)
+        for col in getattr(self, "_missing_columns", []):
+            X[f"{col}__missing"] = np.where(X[col].isna(), "1", "0").astype(object)
         return X
 
     def _build(self, params: dict):
@@ -124,6 +141,11 @@ class AshlarModel(AbstractModel):
         params = {**self.defaults, **params}
         backbone = {key: params.pop(key) for key in _BACKBONE_KEYS if key in params}
         classification = self.problem_type in ("binary", "multiclass")
+        if not classification:
+            # Classification-only settings shared by a variant's defaults.
+            params.pop("label_smoothing", None)
+            if params.get("early_stopping_metric") in {"log_loss", "accuracy", "roc_auc"}:
+                params.pop("early_stopping_metric")
         # A distribution head for regression (its mean is the point prediction).
         task = "classification" if classification else params.pop("task", "regression")
         params.pop("task", None)
@@ -161,6 +183,8 @@ class AshlarModel(AbstractModel):
         params = self._get_model_params()
         if self.batch_rule and "batch_size" not in params:
             params["batch_size"] = _tabm_batch_size(*X.shape)
+        if self.stop_on_metric and self.problem_type in self.stop_on_metric:
+            params.setdefault("early_stopping_metric", self.stop_on_metric[self.problem_type])
         if self.stop_on_auc and self.problem_type == "binary":
             params.setdefault("early_stopping_metric", "roc_auc")
         if self.pool_min_levels is not None and "random_effects" not in params:
@@ -382,7 +406,41 @@ AshlarTabMRipBsMemberModel = _variant(
     AshlarTabMRipModel, "ASRTABMBSMB", "AshlarTabMRipBsMember", share_training_batches=False
 )
 
+# Classification fixes for log loss: label smoothing (as RealMLP), and early
+# stopping on the log loss of the averaged prediction instead of the mean
+# member loss. Regression ignores both.
+AshlarTabMRipBsSmoothModel = _variant(AshlarTabMRipModel, "ASRTABMBSLS", "AshlarTabMRipBsSmooth", label_smoothing=0.1)
+AshlarTabMRipBsLogLossModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSLL", "AshlarTabMRipBsLogLoss", early_stopping_metric="log_loss"
+)
+AshlarTabMRipBsSmoothLogLossModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMBSLSLL",
+    "AshlarTabMRipBsSmoothLogLoss",
+    label_smoothing=0.1,
+    early_stopping_metric="log_loss",
+)
+
+# From the audit of TabArena's TabM (Nov 4): it early-stops on the scored metric of the probability-averaged ensemble,
+# adds missing-value indicators, and trains d_block 512 with weight decay 3e-4 and gradient clipping 1.0.
+AshlarTabMRipBsMetricModel = _variant(AshlarTabMRipModel, "ASRTABMBSMET", "AshlarTabMRipBsMetric")
+AshlarTabMRipBsMetricModel.stop_on_metric = {"binary": "roc_auc", "multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsEnsembleLossModel = _variant(AshlarTabMRipModel, "ASRTABMBSENS", "AshlarTabMRipBsEnsembleLoss")
+AshlarTabMRipBsEnsembleLossModel.stop_on_metric = {"multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsMissingModel = _variant(AshlarTabMRipModel, "ASRTABMBSNA", "AshlarTabMRipBsMissing")
+AshlarTabMRipBsMissingModel.missing_indicators = True
+AshlarTabMRipBsParityModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSPAR", "AshlarTabMRipBsParity", d_block=512, weight_decay=3e-4, gradient_clip=1.0
+)
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_metric": AshlarTabMRipBsMetricModel,
+    "tabm_bs_ensloss": AshlarTabMRipBsEnsembleLossModel,
+    "tabm_bs_missing": AshlarTabMRipBsMissingModel,
+    "tabm_bs_parity": AshlarTabMRipBsParityModel,
+    "tabm_bs_smooth": AshlarTabMRipBsSmoothModel,
+    "tabm_bs_logloss": AshlarTabMRipBsLogLossModel,
+    "tabm_bs_smooth_logloss": AshlarTabMRipBsSmoothLogLossModel,
     "rip_bs": AshlarRipBsModel,
     "rip_bs_deep": AshlarRipBsDeepModel,
     "rip_bs_wide": AshlarRipBsWideModel,

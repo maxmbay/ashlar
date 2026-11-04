@@ -75,6 +75,27 @@ def classification_objective(raw, y, sample_weight):
     return weighted_mean(-jnp.mean(chosen, axis=1), sample_weight)
 
 
+def make_smoothed_classification_objective(smoothing: float):
+    """Member cross-entropy against labels with ``smoothing`` of their mass spread evenly over the classes."""
+
+    def objective(raw, y, sample_weight):
+        if raw.ndim != 3:
+            raise ShapeError(f"logits must have shape (batch, member, class); received {raw.shape}.")
+        log_prob = jax_log_softmax(raw)
+        index = y.astype(jnp.int32)
+        index = index[:, None, None] if index.ndim == 1 else index[..., None]
+        chosen = jnp.take_along_axis(log_prob, index, axis=-1)[..., 0]
+        per_member = -(1.0 - smoothing) * chosen - smoothing * jnp.mean(log_prob, axis=-1)
+        sample_weight = jnp.asarray(sample_weight)
+        if y.ndim == 2:
+            if sample_weight.ndim == 1:
+                return weighted_mean(jnp.mean(per_member, axis=1), sample_weight)
+            return weighted_mean(per_member.reshape(-1), sample_weight.reshape(-1))
+        return weighted_mean(jnp.mean(per_member, axis=1), sample_weight)
+
+    return objective
+
+
 def make_candidate_objective(task: str):
     """Negative log-probability of each row's set of classes: ``y`` is a ``(rows, classes)`` 0/1 mask.
 

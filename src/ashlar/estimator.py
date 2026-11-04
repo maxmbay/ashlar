@@ -61,6 +61,7 @@ from ashlar.layers import (
 from ashlar.objectives import (
     classification_accuracy,
     classification_objective,
+    make_smoothed_classification_objective,
     normal_objective,
     make_distribution_objective,
     make_hurdle_objective,
@@ -442,7 +443,7 @@ def _thresholds(threshold, shape) -> np.ndarray:
     return values
 
 
-_STOPPING_METRICS = (None, "loss", "accuracy", "roc_auc")
+_STOPPING_METRICS = (None, "loss", "log_loss", "accuracy", "roc_auc", "rmse")
 
 
 class ASRModel(BaseEstimator):
@@ -606,6 +607,12 @@ class ASRModel(BaseEstimator):
         stopping, and the fitted model use the average, which is usually
         smoother than any single epoch. ``0.9`` averages roughly the last ten
         epochs.
+    label_smoothing:
+        ``0`` (default) trains classification on the plain cross-entropy. A
+        share in ``(0, 1)`` moves that much of each label's mass evenly over
+        all classes, which keeps the members from growing overconfident.
+        Early stopping then watches the smoothed loss unless
+        ``early_stopping_metric="log_loss"``.
     time_limit:
         ``None`` (default) trains until ``max_epochs`` or early stopping. A
         number of seconds is a wall-clock budget for the whole ``fit``,
@@ -613,9 +620,14 @@ class ASRModel(BaseEstimator):
         it and keeps the best checkpoint so far. Not saved with the model.
     early_stopping_metric:
         What picks the checkpoint and stops training. ``None`` or ``loss``
-        (default) is the validation loss. For classification, ``accuracy``
-        or ``roc_auc`` (two classes) score the whole validation partition
-        instead, which matters when a model is judged on that metric.
+        (default) is the validation loss. For classification, ``log_loss``,
+        ``accuracy`` or ``roc_auc`` (two classes) score the predicted
+        probabilities on the whole validation partition instead, which
+        matters when a model is judged on that metric. ``log_loss`` differs
+        from ``loss`` for an ensemble: the loss averages each member's
+        cross-entropy, while ``log_loss`` scores the averaged prediction.
+        For regression, ``rmse`` scores the members' averaged prediction in
+        the same way.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -683,6 +695,7 @@ class ASRModel(BaseEstimator):
         weight_average: float | None = None,
         early_stopping_metric: str | None = None,
         time_limit: float | None = None,
+        label_smoothing: float = 0.0,
     ):
         self.task = task
         self.backbone = backbone
@@ -732,6 +745,7 @@ class ASRModel(BaseEstimator):
         self.weight_average = weight_average
         self.early_stopping_metric = early_stopping_metric
         self.time_limit = time_limit
+        self.label_smoothing = label_smoothing
 
     def _check_config(self):
         if check_monotone(self.monotone):
@@ -768,12 +782,18 @@ class ASRModel(BaseEstimator):
             raise AshlarError("patience must be non-negative.")
         if self.weight_average is not None and not 0.0 <= float(self.weight_average) < 1.0:
             raise AshlarError("weight_average is a per-epoch decay in [0, 1), or None.")
+        if not 0.0 <= float(self.label_smoothing) < 1.0:
+            raise AshlarError("label_smoothing is a share in [0, 1).")
+        if float(self.label_smoothing) > 0 and self.task != "classification":
+            raise AshlarError("label_smoothing is for classification.")
         if self.time_limit is not None and (isinstance(self.time_limit, bool) or not float(self.time_limit) > 0):
             raise AshlarError("time_limit is a positive number of seconds, or None.")
         if self.early_stopping_metric not in _STOPPING_METRICS:
-            raise AshlarError("early_stopping_metric must be None, 'loss', 'accuracy', or 'roc_auc'.")
-        if self.early_stopping_metric in {"accuracy", "roc_auc"} and self.task != "classification":
+            raise AshlarError("early_stopping_metric must be None, 'loss', 'log_loss', 'accuracy', 'roc_auc', or 'rmse'.")
+        if self.early_stopping_metric in {"log_loss", "accuracy", "roc_auc"} and self.task != "classification":
             raise AshlarError(f"early_stopping_metric={self.early_stopping_metric!r} is for classification.")
+        if self.early_stopping_metric == "rmse" and self.task != "regression":
+            raise AshlarError("early_stopping_metric='rmse' is for regression.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
         if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
@@ -1631,6 +1651,8 @@ class ASRModel(BaseEstimator):
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
+        if self.task == "classification" and float(self.label_smoothing) > 0:
+            return make_smoothed_classification_objective(float(self.label_smoothing))
         weight = self._expectation_weight()
         if weight is None:
             return base
@@ -1877,10 +1899,32 @@ class ASRModel(BaseEstimator):
         if metric == "roc_auc" and n_classes != 2:
             raise AshlarError("early_stopping_metric='roc_auc' needs two classes; use 'loss' (log loss) for more.")
         *features, y_val, w_val = validation
-        y_np = np.asarray(y_val).astype(np.int64)
         w_np = np.asarray(w_val, dtype=np.float64)
         policy = self._policy()
         import equinox as eqx
+
+        if metric == "rmse":
+            # The averaged prediction on the training scale; a z-scored target leaves the ranking unchanged.
+            target = np.asarray(y_val, dtype=np.float64)
+
+            @eqx.filter_jit
+            def point(core, *chunk):
+                return _point_from_raw("regression", policy, core(*chunk, key=None), None)
+
+            def rmse_score(core):
+                n_rows = int(target.shape[0])
+                pred = np.concatenate(
+                    [
+                        np.asarray(point(core, *(array[start : start + EVAL_CHUNK_ROWS] for array in features)))
+                        for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+                    ],
+                    axis=0,
+                ).reshape(target.shape)
+                squared = np.square(pred - target).reshape(n_rows, -1).mean(axis=1)
+                return -float(np.sqrt(np.sum(w_np * squared) / np.sum(w_np)))
+
+            return rmse_score
+        y_np = np.asarray(y_val).astype(np.int64)
 
         @eqx.filter_jit
         def probabilities(core, *chunk):
@@ -1895,6 +1939,9 @@ class ASRModel(BaseEstimator):
             proba = np.concatenate(parts, axis=0)
             if metric == "accuracy":
                 return float(np.sum(w_np * (np.argmax(proba, axis=1) == y_np)) / np.sum(w_np))
+            if metric == "log_loss":
+                chosen = np.clip(proba[np.arange(n_rows), y_np], 1e-15, None)
+                return float(np.sum(w_np * np.log(chosen)) / np.sum(w_np))
             from sklearn.metrics import roc_auc_score
 
             if len(np.unique(y_np[w_np > 0])) < 2:
@@ -3856,6 +3903,7 @@ class ASRModel(BaseEstimator):
             "share_training_batches": bool(self.share_training_batches),
             "weight_average": None if self.weight_average is None else float(self.weight_average),
             "early_stopping_metric": self.early_stopping_metric,
+            "label_smoothing": float(self.label_smoothing),
             "bottleneck": self._bottleneck_width(),
             "histogram_variance": None if self.histogram_variance is None else float(self.histogram_variance),
             "expectation_weight": self._expectation_weight(),
@@ -3933,6 +3981,7 @@ class ASRModel(BaseEstimator):
             share_training_batches=bool(payload.get("share_training_batches", True)),
             weight_average=payload.get("weight_average"),
             early_stopping_metric=payload.get("early_stopping_metric"),
+            label_smoothing=float(payload.get("label_smoothing", 0.0)),
             bottleneck=payload.get("bottleneck"),
             histogram_variance=payload.get("histogram_variance"),
             expectation_weight=payload.get("expectation_weight"),

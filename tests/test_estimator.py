@@ -610,6 +610,38 @@ def test_unshared_member_targets_and_a_small_tabm_fit():
     assert np.isfinite(pred).all()
 
 
+def test_label_smoothing_and_log_loss_stopping(tmp_path):
+    import jax.numpy as jnp
+
+    from ashlar import ASRClassifier
+    from ashlar.objectives import classification_objective, make_smoothed_classification_objective
+
+    raw = jnp.array([[[4.0, 0.0, -1.0]], [[0.0, 2.0, 0.0]]])
+    y = jnp.array([0, 1])
+    w = jnp.ones(2)
+    assert float(make_smoothed_classification_objective(0.0)(raw, y, w)) == pytest.approx(float(classification_objective(raw, y, w)))
+    assert float(make_smoothed_classification_objective(0.2)(raw, y, w)) > float(classification_objective(raw, y, w))
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(64, 2))
+    labels = (X[:, 0] > 0).astype(int) + (X[:, 1] > 0.5)
+    model = ASRClassifier(max_epochs=3, batch_size=16, label_smoothing=0.1, early_stopping_metric="log_loss").fit(X, labels)
+    assert all(score <= 0 for score in model.history_["val_score"])
+    model.save(tmp_path / "m")
+    loaded = ASRModel.load(tmp_path / "m")
+    assert loaded.label_smoothing == 0.1 and loaded.early_stopping_metric == "log_loss"
+    assert np.allclose(loaded.predict_proba(X[:4]), model.predict_proba(X[:4]))
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", label_smoothing=0.1).fit(X, X[:, 0])
+
+    from ashlar import ASRRegressor
+
+    reg = ASRRegressor(max_epochs=3, batch_size=16, early_stopping_metric="rmse").fit(X, X[:, 0])
+    assert len(reg.history_["val_score"]) == 3 and all(score <= 0 for score in reg.history_["val_score"])
+    with pytest.raises(AshlarError):
+        ASRClassifier(early_stopping_metric="rmse").fit(X, labels)
+
+
 def test_unshared_batches_train_a_classifier():
     import jax.numpy as jnp
 
