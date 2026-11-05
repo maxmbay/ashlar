@@ -112,8 +112,9 @@ class _OutOfFoldFeatures:
       and the fall is ``z`` standard errors from zero, with the errors
       clustered by level so a few large levels cannot pass on their own.
       Survivors are ranked by that fall and the best ``max_pairs`` of each
-      kind are kept. Without the survey every candidate is kept, in column
-      order, up to ``max_pairs``.
+      kind are kept. ``screen_singles=False`` keeps every single column and
+      screens only the combinations. Without the survey every candidate is
+      kept, in column order, up to ``max_pairs``.
     * Neighbour targets (retrieval, as in TabR or the in-context models): the
       mean of each target column over the row's ``k`` nearest training rows
       in the scaled numeric columns.
@@ -136,11 +137,12 @@ class _OutOfFoldFeatures:
         pair_min_levels: int | None = None,
         margin: float = 0.001,
         z: float = 1.0,
+        screen_singles: bool = True,
     ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
         self.min_levels, self.prior = min_levels, prior
         self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
-        self.survey, self.margin, self.z = survey, margin, z
+        self.survey, self.margin, self.z, self.screen_singles = survey, margin, z, screen_singles
         self.pair_min_levels = min_levels if pair_min_levels is None else pair_min_levels
 
     def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
@@ -192,7 +194,9 @@ class _OutOfFoldFeatures:
             def kept(candidates):
                 return sorted(filter(passes, candidates), key=lambda c: lifts[c][0], reverse=True)[: self.max_pairs]
 
-            singles, kept_pairs, kept_triples = list(filter(passes, singles)), kept(pairs), kept(triples)
+            if self.screen_singles:
+                singles = list(filter(passes, singles))
+            kept_pairs, kept_triples = kept(pairs), kept(triples)
             best = f"; best pair {' x '.join(kept_pairs[0])} lifts {lifts[kept_pairs[0]][0]:.2%}" if kept_pairs else ""
             print(
                 f"[ashlar] target statistics survey: kept {len(singles)} columns, {len(kept_pairs)} of {len(pairs)} "
@@ -372,6 +376,11 @@ class AshlarModel(AbstractModel):
     #: and the level count from which a column may join a pair (default: target_stats_min_levels).
     target_stats_survey: bool = False
     target_stats_pair_min_levels: int | None = None
+    #: The survey's bar: the loss fall a statistic needs (share of the global mean's loss), its standard errors, and
+    #: whether single columns are screened too or always kept.
+    target_stats_survey_margin: float = 0.001
+    target_stats_survey_z: float = 1.0
+    target_stats_survey_singles: bool = True
     #: Feed the network the statistics instead of the ID-like columns themselves (no embedding for those columns),
     #: as CatBoost does for high-cardinality categoricals. A table keeps its columns if nothing else would be left.
     target_stats_replace: bool = False
@@ -525,6 +534,9 @@ class AshlarModel(AbstractModel):
                 triples=self.target_stats_triples,
                 survey=self.target_stats_survey,
                 pair_min_levels=self.target_stats_pair_min_levels,
+                margin=self.target_stats_survey_margin,
+                z=self.target_stats_survey_z,
+                screen_singles=self.target_stats_survey_singles,
             )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
@@ -954,7 +966,24 @@ AshlarTabMV3Model.member_batches_max_levels = 100
 AshlarTabMV3ReplaceModel.member_batches_max_levels = 100
 AshlarTabMV3ReplaceModel.target_stats_replace = True
 
+# The survey at its first bar (0.1% and one standard error) lost to keeping every pair on Amazon (+1.2%),
+# Diabetes130US (+0.3%) and kddcup09 (+2.8%): statistics that barely predict the label alone still helped the
+# network. The loose bar keeps every single column and drops only combinations that do no better than their parts.
+AshlarTabMRipBsIdLooseModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDL", "AshlarTabMRipBsIdLoose")
+AshlarTabMRipBsIdLoose3Model = _variant(AshlarTabMRipModel, "ASRTABMBSIDL3", "AshlarTabMRipBsIdLoose3")
+for _cls in (AshlarTabMRipBsIdLooseModel, AshlarTabMRipBsIdLoose3Model):
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_survey = True
+    _cls.target_stats_survey_margin = 0.0
+    _cls.target_stats_survey_z = 0.0
+    _cls.target_stats_survey_singles = False
+AshlarTabMRipBsIdLoose3Model.target_stats_triples = True
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
+    "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
     "tabm_v3": AshlarTabMV3Model,
     "tabm_v3_nogate": AshlarTabMV3NoGateModel,
     "tabm_v3_replace": AshlarTabMV3ReplaceModel,
