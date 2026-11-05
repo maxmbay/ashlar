@@ -1174,7 +1174,14 @@ AshlarTabMV4GatesWeakModel = _variant(
 )
 # Max (Nov 5): the entry stays one differentiable model, so the tree rival is 64 soft oblivious trees trained with the
 # network on the raw inputs (library soft_trees), aimed at the tables where CatBoost wins, not a boosted tree beside it.
-AshlarTabMV4TreesModel = _variant(AshlarTabMV4Model, "ASRTABMV4T", "AshlarTabMV4Trees", **_REPLICA, soft_trees=64)
+AshlarTabMV4TreesModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4T", "AshlarTabMV4Trees", **_REPLICA, soft_trees=64, soft_trees_dropout=0.0
+)
+# On Bioresponse the trees above fit the training rows first and the network beside them stayed at chance
+# (validation log loss 0.69 with the leaves zeroed). Dropping the trees on half the rows keeps the network learning.
+AshlarTabMV4TreesDropModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4TD", "AshlarTabMV4TreesDrop", **_REPLICA, soft_trees=64, soft_trees_dropout=0.5
+)
 
 LOCAL_SWEEP_MODELS = {
     "tabm_v4": AshlarTabMV4Model,
@@ -1186,6 +1193,7 @@ LOCAL_SWEEP_MODELS = {
     "tabm_v4_gates": AshlarTabMV4GatesModel,
     "tabm_v4_gates_weak": AshlarTabMV4GatesWeakModel,
     "tabm_v4_trees": AshlarTabMV4TreesModel,
+    "tabm_v4_trees_drop": AshlarTabMV4TreesDropModel,
     "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
     "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
     "tabm_v3": AshlarTabMV3Model,

@@ -12,6 +12,8 @@ from ashlar.layers import CategoricalEmbeddings, LinearReLUEmbeddings, SetEmbedd
 
 # Folded into a training step's key for the feature gates' noise.
 GATE_KEY = 0x6A7E
+# The soft trees' dropout draws, folded in like the gates' so a core without trees keeps its keys.
+TREE_KEY = 0x7EE5
 
 
 class PredictiveCore(Module):
@@ -123,7 +125,8 @@ class PredictiveCore(Module):
             else:
                 log_probs = log_probs + self.monotone(numeric_z)
         if self.trees is not None:
-            log_probs = self.trees(log_probs, numeric_z, categorical_onehot, category_index)
+            tree_key = None if key is None else jax.random.fold_in(key, TREE_KEY)
+            log_probs = self.trees(log_probs, numeric_z, categorical_onehot, category_index, key=tree_key)
         if self.random_effects is not None:
             if not offsets:
                 return log_probs

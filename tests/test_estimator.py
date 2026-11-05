@@ -1396,11 +1396,14 @@ def test_soft_trees_train_beside_the_network_and_survive_save(tmp_path):
     assert float(np.abs(np.asarray(model.core_.trees.layer.leaves)).max()) > 0.0
     restored = ASRModel.load(model.save(tmp_path / "trees"))
     assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    assert restored.soft_trees_dropout == model.soft_trees_dropout == 0.5
     classes = (x[:, 1] > 0).astype(int)
     classifier = ASRClassifier(soft_trees=4, max_epochs=3, patience=0, **MICRO).fit(x, classes)
     assert np.allclose(classifier.predict_proba(x[:10]).sum(axis=1), 1.0, atol=1e-5)
     with pytest.raises(AshlarError):
         ASRModel(task="regression", soft_trees=-1, **MICRO).fit(x, y)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=4, soft_trees_dropout=1.0, **MICRO).fit(x, y)
     with pytest.raises(AshlarError):
         ASRModel(task="regression", soft_trees=4, monotone={"x0": 1}, **MICRO).fit(x, y)
 

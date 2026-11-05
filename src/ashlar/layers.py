@@ -795,6 +795,8 @@ TREE_MAX_LEVELS = 16
 TREE_GAIN = 8.0
 # Rows of the training partition that place the first thresholds and the input scales.
 TREE_SAMPLE = 4096
+# The default share of training rows (per member) that get no tree term (``soft_trees_dropout=``).
+TREE_DROPOUT = 0.5
 
 
 class TreeBranch(Module):
@@ -806,6 +808,11 @@ class TreeBranch(Module):
     ``TREE_GAIN`` times the mean of its trees to the outputs that ``moves`` marks, the same for every member, and
     for classification normalizes the log-probabilities again. The leaves start at zero, so a fit starts from the
     network alone, and the thresholds start at the values of random training rows, as in ``ashlar.node``.
+
+    A training step (one with a key) drops the term for a ``dropout`` share of the rows, a draw per row and
+    member. Without that, the trees can fit the training rows before the network does and leave it nothing to
+    learn. With it, the network must still predict the dropped rows alone, so the trees learn what it misses.
+    Prediction adds the whole term.
     """
 
     layer: ObliviousLayer
@@ -817,8 +824,14 @@ class TreeBranch(Module):
     views: tuple[tuple[int, int], ...] = field(static=True)
     moves: tuple[float, ...] = field(static=True)
     normalize: bool = field(static=True)
+    dropout: float = field(static=True)
 
-    def __init__(self, n_numeric, n_onehot, views, moves, normalize, n_trees: int, depth: int, *, key, sample=None):
+    def __init__(
+        self, n_numeric, n_onehot, views, moves, normalize, n_trees: int, depth: int, *, key, sample=None, dropout=0.0
+    ):
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ShapeError("soft tree dropout must be at least 0 and below 1.")
+        self.dropout = float(dropout)
         self.n_numeric, self.n_onehot = int(n_numeric), int(n_onehot)
         self.views = tuple((int(position), int(size)) for position, size in views)
         self.moves = tuple(float(move) for move in moves)
@@ -869,13 +882,16 @@ class TreeBranch(Module):
         value = jnp.asarray(TREE_GAIN, dtype=jnp.float32) * self.layer(self.inputs(numeric_z, categorical_onehot, category_index))
         return value * jnp.asarray(self.moves, dtype=value.dtype)
 
-    def __call__(self, outputs, numeric_z, categorical_onehot, category_index):
+    def __call__(self, outputs, numeric_z, categorical_onehot, category_index, *, key=None):
         term = self.term(numeric_z, categorical_onehot, category_index).astype(outputs.dtype)
         if term.shape[0] == outputs.shape[0]:
-            term = term[:, None, :]
+            term = jnp.broadcast_to(term[:, None, :], outputs.shape)
         else:
             # A training step with a batch per member: the rows are (batch, member) flattened, member fastest.
             term = term.reshape(outputs.shape[0], outputs.shape[1], term.shape[-1])
+        if key is not None and self.dropout > 0.0:
+            keep = jax.random.bernoulli(key, 1.0 - self.dropout, outputs.shape[:2] + (1,))
+            term = term * keep.astype(term.dtype)
         moved = outputs + term
         return jax.nn.log_softmax(moved, axis=-1) if self.normalize else moved
 

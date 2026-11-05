@@ -59,6 +59,7 @@ from ashlar.layers import (
     TABM_ARCH_TYPES,
     TabMBackbone,
     TREE_DEPTH,
+    TREE_DROPOUT,
     TREE_MAX_LEVELS,
     TREE_SAMPLE,
     TreeBranch,
@@ -532,6 +533,12 @@ class ASRModel(BaseEstimator):
         they split them as a gradient-boosted tree would while the trunk reads
         its embeddings. For classification and the tasks with a location.
         ``0`` (the default) adds none.
+    soft_trees_dropout:
+        Share of training rows, drawn per row and ensemble member, that get no
+        tree term in a step, so the network still learns to predict them on
+        its own and the trees learn what it misses. At ``0`` the trees can fit
+        the training rows before the network learns anything. Prediction adds
+        the whole term. Default 0.5.
     numeric_scaling:
         ``robust`` (default) is median impute, median center, interquartile
         scale, then a smooth clip that saturates at ±3. ``standard`` is
@@ -711,6 +718,7 @@ class ASRModel(BaseEstimator):
         feature_dropout: float = 0.0,
         feature_gates: float = 0.0,
         soft_trees: int = 0,
+        soft_trees_dropout: float = TREE_DROPOUT,
         numeric_scaling: str = "robust",
         numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
@@ -764,6 +772,7 @@ class ASRModel(BaseEstimator):
         self.feature_dropout = feature_dropout
         self.feature_gates = feature_gates
         self.soft_trees = soft_trees
+        self.soft_trees_dropout = soft_trees_dropout
         self.numeric_scaling = numeric_scaling
         self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
@@ -846,6 +855,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError("feature_gates must be a finite number of at least 0.")
         if isinstance(self.soft_trees, bool) or not isinstance(self.soft_trees, (int, np.integer)) or self.soft_trees < 0:
             raise AshlarError("soft_trees must be a whole number of trees, 0 for none.")
+        if not 0.0 <= float(self.soft_trees_dropout) < 1.0:
+            raise AshlarError("soft_trees_dropout must be in [0, 1).")
         if self.soft_trees:
             if self.task not in ("classification", *MONOTONE_TASKS):
                 raise AshlarError(
@@ -2044,6 +2055,7 @@ class ASRModel(BaseEstimator):
             TREE_DEPTH,
             key=key,
             sample=sample,
+            dropout=float(self.soft_trees_dropout),
         )
 
     def _numeric_embeddings(self, encoder: FeatureEncoder) -> str | None:
@@ -4041,6 +4053,7 @@ class ASRModel(BaseEstimator):
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
             "feature_gates": float(self.feature_gates),
             "soft_trees": int(self.soft_trees),
+            "soft_trees_dropout": float(self.soft_trees_dropout),
             "numeric_scaling": self.numeric_scaling,
             "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
@@ -4121,6 +4134,8 @@ class ASRModel(BaseEstimator):
             feature_dropout=payload.get("feature_dropout", 0.0),
             feature_gates=payload.get("feature_gates", 0.0),
             soft_trees=payload.get("soft_trees", 0),
+            # A model saved before the dropout existed trained without it.
+            soft_trees_dropout=payload.get("soft_trees_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],

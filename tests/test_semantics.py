@@ -173,6 +173,17 @@ def test_tree_branch_starts_as_a_no_op_and_moves_only_the_marked_outputs():
     leafy = eqx.tree_at(lambda b: b.layer.leaves, branch, jnp.ones_like(branch.layer.leaves))
     moved = np.asarray(leafy(outputs, numeric, onehot, index))
     assert np.allclose(moved[..., 0], 1.0 + TREE_GAIN, atol=1e-4) and np.allclose(moved[..., 1], 1.0)
+    # With dropout, a training step (it has a key) drops the whole term for about half of the (row, member) cells,
+    # and prediction (no key) adds it everywhere. Without dropout, a key changes nothing.
+    assert np.allclose(leafy(outputs, numeric, onehot, index, key=jax.random.PRNGKey(3)), moved)
+    dropping = TreeBranch(
+        3, 0, [(1, 4)], (1.0, 0.0), False, 8, 3, key=jax.random.PRNGKey(0), sample=(numeric, onehot, index), dropout=0.5
+    )
+    dropping = eqx.tree_at(lambda b: b.layer.leaves, dropping, jnp.ones_like(dropping.layer.leaves))
+    dropped = np.asarray(dropping(outputs, numeric, onehot, index, key=jax.random.PRNGKey(3)))[..., 0]
+    kept = np.isclose(dropped, 1.0 + TREE_GAIN, atol=1e-4)
+    assert np.all(kept | np.isclose(dropped, 1.0)) and 0.3 < kept.mean() < 0.7
+    assert np.allclose(dropping(outputs, numeric, onehot, index), moved, atol=1e-4)
     # A training step with a batch per member passes batch * members rows, member fastest.
     varied = eqx.tree_at(lambda b: b.layer.leaves, branch, jax.random.normal(jax.random.PRNGKey(2), branch.layer.leaves.shape))
     flat = np.asarray(varied(jnp.zeros((32, 2, 2)), numeric, onehot, index))
