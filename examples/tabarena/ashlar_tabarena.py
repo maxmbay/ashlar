@@ -981,7 +981,23 @@ for _cls in (AshlarTabMRipBsIdLooseModel, AshlarTabMRipBsIdLoose3Model):
     _cls.target_stats_survey_singles = False
 AshlarTabMRipBsIdLoose3Model.target_stats_triples = True
 
+# Round 5 (Nov 5), from the overnight checks. Replacing the ID columns by their statistics gave the best neural result
+# on all three dev tables with 100+ level columns (Amazon .1273, Diabetes130US .3282, kddcup09 .1680), and neither
+# survey bar beat keeping every pair. So v4 is v3 without the survey and with the raw ID columns dropped. Without
+# them the gate does not fire and per-member batches stay on; it remains for a table made only of ID columns, where
+# nothing is dropped. On every other table v4 trains exactly as v3.
+AshlarTabMV4Model = _variant(AshlarTabMRipModel, "ASRTABMV4", "AshlarTabMV4", **_REPLICA)
+AshlarTabMV4Model.stop_on_metric = _ENSEMBLE_STOP
+AshlarTabMV4Model.target_stats = True
+AshlarTabMV4Model.target_stats_min_levels = 100
+AshlarTabMV4Model.target_stats_pairs = True
+AshlarTabMV4Model.target_stats_triples = True
+AshlarTabMV4Model.target_stats_replace = True
+AshlarTabMV4Model.duplicate_pooling = True
+AshlarTabMV4Model.member_batches_max_levels = 100
+
 LOCAL_SWEEP_MODELS = {
+    "tabm_v4": AshlarTabMV4Model,
     "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
     "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
     "tabm_v3": AshlarTabMV3Model,
