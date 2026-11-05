@@ -58,6 +58,10 @@ from ashlar.layers import (
     SetEncoder,
     TABM_ARCH_TYPES,
     TabMBackbone,
+    TREE_DEPTH,
+    TREE_MAX_LEVELS,
+    TREE_SAMPLE,
+    TreeBranch,
     quantile_edges,
     tree_edges,
 )
@@ -520,6 +524,14 @@ class ASRModel(BaseEstimator):
         shut, and prediction then ignores those fields; ``feature_gates_``
         names the fields left open. Meant for wide tables where most columns
         are noise. ``0`` (the default) turns the gates off.
+    soft_trees:
+        Number of soft oblivious decision trees (``ashlar.node``'s layer, depth
+        6) beside the network, trained with it end to end and added to the
+        head's outputs. They read the raw inputs (the scaled numeric columns,
+        the one-hot columns, and categorical columns with up to 16 levels), so
+        they split them as a gradient-boosted tree would while the trunk reads
+        its embeddings. For classification and the tasks with a location.
+        ``0`` (the default) adds none.
     numeric_scaling:
         ``robust`` (default) is median impute, median center, interquartile
         scale, then a smooth clip that saturates at ±3. ``standard`` is
@@ -698,6 +710,7 @@ class ASRModel(BaseEstimator):
         gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
         feature_gates: float = 0.0,
+        soft_trees: int = 0,
         numeric_scaling: str = "robust",
         numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
@@ -750,6 +763,7 @@ class ASRModel(BaseEstimator):
         self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
         self.feature_gates = feature_gates
+        self.soft_trees = soft_trees
         self.numeric_scaling = numeric_scaling
         self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
@@ -830,6 +844,15 @@ class ASRModel(BaseEstimator):
             raise AshlarError("feature_dropout must be in [0, 1).")
         if not 0.0 <= float(self.feature_gates) < float("inf"):
             raise AshlarError("feature_gates must be a finite number of at least 0.")
+        if isinstance(self.soft_trees, bool) or not isinstance(self.soft_trees, (int, np.integer)) or self.soft_trees < 0:
+            raise AshlarError("soft_trees must be a whole number of trees, 0 for none.")
+        if self.soft_trees:
+            if self.task not in ("classification", *MONOTONE_TASKS):
+                raise AshlarError(
+                    f"soft_trees needs classification or one of {', '.join(MONOTONE_TASKS)}; this model is {self.task}."
+                )
+            if check_monotone(self.monotone):
+                raise AshlarError("soft_trees cannot be combined with monotone: the trees would read the constrained features.")
         if self.numeric_scaling not in NUMERIC_SCALINGS:
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
@@ -1267,6 +1290,7 @@ class ASRModel(BaseEstimator):
                 head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
                 numeric_z=numeric_z,
                 bin_target=y_train_model,
+                encoded=encoded,
             )
             opt_state = None
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
@@ -1426,6 +1450,7 @@ class ASRModel(BaseEstimator):
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
             numeric_z=numeric_z,
             bin_target=y_train_model,
+            encoded=encoded,
         )
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
@@ -1983,6 +2008,44 @@ class ASRModel(BaseEstimator):
 
         return score
 
+    def _tree_branch(self, encoder, head, members: int, d_head: int, numeric_z, encoded, key):
+        """The ``TreeBranch`` for ``soft_trees=``, or ``None``.
+
+        ``encoded`` is the training partition, whose rows place the first thresholds and scale the inputs. Without
+        it, as on ``load``, the branch has placeholders of the right shape.
+        """
+        if not self.soft_trees:
+            return None
+        shape = jax.eval_shape(
+            lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+        )
+        width = int(shape.shape[-1])
+        if self.task == "classification":
+            moves, normalize = (1.0,) * width, True
+        else:
+            moves, normalize = tuple(float(abs(sign)) for sign in output_signs(self.task, width)), False
+        views = [
+            (position, 1 + len(column.categories))
+            for position, column in enumerate(encoder.embedding_columns)
+            if len(column.categories) <= TREE_MAX_LEVELS
+        ]
+        sample = None
+        if numeric_z is not None and encoded is not None:
+            numeric = np.asarray(numeric_z)
+            take = np.random.default_rng(int(self.random_state)).permutation(numeric.shape[0])[:TREE_SAMPLE]
+            sample = (numeric[take], np.asarray(encoded.categorical_onehot)[take], np.asarray(encoded.category_index)[take])
+        return TreeBranch(
+            encoder.n_numeric,
+            sum(encoder.categorical_widths),
+            views,
+            moves,
+            normalize,
+            int(self.soft_trees),
+            TREE_DEPTH,
+            key=key,
+            sample=sample,
+        )
+
     def _numeric_embeddings(self, encoder: FeatureEncoder) -> str | None:
         """``num_embeddings``, or ``None`` when there are no numeric columns to embed.
 
@@ -1999,6 +2062,7 @@ class ASRModel(BaseEstimator):
         head_kwargs=None,
         numeric_z=None,
         bin_target=None,
+        encoded=None,
     ):
         """Initial core. ``numeric_z`` is the scaled training partition; piecewise bins come from it.
 
@@ -2108,6 +2172,7 @@ class ASRModel(BaseEstimator):
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
             gates=FeatureGates(chunks, float(self.feature_gates)) if float(self.feature_gates) > 0.0 else None,
+            trees=self._tree_branch(encoder, head, int(backbone.k), d_head, numeric_z, encoded, jax.random.fold_in(key, 10)),
         )
 
     @property
@@ -3975,6 +4040,7 @@ class ASRModel(BaseEstimator):
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
             "feature_gates": float(self.feature_gates),
+            "soft_trees": int(self.soft_trees),
             "numeric_scaling": self.numeric_scaling,
             "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
@@ -4054,6 +4120,7 @@ class ASRModel(BaseEstimator):
             cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
             feature_gates=payload.get("feature_gates", 0.0),
+            soft_trees=payload.get("soft_trees", 0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],

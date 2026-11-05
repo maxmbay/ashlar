@@ -153,6 +153,43 @@ def test_feature_dropout_drops_fields_only_while_training():
     assert not np.allclose(dropped, encoded)
 
 
+def test_tree_branch_starts_as_a_no_op_and_moves_only_the_marked_outputs():
+    import equinox as eqx
+
+    from ashlar.layers import TREE_GAIN, TreeBranch
+
+    rng = np.random.default_rng(0)
+    numeric = rng.normal(size=(64, 3)).astype(np.float32)
+    onehot = np.zeros((64, 0), dtype=np.float32)
+    index = rng.integers(0, 4, size=(64, 2)).astype(np.int32)
+    # Three numeric columns and a one-hot copy of the second embedded column (3 levels and the unknown row).
+    branch = TreeBranch(3, 0, [(1, 4)], (1.0, 0.0), False, 8, 3, key=jax.random.PRNGKey(0), sample=(numeric, onehot, index))
+    inputs = np.asarray(branch.inputs(numeric, onehot, index))
+    assert inputs.shape == (64, 7)
+    assert np.allclose(inputs.mean(axis=0), 0.0, atol=1e-5)
+    outputs = jnp.ones((64, 2, 2))
+    assert np.allclose(branch(outputs, numeric, onehot, index), outputs)
+    # Every tree's leaf weights sum to one, so leaves of one add TREE_GAIN to the marked output only.
+    leafy = eqx.tree_at(lambda b: b.layer.leaves, branch, jnp.ones_like(branch.layer.leaves))
+    moved = np.asarray(leafy(outputs, numeric, onehot, index))
+    assert np.allclose(moved[..., 0], 1.0 + TREE_GAIN, atol=1e-4) and np.allclose(moved[..., 1], 1.0)
+    # A training step with a batch per member passes batch * members rows, member fastest.
+    varied = eqx.tree_at(lambda b: b.layer.leaves, branch, jax.random.normal(jax.random.PRNGKey(2), branch.layer.leaves.shape))
+    flat = np.asarray(varied(jnp.zeros((32, 2, 2)), numeric, onehot, index))
+    assert np.allclose(flat, np.asarray(varied.term(numeric, onehot, index)).reshape(32, 2, 2), atol=1e-6)
+    # Classification normalizes the log-probabilities again.
+    logits = jax.nn.log_softmax(jnp.zeros((64, 2, 2)), axis=-1)
+    classed = TreeBranch(3, 0, [], (1.0, 1.0), True, 8, 3, key=jax.random.PRNGKey(1), sample=(numeric, onehot, index))
+    classed = eqx.tree_at(lambda b: b.layer.leaves, classed, jnp.ones_like(classed.layer.leaves) * jnp.array([1.0, -1.0]))
+    probs = np.exp(np.asarray(classed(logits, numeric, onehot, index)))
+    assert np.allclose(probs.sum(axis=-1), 1.0, atol=1e-5) and np.all(probs[..., 0] > 0.99)
+    try:
+        TreeBranch(0, 0, [], (1.0,), False, 4, 2, key=jax.random.PRNGKey(0))
+    except ShapeError:
+        return
+    raise AssertionError("a tree branch with no inputs was accepted")
+
+
 def test_feature_gates_shut_fields_at_or_below_zero_and_draw_noise_only_while_training():
     import equinox as eqx
 

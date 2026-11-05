@@ -1387,6 +1387,25 @@ def test_classification_random_effects_pool_groups(n_classes, tmp_path):
 
 
 @pytest.mark.slow
+def test_soft_trees_train_beside_the_network_and_survive_save(tmp_path):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(300, 3))
+    y = np.where(x[:, 0] > 0.3, 2.0, -1.0) + 0.1 * rng.normal(size=300)
+    model = ASRModel(task="regression", soft_trees=8, max_epochs=6, patience=0, **MICRO).fit(x, y)
+    assert model.core_.trees is not None
+    assert float(np.abs(np.asarray(model.core_.trees.layer.leaves)).max()) > 0.0
+    restored = ASRModel.load(model.save(tmp_path / "trees"))
+    assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    classes = (x[:, 1] > 0).astype(int)
+    classifier = ASRClassifier(soft_trees=4, max_epochs=3, patience=0, **MICRO).fit(x, classes)
+    assert np.allclose(classifier.predict_proba(x[:10]).sum(axis=1), 1.0, atol=1e-5)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=-1, **MICRO).fit(x, y)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=4, monotone={"x0": 1}, **MICRO).fit(x, y)
+
+
+@pytest.mark.slow
 def test_feature_gates_shut_noise_columns_and_survive_save(tmp_path):
     rng = np.random.default_rng(0)
     x = rng.normal(size=(400, 6))

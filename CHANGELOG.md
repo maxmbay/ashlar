@@ -16,6 +16,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - `early_stopping_metric="roc_auc"` (or `"accuracy"`) picks the checkpoint and stops training on that metric over the whole validation partition, instead of the validation loss.
 - `weight_average=` keeps a running average of the weights at each epoch end and validates, stops, and predicts with it.
 - `feature_gates=` puts a learned gate on each input field (a numeric column, a one-hot column, an embedding or a set) for wide tables where most columns carry no signal. Gates train with noise and pay this penalty for each open gate, as in stochastic gates (Yamada et al., 2020). A gate at or below zero shuts its field at prediction, and `feature_gates_` lists the columns left open.
+- `soft_trees=` adds that many soft oblivious decision trees (the `ASRObliviousEnsemble` layer, depth 6) beside the network. They train with it end to end and add to the head's outputs, for classification and the tasks with a location. The trees read the raw inputs (scaled numbers, one-hot columns, and categorical columns with up to 16 levels), so they split them as a gradient-boosted tree would.
 
 ### Fixed
 

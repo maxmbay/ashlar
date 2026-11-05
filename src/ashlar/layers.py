@@ -718,6 +718,168 @@ class FeatureGates(Module):
         return np.asarray(self.location() > 0.0)
 
 
+class ObliviousLayer(Module):
+    """Averaged ensemble of oblivious trees. Every split and every leaf is a parameter."""
+
+    feature_logits: jax.Array
+    thresholds: jax.Array
+    raw_scales: jax.Array
+    leaves: jax.Array
+
+    def __call__(self, features: jax.Array) -> jax.Array:
+        selectors = entmax15(self.feature_logits)
+        chosen = jnp.einsum("bf,tdf->btd", features, selectors)
+        scale = jax.nn.softplus(self.raw_scales) + 1e-3
+        score = (chosen - self.thresholds[None, :, :]) / scale[None, :, :]
+        gate = entmax15(jnp.stack([score, jnp.zeros_like(score)], axis=-1))[..., 0]
+        weights = jnp.ones((features.shape[0], gate.shape[1], 1), dtype=features.dtype)
+        for level in range(gate.shape[2]):
+            decision = gate[:, :, level]
+            stay = weights * (1.0 - decision[:, :, None])
+            go = weights * decision[:, :, None]
+            weights = jnp.concatenate([stay, go], axis=-1)
+        return jnp.einsum("btl,tlo->bo", weights, self.leaves) / self.leaves.shape[0]
+
+
+def _entmax15_forward(scores: jax.Array) -> jax.Array:
+    """1.5-entmax along the last axis. Matches the deep-spin forward pass."""
+
+    width = scores.shape[-1]
+    centered = scores - jnp.max(scores, axis=-1, keepdims=True)
+    scaled = centered / 2.0
+    ordered = jnp.flip(jnp.sort(scaled, axis=-1), axis=-1)
+    ranks = jnp.arange(1, width + 1, dtype=scaled.dtype).reshape((1,) * (scaled.ndim - 1) + (width,))
+    cumulative = jnp.cumsum(ordered, axis=-1)
+    cumulative_sq = jnp.cumsum(jnp.square(ordered), axis=-1)
+    mean = cumulative / ranks
+    mean_sq = cumulative_sq / ranks
+    second = ranks * (mean_sq - jnp.square(mean))
+    delta = (1.0 - second) / ranks
+    tau = mean - jnp.sqrt(jnp.clip(delta, 0.0))
+    support = jnp.clip(jnp.sum(tau <= ordered, axis=-1, keepdims=True), 1, width)
+    tau_star = jnp.take_along_axis(tau, support.astype(jnp.int32) - 1, axis=-1)
+    return jnp.square(jnp.clip(scaled - tau_star, 0.0))
+
+
+def _entmax15_backward(probs: jax.Array, gradient: jax.Array) -> jax.Array:
+    slope = jnp.sqrt(jnp.clip(probs, 0.0))
+    propagated = gradient * slope
+    total = jnp.sum(slope, axis=-1, keepdims=True)
+    correction = jnp.sum(propagated, axis=-1, keepdims=True) / jnp.clip(total, 1e-8)
+    return propagated - correction * slope
+
+
+@jax.custom_vjp
+def entmax15(scores: jax.Array) -> jax.Array:
+    return _entmax15_forward(scores)
+
+
+def _entmax15_fwd(scores: jax.Array):
+    probs = _entmax15_forward(scores)
+    return probs, probs
+
+
+def _entmax15_bwd(probs: jax.Array, gradient: jax.Array):
+    return (_entmax15_backward(probs, gradient),)
+
+
+entmax15.defvjp(_entmax15_fwd, _entmax15_bwd)
+
+
+# Soft oblivious trees beside the network (``soft_trees=``), NODE's layer above on the raw inputs.
+TREE_DEPTH = 6
+# Embedded categorical columns with at most this many levels also reach the trees, one-hot.
+TREE_MAX_LEVELS = 16
+# The branch is TREE_GAIN times the mean of its trees. Adam moves each leaf about the learning rate per step, so
+# without the gain a branch of 128 trees would move the output 128 times slower than one leaf moves.
+TREE_GAIN = 8.0
+# Rows of the training partition that place the first thresholds and the input scales.
+TREE_SAMPLE = 4096
+
+
+class TreeBranch(Module):
+    """Soft oblivious trees on the raw inputs, added to the head's outputs beside the network.
+
+    The trees read the scaled numeric columns, the one-hot columns, and a one-hot copy of each embedded column with
+    at most ``TREE_MAX_LEVELS`` levels, each standardized by its training mean and spread. So they split the inputs
+    themselves, as a gradient-boosted tree does, while the trunk reads its embeddings. The branch adds
+    ``TREE_GAIN`` times the mean of its trees to the outputs that ``moves`` marks, the same for every member, and
+    for classification normalizes the log-probabilities again. The leaves start at zero, so a fit starts from the
+    network alone, and the thresholds start at the values of random training rows, as in ``ashlar.node``.
+    """
+
+    layer: ObliviousLayer
+    center: jax.Array
+    spread: jax.Array
+    n_numeric: int = field(static=True)
+    n_onehot: int = field(static=True)
+    # ``(position in category_index, vocabulary size including the unknown row)`` for each one-hot copy.
+    views: tuple[tuple[int, int], ...] = field(static=True)
+    moves: tuple[float, ...] = field(static=True)
+    normalize: bool = field(static=True)
+
+    def __init__(self, n_numeric, n_onehot, views, moves, normalize, n_trees: int, depth: int, *, key, sample=None):
+        self.n_numeric, self.n_onehot = int(n_numeric), int(n_onehot)
+        self.views = tuple((int(position), int(size)) for position, size in views)
+        self.moves = tuple(float(move) for move in moves)
+        self.normalize = bool(normalize)
+        width = self.n_numeric + self.n_onehot + sum(size for _, size in self.views)
+        if width < 1:
+            raise ShapeError("soft trees need a numeric column, a one-hot column, or a small categorical column.")
+        if int(n_trees) < 1 or not 1 <= int(depth) <= 10:
+            raise ShapeError("soft trees need at least one tree and a depth from 1 to 10.")
+        logit_key, pick_key = jax.random.split(key)
+        self.center = jnp.zeros((width,), dtype=jnp.float32)
+        self.spread = jnp.ones((width,), dtype=jnp.float32)
+        thresholds = jnp.zeros((int(n_trees), int(depth)), dtype=jnp.float32)
+        if sample is not None:
+            raw = np.asarray(self._raw(*(jnp.asarray(part) for part in sample)), dtype=np.float64)
+            spread = raw.std(axis=0)
+            self.center = jnp.asarray(raw.mean(axis=0), dtype=jnp.float32)
+            self.spread = jnp.asarray(np.where(spread < 1e-6, 1.0, spread), dtype=jnp.float32)
+            scaled = (raw - np.asarray(self.center)) / np.asarray(self.spread)
+            generator = np.random.default_rng(int(np.asarray(jax.random.bits(pick_key))))
+            rows = generator.integers(0, scaled.shape[0], size=(int(n_trees), int(depth)))
+            columns = generator.integers(0, width, size=(int(n_trees), int(depth)))
+            thresholds = jnp.asarray(scaled[rows, columns], dtype=jnp.float32)
+        self.layer = ObliviousLayer(
+            feature_logits=jax.random.uniform(logit_key, (int(n_trees), int(depth), width), dtype=jnp.float32),
+            thresholds=thresholds,
+            raw_scales=jnp.full((int(n_trees), int(depth)), float(np.log(np.expm1(2.0 - 1e-3))), dtype=jnp.float32),
+            leaves=jnp.zeros((int(n_trees), 2 ** int(depth), len(self.moves)), dtype=jnp.float32),
+        )
+
+    def _raw(self, numeric_z, categorical_onehot, category_index):
+        parts = []
+        if self.n_numeric:
+            parts.append(numeric_z.astype(jnp.float32))
+        if self.n_onehot:
+            parts.append(categorical_onehot.astype(jnp.float32))
+        for position, size in self.views:
+            parts.append(jax.nn.one_hot(category_index[:, position], size, dtype=jnp.float32))
+        return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=1)
+
+    def inputs(self, numeric_z, categorical_onehot, category_index):
+        """The trees' standardized inputs, ``(batch, width)``."""
+        raw = self._raw(numeric_z, categorical_onehot, category_index)
+        return (raw - jax.lax.stop_gradient(self.center)) / jax.lax.stop_gradient(self.spread)
+
+    def term(self, numeric_z, categorical_onehot, category_index):
+        """The branch's addition to every member's outputs, ``(batch, outputs)``."""
+        value = jnp.asarray(TREE_GAIN, dtype=jnp.float32) * self.layer(self.inputs(numeric_z, categorical_onehot, category_index))
+        return value * jnp.asarray(self.moves, dtype=value.dtype)
+
+    def __call__(self, outputs, numeric_z, categorical_onehot, category_index):
+        term = self.term(numeric_z, categorical_onehot, category_index).astype(outputs.dtype)
+        if term.shape[0] == outputs.shape[0]:
+            term = term[:, None, :]
+        else:
+            # A training step with a batch per member: the rows are (batch, member) flattened, member fastest.
+            term = term.reshape(outputs.shape[0], outputs.shape[1], term.shape[-1])
+        moved = outputs + term
+        return jax.nn.log_softmax(moved, axis=-1) if self.normalize else moved
+
+
 class _FieldProjection(Module):
     """Project each field chunk to ``d_model``. Chunks keep column identity."""
 

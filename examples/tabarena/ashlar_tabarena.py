@@ -1086,6 +1086,9 @@ AshlarTabMV4GatesModel = _variant(
 AshlarTabMV4GatesWeakModel = _variant(
     AshlarTabMV4Model, "ASRTABMV4GW", "AshlarTabMV4GatesWeak", **_REPLICA, feature_gates=GATE_STRENGTH / 3
 )
+# Max (Nov 5): the entry stays one differentiable model, so the tree rival is 64 soft oblivious trees trained with the
+# network on the raw inputs (library soft_trees), aimed at the tables where CatBoost wins, not a boosted tree beside it.
+AshlarTabMV4TreesModel = _variant(AshlarTabMV4Model, "ASRTABMV4T", "AshlarTabMV4Trees", **_REPLICA, soft_trees=64)
 
 LOCAL_SWEEP_MODELS = {
     "tabm_v4": AshlarTabMV4Model,
@@ -1095,6 +1098,7 @@ LOCAL_SWEEP_MODELS = {
     "tabm_v4_catpairs": AshlarTabMV4CatPairsModel,
     "tabm_v4_gates": AshlarTabMV4GatesModel,
     "tabm_v4_gates_weak": AshlarTabMV4GatesWeakModel,
+    "tabm_v4_trees": AshlarTabMV4TreesModel,
     "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
     "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
     "tabm_v3": AshlarTabMV3Model,

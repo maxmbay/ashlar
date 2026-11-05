@@ -45,6 +45,8 @@ class PredictiveCore(Module):
     embedding_positions: tuple[int, ...] | None = field(static=True, default=None)
     # ``ashlar.layers.FeatureGates``: a learned gate on each field, applied before field dropout.
     gates: Module | None = None
+    # ``ashlar.layers.TreeBranch``: soft oblivious trees on the raw inputs, added to the head's outputs.
+    trees: Module | None = None
 
     def fields(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key=None):
         """The backbone's input, ``(batch, sum(feature_chunks))``: every field, side by side, before field dropout.
@@ -120,6 +122,8 @@ class PredictiveCore(Module):
                 log_probs = (log_probs[0] + self.monotone(numeric_z), *log_probs[1:])
             else:
                 log_probs = log_probs + self.monotone(numeric_z)
+        if self.trees is not None:
+            log_probs = self.trees(log_probs, numeric_z, categorical_onehot, category_index)
         if self.random_effects is not None:
             if not offsets:
                 return log_probs
