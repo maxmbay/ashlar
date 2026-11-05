@@ -656,6 +656,8 @@ class AshlarModel(AbstractModel):
             f"{time.monotonic() - started:.0f}s" + (f", stopped by the {params['time_limit']:.0f}s budget" if stopped else ""),
             flush=True,
         )
+        if getattr(self.model.core_, "trees", None) is not None and validation is not None:
+            self._report_trees(X_val, y_val)
         if self.temperature_scaling and validation is not None and self.problem_type != "regression":
             self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
         if self._pool is not None:
@@ -666,6 +668,30 @@ class AshlarModel(AbstractModel):
                 f"training row; strength {self._pool.strength}",
                 flush=True,
             )
+
+    def _report_trees(self, X_val: pd.DataFrame, y_val: np.ndarray) -> None:
+        """One line per fold model: the validation loss with the soft trees and with their leaves set to zero.
+
+        Zero leaves add nothing to the head's outputs, so the second number is the network alone. A wide gap with
+        no gain over tabm_v4 means the trees took over signal the network finds anyway.
+        """
+        import equinox as eqx
+        import jax.numpy as jnp
+
+        def loss(pred: np.ndarray) -> float:
+            if self.problem_type == "regression":
+                return float(np.sqrt(np.mean((pred[:, 0] - y_val) ** 2)))
+            return float(-np.mean(np.log(np.clip(pred[np.arange(len(y_val)), y_val], 1e-15, None))))
+
+        fitted = self.model.core_
+        with_trees = loss(self._network_prediction(X_val))
+        self.model.core_ = eqx.tree_at(lambda core: core.trees.layer.leaves, fitted, jnp.zeros_like(fitted.trees.layer.leaves))
+        try:
+            without = loss(self._network_prediction(X_val))
+        finally:
+            self.model.core_ = fitted
+        name = "RMSE" if self.problem_type == "regression" else "log loss"
+        print(f"[ashlar] soft trees: validation {name} {with_trees:.4f} with them, {without:.4f} without", flush=True)
 
     def _network_prediction(self, X: pd.DataFrame) -> np.ndarray:
         """The network's prediction on model-ready inputs: (rows, classes) probabilities, or (rows, 1) targets."""
