@@ -89,11 +89,33 @@ def _stat_losses(S: np.ndarray, y: np.ndarray, n_classes: int | None) -> np.ndar
     """
     if not n_classes:
         return (np.asarray(y, dtype=np.float64) - S[:, 0]) ** 2
+    return -np.log(_stat_proba(S)[np.arange(len(y)), np.asarray(y, dtype=np.int64)])
+
+
+def _stat_proba(S: np.ndarray) -> np.ndarray:
+    """A classification statistic in ``_target_matrix``'s layout as (rows, classes) probabilities."""
     rest = np.clip(S, 1e-6, 1.0)
     first = np.clip(1.0 - S.sum(axis=1, keepdims=True), 1e-6, 1.0)
     proba = np.concatenate([first, rest], axis=1)
-    proba /= proba.sum(axis=1, keepdims=True)
-    return -np.log(proba[np.arange(len(y)), np.asarray(y, dtype=np.int64)])
+    return proba / proba.sum(axis=1, keepdims=True)
+
+
+def _additive_losses(Sa, Sb, prior, y, n_classes: int | None, weight: float) -> np.ndarray:
+    """Per-row loss of two statistics combined as if their columns acted on the target independently.
+
+    Each statistic's departure from the prior is scaled by ``weight`` and the two are added: on the log-probability
+    scale for classification (naive Bayes at weight 1, the geometric mean at 0.5), on the target scale otherwise. A
+    network reading both columns finds this combination on its own, so a pair statistic only adds what beats it.
+    """
+    if not n_classes:
+        centre = prior[:, 0]
+        guess = centre + weight * ((Sa[:, 0] - centre) + (Sb[:, 0] - centre))
+        return (np.asarray(y, dtype=np.float64) - guess) ** 2
+    log_prior = np.log(_stat_proba(prior))
+    logits = log_prior + weight * ((np.log(_stat_proba(Sa)) - log_prior) + (np.log(_stat_proba(Sb)) - log_prior))
+    logits -= logits.max(axis=1, keepdims=True)
+    log_q = logits - np.log(np.exp(logits).sum(axis=1, keepdims=True))
+    return -log_q[np.arange(len(y)), np.asarray(y, dtype=np.int64)]
 
 
 class _OutOfFoldFeatures:
@@ -122,6 +144,10 @@ class _OutOfFoldFeatures:
       statistics, and only pairs that lower it at all are kept. A table with
       more than ``CAT_POOL`` such columns first keeps its ``CAT_POOL`` most
       predictive ones, which bounds the candidates at 2,016 pairs.
+      ``cat_pairs_additive`` also makes a pair beat its two columns' statistics
+      added together (``_additive_losses``), which the network finds without
+      the pair, and ``cat_pairs_z`` makes the fall that many standard errors
+      from zero, with the errors clustered by the pair's levels.
     * Neighbour targets (retrieval, as in TabR or the in-context models): the
       mean of each target column over the row's ``k`` nearest training rows
       in the scaled numeric columns.
@@ -146,9 +172,11 @@ class _OutOfFoldFeatures:
         z: float = 1.0,
         screen_singles: bool = True,
         cat_pairs: int = 0,
+        cat_pairs_additive: bool = False,
+        cat_pairs_z: float = 0.0,
     ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
-        self.cat_pairs = cat_pairs
+        self.cat_pairs, self.cat_pairs_additive, self.cat_pairs_z = cat_pairs, cat_pairs_additive, cat_pairs_z
         self.min_levels, self.prior = min_levels, prior
         self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
         self.survey, self.margin, self.z, self.screen_singles = survey, margin, z, screen_singles
@@ -253,26 +281,45 @@ class _OutOfFoldFeatures:
         cols = [col for col, n in levels.items() if n >= 2]
         codes = {col: pd.Index(pd.unique(X[col])).get_indexer(X[col]).astype(np.int64) for col in cols}
 
-        def loss(key):
+        def statistic(key):
             values = np.zeros((len(X), T.shape[1]))
             for train, held in folds:
                 values[held] = self._means(key[train], T[train], key[held])
-            return _stat_losses(values, y, n_classes)
+            return values
 
-        base = _stat_losses(np.broadcast_to(self.prior_mean, T.shape), y, n_classes)
-        own = {col: loss(codes[col]) for col in cols}
+        prior = np.broadcast_to(self.prior_mean, T.shape)
+        base = _stat_losses(prior, y, n_classes)
+        stats = {col: statistic(codes[col]) for col in cols}
+        own = {col: _stat_losses(stats[col], y, n_classes) for col in cols}
         if len(cols) > self.CAT_POOL:
             best = set(sorted(cols, key=lambda col: own[col].mean())[: self.CAT_POOL])
             cols = [col for col in cols if col in best]
-        lifts = {}
+        lifts, plain = {}, 0
         for a, b in combinations(cols, 2):
             if (a, b) in exclude:
                 continue
-            ref = min(own[a], own[b], base, key=np.mean)
-            lifts[(a, b)] = (ref - loss(codes[a] * (codes[b].max() + 1) + codes[b])).mean() / base.mean()
-        kept = sorted((pair for pair, lift in lifts.items() if lift > 0), key=lifts.get, reverse=True)[: self.cat_pairs]
-        best = f"; best {' x '.join(kept[0])} lifts {lifts[kept[0]]:.2%}" if kept else ""
-        print(f"[ashlar] category pairs: kept {len(kept)} of {len(lifts)} candidates{best}", flush=True)
+            key = codes[a] * (codes[b].max() + 1) + codes[b]
+            pair = _stat_losses(statistic(key), y, n_classes)
+            parts = min(own[a], own[b], base, key=np.mean)
+            plain += bool(parts.mean() > pair.mean())
+            refs = [parts]
+            if self.cat_pairs_additive:
+                refs += [_additive_losses(stats[a], stats[b], prior, y, n_classes, w) for w in (0.5, 1.0)]
+            fall = min(refs, key=np.mean) - pair
+            z = 0.0
+            if self.cat_pairs_z:
+                _, level = np.unique(key, return_inverse=True)
+                se = np.sqrt(np.sum(np.bincount(level, weights=fall - fall.mean()) ** 2)) / len(fall)
+                z = fall.mean() / se if se > 0 else 0.0
+            lifts[(a, b)] = (fall.mean() / base.mean(), z)
+        passing = [pair for pair, (lift, z) in lifts.items() if lift > 0 and (not self.cat_pairs_z or z > self.cat_pairs_z)]
+        kept = sorted(passing, key=lambda pair: lifts[pair][0], reverse=True)[: self.cat_pairs]
+        best = ""
+        if kept:
+            best = f"; best {' x '.join(kept[0])} lifts {lifts[kept[0]][0]:.2%}"
+            best += f" (z {lifts[kept[0]][1]:.1f})" if self.cat_pairs_z else ""
+        rule = f" ({plain} beat their parts)" if self.cat_pairs_additive or self.cat_pairs_z else ""
+        print(f"[ashlar] category pairs: kept {len(kept)} of {len(lifts)} candidates{rule}{best}", flush=True)
         return kept
 
     def _codes(self, X):
@@ -435,6 +482,8 @@ class AshlarModel(AbstractModel):
     #: Also add statistics for up to this many pairs of any two categorical columns, ranked by their lift over their
     #: parts (``_OutOfFoldFeatures.cat_pairs``). Needs ``target_stats``.
     target_stats_cat_pairs: int = 0
+    target_stats_cat_pairs_additive: bool = False
+    target_stats_cat_pairs_z: float = 0.0
     #: One-hot categorical columns with at most this many training levels and embed the rest, as RealMLP does with 9
     #: (TabArena's TabM one-hots every column). ``None`` embeds every categorical column, Ashlar's default.
     onehot_max_levels: int | None = None
@@ -592,6 +641,8 @@ class AshlarModel(AbstractModel):
                 z=self.target_stats_survey_z,
                 screen_singles=self.target_stats_survey_singles,
                 cat_pairs=self.target_stats_cat_pairs,
+                cat_pairs_additive=self.target_stats_cat_pairs_additive,
+                cat_pairs_z=self.target_stats_cat_pairs_z,
             )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
@@ -1102,10 +1153,19 @@ AshlarTabMV4BinaryStopModel = _variant(AshlarTabMV4Model, "ASRTABMV4BIN", "Ashla
 AshlarTabMV4BinaryStopModel.stop_on_metric = {"binary": "log_loss", **_ENSEMBLE_STOP}
 AshlarTabMV4MissingModel = _variant(AshlarTabMV4Model, "ASRTABMV4NA", "AshlarTabMV4Missing", **_REPLICA)
 AshlarTabMV4MissingModel.missing_indicators = True
-AshlarTabMV4OneHotModel = _variant(AshlarTabMV4Model, "ASRTABMV4OH", "AshlarTabMV4OneHot9", **_REPLICA)
-AshlarTabMV4OneHotModel.onehot_max_levels = 9
+AshlarTabMV4OneHot9Model = _variant(AshlarTabMV4Model, "ASRTABMV4OH", "AshlarTabMV4OneHot9", **_REPLICA)
+AshlarTabMV4OneHot9Model.onehot_max_levels = 9
 AshlarTabMV4CatPairsModel = _variant(AshlarTabMV4Model, "ASRTABMV4CP", "AshlarTabMV4CatPairs", **_REPLICA)
 AshlarTabMV4CatPairsModel.target_stats_cat_pairs = 64
+# Category pairs won on splice (-7.3%, 60 DNA positions) and lost on four small mixed tables (+2.9% to +7.0%),
+# where the network can combine a few columns itself. So a pair must also beat its two columns added together,
+# by 2 standard errors.
+AshlarTabMV4CatPairsStrictModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4CPS", "AshlarTabMV4CatPairsStrict", **_REPLICA
+)
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs = 64
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs_additive = True
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs_z = 2.0
 AshlarTabMV4GatesModel = _variant(
     AshlarTabMV4Model, "ASRTABMV4G", "AshlarTabMV4Gates", **_REPLICA, feature_gates=GATE_STRENGTH
 )
@@ -1120,8 +1180,9 @@ LOCAL_SWEEP_MODELS = {
     "tabm_v4": AshlarTabMV4Model,
     "tabm_v4_binstop": AshlarTabMV4BinaryStopModel,
     "tabm_v4_missing": AshlarTabMV4MissingModel,
-    "tabm_v4_onehot9": AshlarTabMV4OneHotModel,
+    "tabm_v4_onehot9": AshlarTabMV4OneHot9Model,
     "tabm_v4_catpairs": AshlarTabMV4CatPairsModel,
+    "tabm_v4_catpairs_strict": AshlarTabMV4CatPairsStrictModel,
     "tabm_v4_gates": AshlarTabMV4GatesModel,
     "tabm_v4_gates_weak": AshlarTabMV4GatesWeakModel,
     "tabm_v4_trees": AshlarTabMV4TreesModel,
@@ -1172,3 +1233,8 @@ LOCAL_SWEEP_MODELS = {
     "tabm_gaussian": AshlarTabMGaussianModel,
     "tabm_bs_member": AshlarTabMRipBsMemberModel,
 }
+
+# A bagged fit pickles each model by its class's name, so a class stored under another name fails in every fold.
+_UNREACHABLE = [key for key, cls in LOCAL_SWEEP_MODELS.items() if globals().get(cls.__name__) is not cls]
+if _UNREACHABLE:
+    raise ImportError(f"these LOCAL_SWEEP_MODELS classes are not stored under their own names: {_UNREACHABLE}")
