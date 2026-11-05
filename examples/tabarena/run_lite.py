@@ -5,8 +5,11 @@ Usage (from this folder, in a venv with tabarena[benchmark] and ashlar):
     python run_lite.py --smoke                 # 3 small datasets, defaults only
     python run_lite.py                         # all 51 Lite datasets, defaults only
     python run_lite.py --n-configs 25          # default + 25 random configs (tuned, tuned+ensembled)
+    python run_lite.py --time-limit 21600      # 6 hours per config instead of TabArena's 1 hour
 
 Results are cached under experiments/<expname>, so an interrupted run resumes and a rerun only re-scores.
+Runs with a longer --time-limit than the official hour are not comparable with the leaderboard, so give them
+their own --expname.
 """
 
 from __future__ import annotations
@@ -41,6 +44,9 @@ def main() -> None:
     parser.add_argument("--expname", default="ashlar_lite")
     parser.add_argument("--no-debug", action="store_true", help="Use the Ray backend (parallel folds).")
     parser.add_argument("--keep-going", action="store_true", help="Record a failed job (e.g. over the time limit) and continue.")
+    parser.add_argument(
+        "--time-limit", type=int, default=None, help="Seconds per config across all folds (default: TabArena's 3600)."
+    )
     args = parser.parse_args()
 
     from tabarena.benchmark.experiment import TabArenaV0pt1ExperimentBundle
@@ -53,7 +59,7 @@ def main() -> None:
 
     experiments = TabArenaV0pt1ExperimentBundle(
         models=[(MODELS[name].config_generator(), args.n_configs) for name in args.models],
-    ).build_experiments()
+    ).build_experiments(**({"time_limit": args.time_limit} if args.time_limit else {}))
 
     context = TabArenaContext()
     build_kwargs = {"dataset_names": datasets} if datasets else {}
