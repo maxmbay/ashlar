@@ -528,6 +528,8 @@ class AshlarModel(AbstractModel):
                 and pd.api.types.is_numeric_dtype(X[col].dtype)
                 and X[col].isna().any()
             ]
+            if self.missing_indicators:
+                print(f"[ashlar] missing flags: {len(self._missing_columns)} numeric columns with missing values", flush=True)
         if is_train:
             self._numeric_copies = []
             for col in X.columns if self.numeric_categories else []:
@@ -709,6 +711,9 @@ class AshlarModel(AbstractModel):
         )
         if getattr(self.model.core_, "trees", None) is not None and validation is not None:
             self._report_trees(X_val, y_val)
+        if getattr(self.model.core_, "gates", None) is not None:
+            opened = np.asarray(self.model.core_.gates.open_fields())
+            print(f"[ashlar] feature gates: {int(opened.sum())} of {opened.size} fields open", flush=True)
         if self.temperature_scaling and validation is not None and self.problem_type != "regression":
             self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
         if self._pool is not None:
