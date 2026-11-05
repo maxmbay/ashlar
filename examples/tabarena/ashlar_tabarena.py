@@ -115,6 +115,13 @@ class _OutOfFoldFeatures:
       kind are kept. ``screen_singles=False`` keeps every single column and
       screens only the combinations. Without the survey every candidate is
       kept, in column order, up to ``max_pairs``.
+    * ``cat_pairs`` adds a statistic for up to that many pairs of any two
+      object columns (2+ levels), the way CatBoost combines categories, apart
+      from the pairs above. Each pair is ranked by how much its out-of-fold
+      statistic lowers the loss below the better of its two columns' own
+      statistics, and only pairs that lower it at all are kept. A table with
+      more than ``CAT_POOL`` such columns first keeps its ``CAT_POOL`` most
+      predictive ones, which bounds the candidates at 2,016 pairs.
     * Neighbour targets (retrieval, as in TabR or the in-context models): the
       mean of each target column over the row's ``k`` nearest training rows
       in the scaled numeric columns.
@@ -138,8 +145,10 @@ class _OutOfFoldFeatures:
         margin: float = 0.001,
         z: float = 1.0,
         screen_singles: bool = True,
+        cat_pairs: int = 0,
     ):
         self.target_stats, self.k, self.folds = target_stats, neighbours, folds
+        self.cat_pairs = cat_pairs
         self.min_levels, self.prior = min_levels, prior
         self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
         self.survey, self.margin, self.z, self.screen_singles = survey, margin, z, screen_singles
@@ -162,11 +171,18 @@ class _OutOfFoldFeatures:
         triples = list(combinations(pool, 3)) if self.triples else []
         if not self.survey:
             pairs, triples = pairs[: self.max_pairs], triples[: self.max_pairs]
+        folds = list(KFold(self.folds, shuffle=True, random_state=seed).split(X))
+        cat_pairs = (
+            self._rank_cat_pairs(X, y, T, n_classes, folds, levels, exclude=set(combinations(pool, 2)))
+            if self.cat_pairs and self.target_stats
+            else []
+        )
         # The survey also scores the single columns of the pool, as the parts a pair must beat.
-        scored = list(dict.fromkeys(singles + ([(col,) for col in pool] if self.survey else []) + pairs + triples))
+        scored = list(
+            dict.fromkeys(singles + ([(col,) for col in pool] if self.survey else []) + pairs + triples + cat_pairs)
+        )
         self.levels = {col: pd.Index(pd.unique(X[col])) for col in {c for combo in scored for c in combo}}
         codes = self._codes(X)
-        folds = list(KFold(self.folds, shuffle=True, random_state=seed).split(X))
         oof, keys = {}, {}
         for combo in scored:
             key = keys[combo] = self._key(codes, combo)
@@ -205,7 +221,7 @@ class _OutOfFoldFeatures:
             )
             pairs, triples = kept_pairs, kept_triples
             self.survey_ = lifts
-        self.combos = singles + pairs + triples
+        self.combos = singles + pairs + triples + cat_pairs
         self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
         parts = [oof[combo] for combo in self.combos]
         if self.num_cols:
@@ -226,6 +242,38 @@ class _OutOfFoldFeatures:
         if self.num_cols:
             parts.append(self._neighbours(self.X_, self.T_, X))
         return self._join(X, np.concatenate(parts, axis=1) if parts else np.zeros((len(X), 0)))
+
+    # Columns a table may pair among in ``cat_pairs``: 64 columns make 2,016 candidate pairs.
+    CAT_POOL = 64
+
+    def _rank_cat_pairs(self, X, y, T, n_classes, folds, levels, exclude) -> list[tuple[str, str]]:
+        """The best ``cat_pairs`` pairs of object columns by their lift over their parts (see the class docstring)."""
+        from itertools import combinations
+
+        cols = [col for col, n in levels.items() if n >= 2]
+        codes = {col: pd.Index(pd.unique(X[col])).get_indexer(X[col]).astype(np.int64) for col in cols}
+
+        def loss(key):
+            values = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                values[held] = self._means(key[train], T[train], key[held])
+            return _stat_losses(values, y, n_classes)
+
+        base = _stat_losses(np.broadcast_to(self.prior_mean, T.shape), y, n_classes)
+        own = {col: loss(codes[col]) for col in cols}
+        if len(cols) > self.CAT_POOL:
+            best = set(sorted(cols, key=lambda col: own[col].mean())[: self.CAT_POOL])
+            cols = [col for col in cols if col in best]
+        lifts = {}
+        for a, b in combinations(cols, 2):
+            if (a, b) in exclude:
+                continue
+            ref = min(own[a], own[b], base, key=np.mean)
+            lifts[(a, b)] = (ref - loss(codes[a] * (codes[b].max() + 1) + codes[b])).mean() / base.mean()
+        kept = sorted((pair for pair, lift in lifts.items() if lift > 0), key=lifts.get, reverse=True)[: self.cat_pairs]
+        best = f"; best {' x '.join(kept[0])} lifts {lifts[kept[0]]:.2%}" if kept else ""
+        print(f"[ashlar] category pairs: kept {len(kept)} of {len(lifts)} candidates{best}", flush=True)
+        return kept
 
     def _codes(self, X):
         """Each statistic column as integer codes over the training levels; -1 for a level not seen in training."""
@@ -384,6 +432,12 @@ class AshlarModel(AbstractModel):
     #: Feed the network the statistics instead of the ID-like columns themselves (no embedding for those columns),
     #: as CatBoost does for high-cardinality categoricals. A table keeps its columns if nothing else would be left.
     target_stats_replace: bool = False
+    #: Also add statistics for up to this many pairs of any two categorical columns, ranked by their lift over their
+    #: parts (``_OutOfFoldFeatures.cat_pairs``). Needs ``target_stats``.
+    target_stats_cat_pairs: int = 0
+    #: One-hot categorical columns with at most this many training levels and embed the rest, as RealMLP does with 9
+    #: (TabArena's TabM one-hots every column). ``None`` embeds every categorical column, Ashlar's default.
+    onehot_max_levels: int | None = None
     #: With per-member batches, fall back to shared batches when a network input column has this many levels.
     #: Each member then updates a rare level's shared embedding on its own step, k times per epoch instead of once.
     member_batches_max_levels: int | None = None
@@ -537,6 +591,7 @@ class AshlarModel(AbstractModel):
                 margin=self.target_stats_survey_margin,
                 z=self.target_stats_survey_z,
                 screen_singles=self.target_stats_survey_singles,
+                cat_pairs=self.target_stats_cat_pairs,
             )
             X = self._oof.fit_transform(X, y, n_classes)
             if validation is not None:
@@ -563,6 +618,16 @@ class AshlarModel(AbstractModel):
             if wide:
                 params["share_training_batches"] = True
                 print(f"[ashlar] shared batches: {len(wide)} columns with {max(wide.values())}+ levels", flush=True)
+        if self.onehot_max_levels is not None and "categorical_embeddings" not in params:
+            objects = [col for col in X.columns if X[col].dtype == object]
+            params["categorical_embeddings"] = [
+                col for col in objects if X[col].nunique(dropna=False) > self.onehot_max_levels
+            ]
+            print(
+                f"[ashlar] one-hot {len(objects) - len(params['categorical_embeddings'])} categorical columns, "
+                f"embed {len(params['categorical_embeddings'])}",
+                flush=True,
+            )
         if self.batch_rule and "batch_size" not in params:
             params["batch_size"] = _tabm_batch_size(*X.shape)
         if self.stop_on_metric and self.problem_type in self.stop_on_metric:
@@ -940,6 +1005,10 @@ for _cls in (AshlarTabMV2Model, AshlarTabMV2DupsModel):
 # recipe, ensemble-metric stopping, surveyed pair and triple statistics and duplicate pooling, with per-member batches
 # only when no input column has 100+ levels. nogate keeps per-member batches everywhere (do the statistics rescue
 # Amazon?), and replace feeds the statistics instead of the ID columns, which also lifts the gate.
+# feature_gates strength for the gate rivals, from a synthetic wide table (10 real among 190 noise columns, the v4
+# recipe): 1e-4 cut 1-AUC from .2965 to .2590 with 5 real and 4 noise columns open, and 3e-5 to .2602 with 9 real
+# and 43 noise columns open; 3e-4 kept 3 real columns and gained nothing; 3e-3 shut 9 real columns, 1e-2 all of them.
+GATE_STRENGTH = 1e-4
 _REPLICA = {
     "arch_type": "tabm-mini",
     "d_block": 512,
@@ -996,8 +1065,36 @@ AshlarTabMV4Model.target_stats_replace = True
 AshlarTabMV4Model.duplicate_pooling = True
 AshlarTabMV4Model.member_batches_max_levels = 100
 
+# Rivals to v4 (Nov 5), one hypothesis each from the dev-25 results, each a no-op on tables without its condition.
+# binstop: binary tasks stop on the averaged ensemble's log loss, as multiclass does; 8 of v3's 10 losses to CatBoost
+# are binary, and binary still stops on the mean member loss. missing: 0/1 flags for numeric columns with missing
+# values (TabArena's TabM adds them; 77% of kddcup09's numeric cells are missing). onehot9: one-hot categoricals with
+# 9 or fewer levels; hosted TabM, which one-hots them, beats v3 on six tables that carry their signal there. catpairs:
+# statistics for the 64 best pairs of any categorical columns, as CatBoost combines categories (splice is 11% behind
+# it). gates: a learned gate per input field for wide tables (Bioresponse, kddcup09, NATICUSdroid, splice).
+AshlarTabMV4BinaryStopModel = _variant(AshlarTabMV4Model, "ASRTABMV4BIN", "AshlarTabMV4BinaryStop", **_REPLICA)
+AshlarTabMV4BinaryStopModel.stop_on_metric = {"binary": "log_loss", **_ENSEMBLE_STOP}
+AshlarTabMV4MissingModel = _variant(AshlarTabMV4Model, "ASRTABMV4NA", "AshlarTabMV4Missing", **_REPLICA)
+AshlarTabMV4MissingModel.missing_indicators = True
+AshlarTabMV4OneHotModel = _variant(AshlarTabMV4Model, "ASRTABMV4OH", "AshlarTabMV4OneHot9", **_REPLICA)
+AshlarTabMV4OneHotModel.onehot_max_levels = 9
+AshlarTabMV4CatPairsModel = _variant(AshlarTabMV4Model, "ASRTABMV4CP", "AshlarTabMV4CatPairs", **_REPLICA)
+AshlarTabMV4CatPairsModel.target_stats_cat_pairs = 64
+AshlarTabMV4GatesModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4G", "AshlarTabMV4Gates", **_REPLICA, feature_gates=GATE_STRENGTH
+)
+AshlarTabMV4GatesWeakModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4GW", "AshlarTabMV4GatesWeak", **_REPLICA, feature_gates=GATE_STRENGTH / 3
+)
+
 LOCAL_SWEEP_MODELS = {
     "tabm_v4": AshlarTabMV4Model,
+    "tabm_v4_binstop": AshlarTabMV4BinaryStopModel,
+    "tabm_v4_missing": AshlarTabMV4MissingModel,
+    "tabm_v4_onehot9": AshlarTabMV4OneHotModel,
+    "tabm_v4_catpairs": AshlarTabMV4CatPairsModel,
+    "tabm_v4_gates": AshlarTabMV4GatesModel,
+    "tabm_v4_gates_weak": AshlarTabMV4GatesWeakModel,
     "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
     "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
     "tabm_v3": AshlarTabMV3Model,
