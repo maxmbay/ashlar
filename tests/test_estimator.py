@@ -1384,3 +1384,21 @@ def test_classification_random_effects_pool_groups(n_classes, tmp_path):
     assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
     model.save(tmp_path / "m")
     assert np.allclose(ASRModel.load(tmp_path / "m").predict_proba(X), proba)
+
+
+@pytest.mark.slow
+def test_feature_gates_shut_noise_columns_and_survive_save(tmp_path):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(400, 6))
+    y = 2.0 * x[:, 0] + 0.1 * rng.normal(size=400)
+    plain = ASRModel(task="regression", max_epochs=2, patience=0, **MICRO).fit(x, y)
+    assert plain.feature_gates_ is None and plain.core_.gates is None
+    model = ASRModel(task="regression", feature_gates=0.05, max_epochs=40, patience=0, learning_rate=1e-2, **MICRO)
+    model.fit(x, y)
+    # The signal column stays open and the five noise columns shut.
+    assert model.feature_gates_ == ["x0"]
+    restored = ASRModel.load(model.save(tmp_path / "gated"))
+    assert restored.feature_gates_ == model.feature_gates_
+    assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", feature_gates=-1.0, **MICRO).fit(x, y)

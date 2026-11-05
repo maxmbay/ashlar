@@ -660,6 +660,64 @@ class SetEmbeddings(Module):
         return jnp.concatenate(pieces, axis=-1)
 
 
+# Stochastic gates (Yamada et al. 2020, "Feature selection using stochastic gates"): the spread of the training
+# noise, and where each gate starts.
+GATE_SIGMA = 0.5
+GATE_START = 0.5
+# A gate's location is ``GATE_START + GATE_SPEED * offset``. Adam moves ``offset`` by about one learning rate a
+# step, so a gate can shut in about ``1 / (GATE_SPEED * learning_rate)`` steps, inside the epochs early stopping
+# allows, rather than ``1 / learning_rate``.
+GATE_SPEED = 5.0
+
+
+class FeatureGates(Module):
+    """A learned gate on each input field, pushed shut unless the loss needs that field.
+
+    A training step multiplies each field by ``clip(mu + GATE_SIGMA * noise, 0, 1)``, with fresh normal noise for
+    every row and field. Prediction multiplies by ``clip(mu, 0, 1)``, so a field whose ``mu`` has fallen to 0 or
+    below is shut. ``penalty`` is ``strength`` times the expected number of open gates, ``sum Phi(mu / sigma)``.
+    A field is one numeric column, one one-hot column, one learned embedding or one set, as in ``feature_chunks``.
+    """
+
+    offset: jax.Array
+    chunks: tuple[int, ...] = field(static=True)
+    strength: float = field(static=True)
+
+    def __init__(self, chunks, strength: float):
+        self.chunks = tuple(int(width) for width in chunks)
+        if not self.chunks or min(self.chunks) < 1:
+            raise ShapeError("feature gates need at least one field, each of positive width.")
+        self.strength = float(strength)
+        self.offset = jnp.zeros((len(self.chunks),), dtype=jnp.float32)
+
+    def location(self):
+        """``mu`` of each gate, ``(n_fields,)``."""
+        return GATE_START + GATE_SPEED * self.offset
+
+    def __call__(self, encoded, *, key=None):
+        width = sum(self.chunks)
+        if encoded.ndim != 2 or encoded.shape[1] != width:
+            raise ShapeError(f"feature gates expected (batch, {width}); received {encoded.shape}.")
+        mu = self.location()
+        if key is None:
+            gates = jnp.broadcast_to(jnp.clip(mu, 0.0, 1.0), (encoded.shape[0], len(self.chunks)))
+        else:
+            noise = jax.random.normal(key, (encoded.shape[0], len(self.chunks)), dtype=mu.dtype)
+            gates = jnp.clip(mu + GATE_SIGMA * noise, 0.0, 1.0)
+        scale = jnp.repeat(gates, np.asarray(self.chunks), axis=1, total_repeat_length=width)
+        return encoded * scale.astype(encoded.dtype)
+
+    def penalty(self):
+        """``strength`` times the expected number of open gates on a training step."""
+        from jax.scipy.special import ndtr
+
+        return self.strength * jnp.sum(ndtr(self.location() / GATE_SIGMA))
+
+    def open_fields(self) -> np.ndarray:
+        """Which fields prediction lets through, ``(n_fields,)`` booleans."""
+        return np.asarray(self.location() > 0.0)
+
+
 class _FieldProjection(Module):
     """Project each field chunk to ``d_model``. Chunks keep column identity."""
 

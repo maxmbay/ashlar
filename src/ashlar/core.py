@@ -10,6 +10,9 @@ from ashlar.effects import embed_key
 from ashlar.errors import ShapeError
 from ashlar.layers import CategoricalEmbeddings, LinearReLUEmbeddings, SetEmbeddings
 
+# Folded into a training step's key for the feature gates' noise.
+GATE_KEY = 0x6A7E
+
 
 class PredictiveCore(Module):
     """Backbone and head applied to standardized numbers and encoded categories.
@@ -40,6 +43,8 @@ class PredictiveCore(Module):
     random_effects: Module | None = None
     # The columns of ``category_index`` the learned embeddings read; ``None`` is every column.
     embedding_positions: tuple[int, ...] | None = field(static=True, default=None)
+    # ``ashlar.layers.FeatureGates``: a learned gate on each field, applied before field dropout.
+    gates: Module | None = None
 
     def fields(self, numeric_z, categorical_onehot, category_index, set_tokens, set_mask, *, key=None):
         """The backbone's input, ``(batch, sum(feature_chunks))``: every field, side by side, before field dropout.
@@ -101,6 +106,9 @@ class PredictiveCore(Module):
         else:
             feature_key, backbone_key = jax.random.split(key)
         encoded = self.fields(numeric_z, categorical_onehot, category_index, set_tokens, set_mask, key=key)
+        if self.gates is not None:
+            # Folded in rather than split off, so a core without gates draws exactly the keys it always has.
+            encoded = self.gates(encoded, key=None if key is None else jax.random.fold_in(key, GATE_KEY))
         encoded = drop_features(encoded, self.feature_chunks, self.feature_dropout, feature_key)
         hidden = self.backbone(encoded, key=backbone_key)
         if self.bottleneck is not None:
@@ -128,10 +136,14 @@ class PredictiveCore(Module):
         return jax.nn.log_softmax(log_probs + residual[:, None, :], axis=-1)
 
     def penalty(self):
-        """Terms of the model's own beside the objective, per training row: the random effects' KL divergence."""
-        if self.random_effects is None:
-            return jnp.asarray(0.0, dtype=jnp.float32)
-        return self.random_effects.penalty()
+        """Terms of the model's own beside the objective, per training row: the random effects' KL divergence and
+        the feature gates' expected number of open gates."""
+        total = jnp.asarray(0.0, dtype=jnp.float32)
+        if self.random_effects is not None:
+            total = total + self.random_effects.penalty()
+        if self.gates is not None:
+            total = total + self.gates.penalty()
+        return total
 
 
 def drop_features(encoded, chunks: tuple[int, ...], rate: float, key):

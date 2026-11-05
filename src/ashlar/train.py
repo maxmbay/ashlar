@@ -100,8 +100,8 @@ def _learning_rate_arg(learning_rate, schedule, n_rows, batch_size, max_epochs):
     raise AshlarError("learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'.")
 
 
-# Leaves with a prior of their own in the loss, which weight decay would pull a second time.
-UNDECAYED_FIELDS = frozenset({"random_effects"})
+# Leaves with a prior or penalty of their own in the loss, which weight decay would pull a second time.
+UNDECAYED_FIELDS = frozenset({"random_effects", "gates"})
 
 
 def decay_mask(params):

@@ -15,6 +15,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - `random_effects` on `ASRClassifier`: each class after the first gets a pooled offset on its logit per group, shrunk toward the average group, as a chain's categorical column already did. Useful for high-cardinality ID columns.
 - `early_stopping_metric="roc_auc"` (or `"accuracy"`) picks the checkpoint and stops training on that metric over the whole validation partition, instead of the validation loss.
 - `weight_average=` keeps a running average of the weights at each epoch end and validates, stops, and predicts with it.
+- `feature_gates=` puts a learned gate on each input field (a numeric column, a one-hot column, an embedding or a set) for wide tables where most columns carry no signal. Gates train with noise and pay this penalty for each open gate, as in stochastic gates (Yamada et al., 2020). A gate at or below zero shuts its field at prediction, and `feature_gates_` lists the columns left open.
 
 ### Fixed
 

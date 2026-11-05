@@ -45,6 +45,7 @@ from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
     AdditiveBackbone,
     CategoricalEmbeddings,
+    FeatureGates,
     FeatureTransformer,
     LateBottleneck,
     SOFT_STAGE_SHRINKAGE,
@@ -512,6 +513,13 @@ class ASRModel(BaseEstimator):
     feature_dropout:
         Probability of dropping each input field on a training step. ``0``
         turns it off. Prediction does not drop fields. The default is ``0``.
+    feature_gates:
+        Strength of a learned gate on each input field (stochastic gates,
+        Yamada et al. 2020): the penalty, in units of the training loss per
+        row, for each field a gate keeps open. Gates the loss does not need
+        shut, and prediction then ignores those fields; ``feature_gates_``
+        names the fields left open. Meant for wide tables where most columns
+        are noise. ``0`` (the default) turns the gates off.
     numeric_scaling:
         ``robust`` (default) is median impute, median center, interquartile
         scale, then a smooth clip that saturates at ±3. ``standard`` is
@@ -689,6 +697,7 @@ class ASRModel(BaseEstimator):
         weight_decay: float = 1e-4,
         gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
+        feature_gates: float = 0.0,
         numeric_scaling: str = "robust",
         numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
@@ -740,6 +749,7 @@ class ASRModel(BaseEstimator):
         self.weight_decay = weight_decay
         self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
+        self.feature_gates = feature_gates
         self.numeric_scaling = numeric_scaling
         self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
@@ -818,6 +828,8 @@ class ASRModel(BaseEstimator):
             )
         if not 0.0 <= float(self.feature_dropout) < 1.0:
             raise AshlarError("feature_dropout must be in [0, 1).")
+        if not 0.0 <= float(self.feature_gates) < float("inf"):
+            raise AshlarError("feature_gates must be a finite number of at least 0.")
         if self.numeric_scaling not in NUMERIC_SCALINGS:
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
@@ -2095,7 +2107,19 @@ class ASRModel(BaseEstimator):
             set_length=encoder.set_length,
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
+            gates=FeatureGates(chunks, float(self.feature_gates)) if float(self.feature_gates) > 0.0 else None,
         )
+
+    @property
+    def feature_gates_(self) -> list[str] | None:
+        """The input fields ``feature_gates`` left open, in the core's field order. ``None`` without gates."""
+        if not getattr(self, "is_fitted_", False):
+            raise AttributeError("feature_gates_ is set by fit.")
+        gates = getattr(self.core_, "gates", None)
+        if gates is None:
+            return None
+        names = [name for name, _ in self._core_fields(self.encoder_)]
+        return [name for name, keep in zip(names, gates.open_fields(), strict=True) if keep]
 
     def _core_fields(self, encoder: FeatureEncoder) -> list[tuple[str, int]]:
         """``(column, width)`` of each field the backbone reads, in the core's order (``FeatureEncoder.fields``).
@@ -3950,6 +3974,7 @@ class ASRModel(BaseEstimator):
             "calibration": getattr(self, "calibration_", None),
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
+            "feature_gates": float(self.feature_gates),
             "numeric_scaling": self.numeric_scaling,
             "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
@@ -4028,6 +4053,7 @@ class ASRModel(BaseEstimator):
             gradient_clip=payload.get("gradient_clip"),
             cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
+            feature_gates=payload.get("feature_gates", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],

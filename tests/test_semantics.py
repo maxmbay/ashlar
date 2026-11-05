@@ -151,3 +151,26 @@ def test_feature_dropout_drops_fields_only_while_training():
     assert np.allclose(dropped[:, 1], dropped[:, 2])
     assert np.allclose(dropped[:, 2], dropped[:, 3])
     assert not np.allclose(dropped, encoded)
+
+
+def test_feature_gates_shut_fields_at_or_below_zero_and_draw_noise_only_while_training():
+    import equinox as eqx
+
+    from ashlar.layers import GATE_SIGMA, GATE_SPEED, GATE_START, FeatureGates
+
+    gates = FeatureGates((1, 3), strength=0.1)
+    # Field 0 at mu = -0.1 (shut), field 1 at mu = 0.8 (open, scaled by 0.8 at prediction).
+    offset = (jnp.array([-0.1, 0.8]) - GATE_START) / GATE_SPEED
+    gates = eqx.tree_at(lambda g: g.offset, gates, offset)
+    encoded = jnp.ones((5, 4))
+    predicted = np.asarray(gates(encoded))
+    assert np.allclose(predicted[:, 0], 0.0)
+    assert np.allclose(predicted[:, 1:], 0.8)
+    assert gates.open_fields().tolist() == [False, True]
+    trained = np.asarray(gates(encoded, key=jax.random.PRNGKey(0)))
+    # A training step draws a gate per row and field: a width-3 field shares it, and values stay in [0, 1].
+    assert np.allclose(trained[:, 1], trained[:, 2]) and np.allclose(trained[:, 2], trained[:, 3])
+    assert trained.min() >= 0.0 and trained.max() <= 1.0
+    assert not np.allclose(trained, predicted)
+    expected = 0.1 * (jax.scipy.stats.norm.cdf(-0.1 / GATE_SIGMA) + jax.scipy.stats.norm.cdf(0.8 / GATE_SIGMA))
+    assert np.isclose(float(gates.penalty()), float(expected), rtol=1e-5)
