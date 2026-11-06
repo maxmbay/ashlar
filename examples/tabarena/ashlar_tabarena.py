@@ -20,6 +20,7 @@ see ``_limit_cpus``).
 
 from __future__ import annotations
 
+import itertools
 import os
 import time
 
@@ -428,6 +429,284 @@ class _DuplicatePool:
         return self._blend(pred, n, sums, self.strength)
 
 
+def _mix64(v: np.ndarray) -> np.ndarray:
+    """The splitmix64 finaliser, so that sums of keyed products spread over all 64 bits."""
+    v = v.astype(np.uint64)
+    v ^= v >> np.uint64(30)
+    v *= np.uint64(0xBF58476D1CE4E5B9)
+    v ^= v >> np.uint64(27)
+    v *= np.uint64(0x94D049BB133111EB)
+    v ^= v >> np.uint64(31)
+    return v
+
+
+class _MatchKeys:
+    """Integer keys for partial-match pooling: each numeric column's quantile bin at each resolution (training
+    edges; missing values get their own key), and each object column's training level (unseen levels match nothing)."""
+
+    def __init__(self, X: pd.DataFrame, resolutions: tuple[int, ...] = (4, 16)):
+        self.specs: list[tuple[str, str, object]] = []
+        self.labels: list[str] = []
+        for col in X.columns:
+            if X[col].dtype == object:
+                self.specs.append((col, "level", pd.Index(pd.unique(X[col].astype(str)))))
+                self.labels.append(col)
+                continue
+            values = pd.to_numeric(X[col], errors="coerce").to_numpy(dtype=np.float64)
+            finite = values[np.isfinite(values)]
+            seen = set()
+            for r in resolutions if finite.size else ():
+                edges = np.unique(np.quantile(finite, np.linspace(0, 1, r + 1)[1:-1]))
+                if edges.size == 0 or edges.tobytes() in seen:
+                    continue  # one value only, or the same bins as a coarser resolution
+                seen.add(edges.tobytes())
+                self.specs.append((col, "bins", edges))
+                self.labels.append(f"{col}/q{r}")
+        rng = np.random.default_rng(20261106)
+        self.mult = rng.integers(1, 2**62, size=len(self.specs), dtype=np.int64).astype(np.uint64) | np.uint64(1)
+
+    def transform(self, X: pd.DataFrame) -> np.ndarray:
+        out = np.empty((len(X), len(self.specs)), dtype=np.int64)
+        for j, (col, kind, payload) in enumerate(self.specs):
+            if kind == "level":
+                k = payload.get_indexer(X[col].astype(str))
+                out[:, j] = np.where(k < 0, -2, k)
+            else:
+                v = pd.to_numeric(X[col], errors="coerce").to_numpy(dtype=np.float64)
+                out[:, j] = np.where(np.isfinite(v), np.searchsorted(payload, v, side="right"), -1)
+        return out
+
+    def hash(self, keys: np.ndarray, subset) -> np.ndarray:
+        """One 64-bit hash per row of its keys on ``subset``, so rows that agree on all of them share it."""
+        h = np.zeros(len(keys), dtype=np.uint64)
+        for j in subset:
+            h += (keys[:, j] + 3).astype(np.uint64) * self.mult[j]
+        return _mix64(h)
+
+
+def _pmp_predict(params, base, stacks):
+    """base + sum over kernels of gamma * sum_S A_S G_S / (lambda + sum_S A_S H_S), with A_S = prod_{c in S} a_c."""
+    import jax
+    import jax.numpy as jnp
+
+    z = base
+    for p, (G, H, mask) in zip(params, stacks):
+        a = jax.nn.softplus(p["theta"])
+        A = jnp.exp(mask @ jnp.log(a + 1e-12))[:, None, None]
+        z = z + p["gamma"] * (A * G).sum(0) / (jnp.exp(p["log_lam"]) + (A * H).sum(0))
+    return z
+
+
+_PMP_STEPS: dict = {}
+
+
+def _pmp_step(classification: bool):
+    """A jitted Adam step on the validation loss of the corrected prediction, one per task kind."""
+    if classification not in _PMP_STEPS:
+        import jax
+        import optax
+
+        opt = optax.adam(0.05)
+
+        def loss(params, base, stacks, target):
+            z = _pmp_predict(params, base, stacks)
+            if classification:
+                return -(target * jax.nn.log_softmax(z, axis=1)).sum(1).mean()
+            return ((target - z) ** 2).mean()
+
+        @jax.jit
+        def step(params, state, base, stacks, target):
+            value, grads = jax.value_and_grad(loss)(params, base, stacks, target)
+            updates, state = opt.update(grads, state, params)
+            return optax.apply_updates(params, updates), state, value
+
+        _PMP_STEPS[classification] = (opt, step, jax.jit(loss))
+    return _PMP_STEPS[classification]
+
+
+class _PartialMatchPool:
+    """Partial-match pooling: ``_DuplicatePool`` with a learned match in place of an exact one.
+
+    A kernel over a few keys (``_MatchKeys``), ``w(q, r) = prod_c (1 + a_c [key_c(q) = key_c(r)]) - 1``, weights
+    each training row by the keys it shares with the query. Expanded, it is a weighted sum over every nonempty subset
+    S of the kernel's keys of the training rows that match the query on all of S, with weight ``prod_{c in S} a_c``:
+    a soft leaf that backs off from the full conjunction to its parts. The correction is a Newton step on the network's
+    training gradients g and Hessians h (``y - p`` and ``p (1 - p)`` per class on the log-probabilities, or ``y - f``
+    and 1 for regression), ``gamma * sum_r w g / (lambda + sum_r w h)``, the leaf value of a boosted tree, and the
+    kernels add up. Every sum comes from per-subset group tables of g and h, which do not depend on a, so a, lambda
+    and gamma are fitted exactly by gradient descent on the validation fold, whose rows never see their own labels.
+    Kernels grow greedily: a new kernel from one key or a pair of keys (so a pure interaction is found), or one more
+    key in a kernel. A step is kept only if it lowers the validation loss by ``z_min`` standard errors of the per-row
+    differences. With one kernel over every column and a large a, it is exact duplicate pooling.
+    """
+
+    def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, pred: np.ndarray):
+        self.keys = _MatchKeys(X)
+        self.n_classes = n_classes
+        self._train = self.keys.transform(X)
+        pred = np.asarray(pred, dtype=np.float64)
+        if n_classes:
+            P = np.clip(pred, 1e-6, 1.0)
+            P /= P.sum(1, keepdims=True)
+            self._g = np.eye(n_classes)[np.asarray(y, dtype=np.int64)] - P
+            self._h = P * (1.0 - P)
+        else:
+            self._g = (np.asarray(y, dtype=np.float64) - pred[:, 0])[:, None]
+            self._h = np.ones_like(self._g)
+        self.tables: dict = {}
+        self.kernels: list[list[int]] = []
+        self.params: list[dict] = []
+        self.report = "off"
+
+    def _table(self, S, keep: bool):
+        S = tuple(sorted(S))
+        if S in self.tables:
+            return self.tables[S]
+        codes, uniques = pd.factorize(self.keys.hash(self._train, S))
+        G = np.stack([np.bincount(codes, weights=self._g[:, c], minlength=len(uniques)) for c in range(self._g.shape[1])], 1)
+        H = np.stack([np.bincount(codes, weights=self._h[:, c], minlength=len(uniques)) for c in range(self._h.shape[1])], 1)
+        table = (pd.Index(uniques), G.astype(np.float32), H.astype(np.float32))
+        if keep:
+            self.tables[S] = table
+        return table
+
+    def _lookup(self, S, keys: np.ndarray, keep: bool = True):
+        index, G, H = self._table(S, keep)
+        pos = index.get_indexer(self.keys.hash(keys, tuple(sorted(S))))
+        found = (pos >= 0)[:, None]
+        pos = np.maximum(pos, 0)
+        return np.where(found, G[pos], 0.0), np.where(found, H[pos], 0.0)
+
+    def _stack(self, kernel, keys):
+        subsets = [S for r in range(1, len(kernel) + 1) for S in itertools.combinations(range(len(kernel)), r)]
+        Gs, Hs = zip(*(self._lookup([kernel[j] for j in S], keys) for S in subsets))
+        mask = np.zeros((len(subsets), len(kernel)), dtype=np.float32)
+        for i, S in enumerate(subsets):
+            mask[i, list(S)] = 1.0
+        return np.stack(Gs).astype(np.float32), np.stack(Hs).astype(np.float32), mask
+
+    def _base(self, pred):
+        pred = np.asarray(pred, dtype=np.float64)
+        return np.log(np.clip(pred, 1e-6, 1.0)) if self.n_classes else pred
+
+    def _rows(self, z, target):
+        if self.n_classes:
+            z = z - z.max(1, keepdims=True)
+            return -((z - np.log(np.exp(z).sum(1, keepdims=True))) * target).sum(1)
+        return (target[:, 0] - z[:, 0]) ** 2
+
+    def _fit(self, kernels, init, base, target, keys, steps):
+        import jax.numpy as jnp
+
+        opt, step, loss = _pmp_step(bool(self.n_classes))
+        stacks = [tuple(jnp.asarray(v) for v in self._stack(k, keys)) for k in kernels]
+        base, target = jnp.asarray(base, jnp.float32), jnp.asarray(target, jnp.float32)
+        params, state = init, opt.init(init)
+        for _ in range(steps):
+            params, state, _ = step(params, state, base, stacks, target)
+        return params, float(loss(params, base, stacks, target)), stacks
+
+    def _needed(self, kernels):
+        return {tuple(sorted(k[j] for j in S)) for k in kernels for r in range(1, len(k) + 1) for S in itertools.combinations(range(len(k)), r)}
+
+    def choose(self, X_val, y_val, pred_val, max_kernels=4, max_keys=4, max_steps=8, n_single=24, n_pair=24, n_add=12,
+               z_min=2.0, max_seconds=300.0):
+        import jax.numpy as jnp
+
+        started = time.monotonic()
+        keys = self.keys.transform(X_val)
+        base = self._base(pred_val)
+        target = np.eye(self.n_classes)[np.asarray(y_val, dtype=np.int64)] if self.n_classes else np.asarray(y_val, dtype=np.float64)[:, None]
+        lam0 = 2.0 if self.n_classes else 10.0
+
+        def fresh(k):
+            return {"theta": jnp.full((k,), np.log(np.expm1(1.0)), jnp.float32), "log_lam": jnp.float32(np.log(lam0)), "gamma": jnp.float32(1.0)}
+
+        cur_z, before = base.copy(), self._rows(base, target)
+        cur_rows = before
+
+        def screen(S):
+            g, h = self._lookup(S, keys, keep=False)
+            return self._rows(cur_z + g / (lam0 + h), target).mean()
+
+        n_keys = len(self.keys.specs)
+        for _ in range(max_steps if n_keys else 0):
+            if time.monotonic() - started > max_seconds:
+                break
+            single = np.array([screen((c,)) for c in range(n_keys)])
+            ranked = list(np.argsort(single))
+            top, pool = ranked[:n_single], ranked[: 2 * n_single]
+            pairs = [(a, b) for i, a in enumerate(top) for b in pool if b != a and (b not in top or top.index(b) > i)]
+            pair_scores = np.array([screen(pr) for pr in pairs]) if pairs else np.zeros(0)
+            moves = []
+            have = {frozenset(k) for k in self.kernels}
+            if len(self.kernels) < max_kernels:
+                moves += [[int(c)] for c in top[:n_add]] + [[int(v) for v in pairs[i]] for i in np.argsort(pair_scores)[:n_pair]]
+                moves = [mv for mv in moves if frozenset(mv) not in have]
+            grow = [
+                (j, int(c))
+                for j, k in enumerate(self.kernels)
+                if len(k) < max_keys
+                for c in top[:n_add]
+                if c not in k and frozenset(k + [int(c)]) not in have
+            ]
+            best = None
+            for mv in moves + grow:
+                if isinstance(mv, list):
+                    trial, init = self.kernels + [mv], self.params + [fresh(len(mv))]
+                else:
+                    j, c = mv
+                    trial = [k + [c] if i == j else k for i, k in enumerate(self.kernels)]
+                    init = [
+                        {**p, "theta": jnp.concatenate([p["theta"], jnp.full((1,), np.log(np.expm1(1.0)), jnp.float32)])} if i == j else p
+                        for i, p in enumerate(self.params)
+                    ]
+                params, value, _ = self._fit(trial, init, base, target, keys, steps=60)
+                if best is None or value < best[0]:
+                    best = (value, trial, params)
+                if time.monotonic() - started > max_seconds:
+                    break
+            if best is None:
+                break
+            _, trial, params = best
+            params, _, stacks = self._fit(trial, params, base, target, keys, steps=500)
+            z = np.asarray(_pmp_predict(params, jnp.asarray(base, jnp.float32), stacks), dtype=np.float64)
+            rows = self._rows(z, target)
+            d = cur_rows - rows
+            if d.mean() / (d.std(ddof=1) / np.sqrt(len(d)) + 1e-12) < z_min:
+                break
+            self.kernels, self.params, cur_z, cur_rows = trial, params, z, rows
+            # Keep only the accepted kernels' tables between steps, so the trial moves do not pile up memory.
+            needed = self._needed(self.kernels)
+            self.tables = {S: t for S, t in self.tables.items() if S in needed}
+        needed = self._needed(self.kernels)
+        self.tables = {S: t for S, t in self.tables.items() if S in needed}
+        self.params = [{name: np.asarray(v) for name, v in p.items()} for p in self.params]
+        del self._train, self._g, self._h
+        names = [[self.keys.labels[c] for c in k] for k in self.kernels]
+        self.report = (
+            f"kernels {names}, validation loss {before.mean():.5f} -> {cur_rows.mean():.5f}"
+            if self.kernels
+            else f"nothing kept (validation loss {before.mean():.5f})"
+        )
+        return bool(self.kernels)
+
+    def apply(self, X: pd.DataFrame, pred: np.ndarray) -> np.ndarray:
+        if not self.kernels:
+            return pred
+        import jax.numpy as jnp
+
+        keys = self.keys.transform(X)
+        stacks = [tuple(jnp.asarray(v) for v in self._stack(k, keys)) for k in self.kernels]
+        params = [{name: jnp.asarray(v) for name, v in p.items()} for p in self.params]
+        z = np.asarray(_pmp_predict(params, jnp.asarray(self._base(pred), jnp.float32), stacks), dtype=np.float64)
+        if not self.n_classes:
+            return z
+        z -= z.max(1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(1, keepdims=True)
+
+
 # Flat hyperparameters the search space samples; they go into backbone_kwargs.
 _BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k", "arch_type")
 
@@ -496,6 +775,9 @@ class AshlarModel(AbstractModel):
     #: Pool rows that exactly repeat training rows toward the repeats' labels (see ``_DuplicatePool``).
     duplicate_pooling: bool = False
     _pool: _DuplicatePool | None = None
+    #: After training, correct the network with a learned match over binned columns (see ``_PartialMatchPool``).
+    partial_match_pooling: bool = False
+    _pmp: _PartialMatchPool | None = None
     #: Give every categorical column whose 3 to ``numeric_categories_max_levels`` levels all read as numbers a
     #: numeric copy, ``<column>__num``, so the network can order and interpolate them. The category stays.
     numeric_categories: bool = False
@@ -624,7 +906,7 @@ class AshlarModel(AbstractModel):
             validation = (X_val, y_val)
         n_classes = None if self.problem_type == "regression" else int(self.num_classes)
         self._pool = _DuplicatePool(X, y, n_classes) if self.duplicate_pooling and validation is not None else None
-        raw_val = X_val
+        raw_train, raw_val = X, X_val
         X = self._level_features(X, is_train=True)
         if validation is not None:
             X_val = self._level_features(X_val)
@@ -724,6 +1006,17 @@ class AshlarModel(AbstractModel):
                 f"training row; strength {self._pool.strength}",
                 flush=True,
             )
+        self._pmp = None
+        if self.partial_match_pooling and validation is not None:
+            started = time.monotonic()
+            pmp = _PartialMatchPool(raw_train, y, n_classes, self._network_prediction(X))
+            pred_val = self._network_prediction(X_val)
+            if self._pool is not None:
+                pred_val = self._pool.apply(raw_val, pred_val)
+            budget = 300.0 if time_limit is None else max(30.0, 0.08 * float(time_limit))
+            if pmp.choose(raw_val, y_val, pred_val, max_seconds=budget):
+                self._pmp = pmp
+            print(f"[ashlar] partial-match pooling: {pmp.report}, {time.monotonic() - started:.0f}s", flush=True)
 
     def _report_trees(self, X_val: pd.DataFrame, y_val: np.ndarray) -> None:
         """One line per fold model: the validation loss with the soft trees and with their leaves set to zero.
@@ -767,6 +1060,8 @@ class AshlarModel(AbstractModel):
         pred = self._network_prediction(X)
         if getattr(self, "_pool", None) is not None:
             pred = self._pool.apply(raw, pred)
+        if getattr(self, "_pmp", None) is not None:
+            pred = self._pmp.apply(raw, pred)
         if self.problem_type == "regression":
             return pred[:, 0].astype(np.float32)
         return self._convert_proba_to_unified_form(pred.astype(np.float32))
@@ -1188,8 +1483,17 @@ AshlarTabMV4TreesDropModel = _variant(
     AshlarTabMV4Model, "ASRTABMV4TD", "AshlarTabMV4TreesDrop", **_REPLICA, soft_trees=64, soft_trees_dropout=0.5
 )
 
+# Nov 6: partial-match pooling. v4's two best parts are label memories over groups of rows (ID-pair statistics and
+# exact-duplicate pooling), and the trees that beat it predict from groups too: a leaf is a conjunction of bins. This
+# corrects the trained network with a learned conjunction kernel over binned columns, fitted on the validation fold
+# (see _PartialMatchPool); a synthetic table of pair effects among 20-60 level categoricals went from 1-AUC .346
+# (v4 recipe) and .349 (LightGBM) to .225.
+AshlarTabMV4PartialPoolModel = _variant(AshlarTabMV4Model, "ASRTABMV4PMP", "AshlarTabMV4PartialPool", **_REPLICA)
+AshlarTabMV4PartialPoolModel.partial_match_pooling = True
+
 LOCAL_SWEEP_MODELS = {
     "tabm_v4": AshlarTabMV4Model,
+    "tabm_v4_pmp": AshlarTabMV4PartialPoolModel,
     "tabm_v4_binstop": AshlarTabMV4BinaryStopModel,
     "tabm_v4_missing": AshlarTabMV4MissingModel,
     "tabm_v4_onehot9": AshlarTabMV4OneHot9Model,
