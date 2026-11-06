@@ -53,15 +53,47 @@ def regression_objective(raw, y, sample_weight):
 
 
 def classification_objective(raw, y, sample_weight):
-    """Mean member cross-entropy. ``raw`` is ``(batch, member, class)`` and ``y`` is class indices."""
+    """Mean member cross-entropy. ``raw`` is ``(batch, member, class)`` and ``y`` is class indices.
+
+    ``y`` shaped ``(batch, member)``, with ``sample_weight`` the same shape, is
+    the unshared-batch case: each member has its own rows.
+    """
     if raw.ndim != 3:
         raise ShapeError(f"logits must have shape (batch, member, class); received {raw.shape}.")
+    if y.ndim == 2 and y.shape == raw.shape[:2]:
+        log_prob = jax_log_softmax(raw)
+        chosen = jnp.take_along_axis(log_prob, y.astype(jnp.int32)[..., None], axis=-1)[..., 0]
+        sample_weight = jnp.asarray(sample_weight)
+        if sample_weight.ndim == 1:
+            return weighted_mean(-jnp.mean(chosen, axis=1), sample_weight)
+        return weighted_mean(-chosen.reshape(-1), sample_weight.reshape(-1))
     if y.ndim != 1:
-        raise ShapeError(f"classification y must have shape (batch,); received {y.shape}.")
+        raise ShapeError(f"classification y must have shape (batch,) or (batch, member); received {y.shape}.")
     log_prob = jax_log_softmax(raw)
     index = y.astype(jnp.int32)[:, None, None]
     chosen = jnp.take_along_axis(log_prob, index, axis=-1)[..., 0]
     return weighted_mean(-jnp.mean(chosen, axis=1), sample_weight)
+
+
+def make_smoothed_classification_objective(smoothing: float):
+    """Member cross-entropy against labels with ``smoothing`` of their mass spread evenly over the classes."""
+
+    def objective(raw, y, sample_weight):
+        if raw.ndim != 3:
+            raise ShapeError(f"logits must have shape (batch, member, class); received {raw.shape}.")
+        log_prob = jax_log_softmax(raw)
+        index = y.astype(jnp.int32)
+        index = index[:, None, None] if index.ndim == 1 else index[..., None]
+        chosen = jnp.take_along_axis(log_prob, index, axis=-1)[..., 0]
+        per_member = -(1.0 - smoothing) * chosen - smoothing * jnp.mean(log_prob, axis=-1)
+        sample_weight = jnp.asarray(sample_weight)
+        if y.ndim == 2:
+            if sample_weight.ndim == 1:
+                return weighted_mean(jnp.mean(per_member, axis=1), sample_weight)
+            return weighted_mean(per_member.reshape(-1), sample_weight.reshape(-1))
+        return weighted_mean(jnp.mean(per_member, axis=1), sample_weight)
+
+    return objective
 
 
 def make_candidate_objective(task: str):

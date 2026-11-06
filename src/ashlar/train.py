@@ -12,6 +12,8 @@ validation loss uses the same formula on the whole validation partition.
 
 from __future__ import annotations
 
+import time
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -98,8 +100,9 @@ def _learning_rate_arg(learning_rate, schedule, n_rows, batch_size, max_epochs):
     raise AshlarError("learning_rate_schedule must be 'constant', 'linear', 'cosine', or 'surface'.")
 
 
-# Leaves with a prior of their own in the loss, which weight decay would pull a second time.
-UNDECAYED_FIELDS = frozenset({"random_effects"})
+# Leaves with a prior or penalty of their own in the loss, which weight decay would pull a second time, and the
+# soft trees, whose thresholds and split scales are positions rather than weights.
+UNDECAYED_FIELDS = frozenset({"random_effects", "gates", "trees"})
 
 
 def decay_mask(params):
@@ -209,6 +212,25 @@ def _pad(array, length):
     return jnp.concatenate([array, zeros], axis=0)
 
 
+def _average_weights(average, core, decay: float | None):
+    """Epoch-end running average of ``core``'s float arrays: ``decay * average + (1 - decay) * core``.
+
+    ``None`` decay, or no average yet, returns ``core`` itself. Integer arrays and static fields come from ``core``.
+    """
+    if decay is None or average is None:
+        return core
+    avg_params, _ = eqx_partition(average, is_array)
+    new_params, static = eqx_partition(core, is_array)
+
+    def blend(old, new):
+        if old is None or not jnp.issubdtype(new.dtype, jnp.floating):
+            return new
+        return decay * old + (1.0 - decay) * new
+
+    blended = jax.tree_util.tree_map(blend, avg_params, new_params, is_leaf=lambda leaf: leaf is None)
+    return eqx_combine(blended, static)
+
+
 def fit_loop(
     core,
     numeric_z,
@@ -233,8 +255,20 @@ def fit_loop(
     share_training_batches: bool = True,
     gradient_clip: float | None = None,
     units=None,
+    weight_average: float | None = None,
+    validation_score=None,
+    deadline: float | None = None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
+
+    ``validation_score(core)`` (higher is better) picks the checkpoint and
+    drives early stopping instead of the validation loss, for a metric that
+    is not a per-row mean, such as ROC AUC. It overrides ``score_fn``.
+
+    ``weight_average`` (a decay in ``[0, 1)``) keeps an epoch-end running
+    average of the weights; validation, early stopping, and the returned
+    checkpoint then use the averaged model. The returned optimizer state
+    belongs to the raw weights of that epoch.
 
     The optimizer is AdamW. ``learning_rate_schedule='linear'`` only replaces
     the scalar rate with a linear decay to zero. ``surface`` warms up at
@@ -328,6 +362,9 @@ def fit_loop(
             validation=validation,
             score_fn=score_fn,
             units=units,
+            weight_average=weight_average,
+            validation_score=validation_score,
+            deadline=deadline,
         )
     history = {"train_loss": [], "val_loss": []}
     best_core = core
@@ -339,6 +376,7 @@ def fit_loop(
     warmup_limit = min(20, steps_per_epoch) if surface else 0
     warmup_seen = 0
     surface_ready = not surface
+    averaged = None
 
     for epoch in range(max_epochs):
         epoch_key = jax.random.fold_in(key, epoch)
@@ -416,19 +454,22 @@ def fit_loop(
         if not train_losses:
             raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
         history["train_loss"].append(float(np_mean(train_losses)))
+        averaged = _average_weights(averaged, core, weight_average) if averaged is not None else core
         if validation is None:
-            best_core, best_state = core, opt_state
+            best_core, best_state = averaged, opt_state
+            if _past(deadline):
+                break
             continue
-        val_loss = float(evaluate(core, *validation))
+        val_loss = float(evaluate(averaged, *validation))
         if val_loss != val_loss:
             raise WeightError("validation loss is not finite.")
         history["val_loss"].append(val_loss)
-        if score_fn is None:
+        if score_fn is None and validation_score is None:
             improved = best_val is None or val_loss < best_val
             if improved:
                 best_val = val_loss
         else:
-            metric = float(score_fn(core, *validation))
+            metric = float(validation_score(averaged)) if validation_score is not None else float(score_fn(averaged, *validation))
             if metric != metric:
                 raise WeightError("validation score is not finite.")
             history.setdefault("val_score", []).append(metric)
@@ -436,15 +477,22 @@ def fit_loop(
             if improved:
                 best_score = metric
         if improved:
-            best_core, best_state = core, opt_state
+            best_core, best_state = averaged, opt_state
             stale = 0
         else:
             stale += 1
             if patience > 0 and stale >= patience:
                 break
+        if _past(deadline):
+            break
     if surface and not surface_ready:
         raise WeightError("the surface schedule finished before its warmup, so no learning rate was set.")
     return best_core, best_state, history
+
+
+def _past(deadline: float | None) -> bool:
+    """Whether the wall-clock budget (a ``time.monotonic()`` deadline) has run out."""
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def np_mean(values: list[float]) -> float:
@@ -528,6 +576,9 @@ def _fit_scanned(
     validation,
     score_fn,
     units=None,
+    weight_average: float | None = None,
+    validation_score=None,
+    deadline: float | None = None,
 ):
     """Shared-minibatch training with one compiled scan per epoch.
 
@@ -626,20 +677,26 @@ def _fit_scanned(
         if not np.isfinite(seen).all():
             raise WeightError("training loss is not finite. Check targets, weights, and the learning rate.")
         history["train_loss"].append(float(seen.mean()))
-        core = eqx_combine(params, static)
+        raw_core = eqx_combine(params, static)
+        core = raw_core if epoch == 0 else _average_weights(core, raw_core, weight_average)
         if validation is None:
             best_core, best_state = core, opt_state
+            if _past(deadline):
+                break
             continue
         val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1], eval_rows)
         if val_loss != val_loss:
             raise WeightError("validation loss is not finite.")
         history["val_loss"].append(val_loss)
-        if score_fn is None:
+        if score_fn is None and validation_score is None:
             improved = best_val is None or val_loss < best_val
             if improved:
                 best_val = val_loss
         else:
-            metric = chunked_weighted(lambda *chunk: score_fn(core, *chunk), validation, validation[-1])
+            if validation_score is not None:
+                metric = float(validation_score(core))
+            else:
+                metric = chunked_weighted(lambda *chunk: score_fn(core, *chunk), validation, validation[-1])
             if metric != metric:
                 raise WeightError("validation score is not finite.")
             history.setdefault("val_score", []).append(metric)
@@ -653,4 +710,6 @@ def _fit_scanned(
             stale += 1
             if patience > 0 and stale >= patience:
                 break
+        if _past(deadline):
+            break
     return best_core, best_state, history

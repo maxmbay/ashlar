@@ -2,6 +2,26 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Added
+
+- `backbone_kwargs={"arch_type": "tabm-mini"}` on `backbone="tabm"`: TabM's minimal architecture, as TabArena runs it. Each member scales the input once and the rest of the trunk is shared, instead of every layer carrying per-member scalings.
+- `time_limit`: a wall-clock budget in seconds for `fit`. Training stops at the first epoch end past it and keeps the best checkpoint.
+- `early_stopping_metric="log_loss"` (classification) and `"rmse"` (regression) stop on the averaged ensemble's prediction, the way TabM is scored, instead of the mean member loss.
+- `label_smoothing=` for classification.
+- `num_embedding_bin_method="tree"` places piecewise embedding bins at decision-tree splits on the target instead of at quantiles.
+- `share_training_batches=False` (each TabM member draws its own minibatches) now works for classification as well as regression.
+- `random_effects` on `ASRClassifier`: each class after the first gets a pooled offset on its logit per group, shrunk toward the average group, as a chain's categorical column already did. Useful for high-cardinality ID columns.
+- `early_stopping_metric="roc_auc"` (or `"accuracy"`) picks the checkpoint and stops training on that metric over the whole validation partition, instead of the validation loss.
+- `weight_average=` keeps a running average of the weights at each epoch end and validates, stops, and predicts with it.
+- `feature_gates=` puts a learned gate on each input field (a numeric column, a one-hot column, an embedding or a set) for wide tables where most columns carry no signal. Gates train with noise and pay this penalty for each open gate, as in stochastic gates (Yamada et al., 2020). A gate at or below zero shuts its field at prediction, and `feature_gates_` lists the columns left open.
+- `soft_trees=` adds that many soft oblivious decision trees (the `ASRObliviousEnsemble` layer, depth 6) beside the network. They train with it end to end and add to the head's outputs, for classification and the tasks with a location. The trees read the raw inputs (scaled numbers, one-hot columns, and categorical columns with up to 16 levels), so they split them as a gradient-boosted tree would. `soft_trees_dropout=` (default 0.5) leaves the trees out for that share of training rows, so the network still learns to predict them alone; without it the trees can fit the training rows first and leave the network nothing to learn.
+
+### Fixed
+
+- A table with only categorical columns no longer raises on the default `num_embeddings` or on `numeric_scaling="quantile"`. Both have nothing to act on there and are skipped; the categorical columns are still embedded. Saving and loading such a model works too.
+
 ## 0.0.5 — 2026-11-03
 
 ### Added

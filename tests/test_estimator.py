@@ -20,7 +20,7 @@ from ashlar import ASRClassifier, ASROrdinalClassifier
 from ashlar.recipes import CLASSIFIER_RECIPE, DEFAULT_RECIPE, ORDINAL_RECIPE, TABM_PAPER, tabm
 from ashlar.train import surface_learning_rate
 from ashlar.search import DEFAULT_SEARCH
-from micro import MICRO
+from micro import MICRO, MICRO_TABM
 
 
 def _regression(task="regression", **kwargs):
@@ -542,8 +542,9 @@ def test_classification_tabm_shares_batches_and_skips_the_label_scale():
     assert tabm().standardize_target is True
     assert tabm(task="classification", numeric_scaling="quantile_tabr").numeric_scaling == "quantile_tabr"
     assert tabm(task="classification", prediction_policy="mean_logits").prediction_policy == "mean_logits"
+    tabm(task="classification", share_training_batches=False)._check_config()
     with pytest.raises(AshlarError, match="share_training_batches"):
-        tabm(task="classification", share_training_batches=False)._check_config()
+        tabm(task="ordinal", share_training_batches=False)._check_config()
     with pytest.raises(AshlarError, match="standardize_target"):
         tabm(task="classification", standardize_target=True)._check_config()
 
@@ -607,6 +608,80 @@ def test_unshared_member_targets_and_a_small_tabm_fit():
     pred = np.asarray(model.predict(x[:2]))
     assert pred.shape == (2,)
     assert np.isfinite(pred).all()
+
+
+def test_label_smoothing_and_log_loss_stopping(tmp_path):
+    import jax.numpy as jnp
+
+    from ashlar import ASRClassifier
+    from ashlar.objectives import classification_objective, make_smoothed_classification_objective
+
+    raw = jnp.array([[[4.0, 0.0, -1.0]], [[0.0, 2.0, 0.0]]])
+    y = jnp.array([0, 1])
+    w = jnp.ones(2)
+    assert float(make_smoothed_classification_objective(0.0)(raw, y, w)) == pytest.approx(float(classification_objective(raw, y, w)))
+    assert float(make_smoothed_classification_objective(0.2)(raw, y, w)) > float(classification_objective(raw, y, w))
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(64, 2))
+    labels = (X[:, 0] > 0).astype(int) + (X[:, 1] > 0.5)
+    model = ASRClassifier(max_epochs=3, batch_size=16, label_smoothing=0.1, early_stopping_metric="log_loss").fit(X, labels)
+    assert all(score <= 0 for score in model.history_["val_score"])
+    model.save(tmp_path / "m")
+    loaded = ASRModel.load(tmp_path / "m")
+    assert loaded.label_smoothing == 0.1 and loaded.early_stopping_metric == "log_loss"
+    assert np.allclose(loaded.predict_proba(X[:4]), model.predict_proba(X[:4]))
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", label_smoothing=0.1).fit(X, X[:, 0])
+
+    from ashlar import ASRRegressor
+
+    reg = ASRRegressor(max_epochs=3, batch_size=16, early_stopping_metric="rmse").fit(X, X[:, 0])
+    assert len(reg.history_["val_score"]) == 3 and all(score <= 0 for score in reg.history_["val_score"])
+    with pytest.raises(AshlarError):
+        ASRClassifier(early_stopping_metric="rmse").fit(X, labels)
+
+
+def test_tree_bins_follow_the_target(tmp_path):
+    from ashlar import ASRRegressor
+    from ashlar.layers import tree_edges
+
+    rng = np.random.default_rng(6)
+    x = rng.uniform(-1, 1, size=(400, 1))
+    y = (x[:, 0] > 0.3).astype(float)
+    edges = np.asarray(tree_edges(x, y, 4, classification=False))
+    assert edges.shape == (1, 5) and np.any(np.isclose(edges, 0.3, atol=0.05))
+    X = rng.normal(size=(96, 2))
+    target = np.where(X[:, 0] > 0, 2.0, -1.0)
+    model = ASRRegressor(max_epochs=2, batch_size=16, num_embedding_bin_method="tree").fit(X, target)
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict(X[:3]), model.predict(X[:3]))
+    with pytest.raises(AshlarError):
+        ASRRegressor(num_embedding_bin_method="kmeans").fit(X, target)
+
+
+def test_unshared_batches_train_a_classifier():
+    import jax.numpy as jnp
+
+    from ashlar import ASRClassifier
+    from ashlar.objectives import classification_objective
+
+    raw = jnp.zeros((2, 3, 4)).at[0, 1, 2].set(5.0)
+    y = jnp.array([[0, 2, 1], [3, 3, 0]])
+    weights = jnp.ones((2, 3))
+    per_member = classification_objective(raw, y, weights)
+    shared = classification_objective(raw, jnp.array([0, 3]), jnp.ones(2))
+    assert np.isfinite(float(per_member)) and float(per_member) != float(shared)
+
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(48, 2))
+    labels = (X[:, 0] > 0).astype(int) + (X[:, 1] > 0.5)
+    model = ASRClassifier(
+        backbone="tabm", backbone_kwargs={"n_blocks": 1, "d_block": 8, "k": 4}, max_epochs=2, batch_size=8,
+        share_training_batches=False,
+    ).fit(X, labels)
+    proba = np.asarray(model.predict_proba(X[:3]))
+    assert proba.shape == (3, 3) and np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
 
 
 def test_linear_schedule_stays_on_adamw():
@@ -1212,3 +1287,140 @@ def test_robust_scale_and_default_categorical_embeddings(tmp_path):
     refused = _regression(numeric_scaling="nope", max_epochs=1, patience=0, validation_size=0)
     with pytest.raises(AshlarError, match="robust"):
         refused.fit(column.astype(np.float32), np.zeros(len(column), dtype=np.float32))
+
+
+def test_all_categorical_table_ignores_numeric_settings(tmp_path):
+    # Numeric embeddings and quantile scaling have nothing to act on; the categorical embeddings still train.
+    import pandas as pd
+
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"a": rng.choice(list("xyz"), 64), "b": rng.choice(list("pq"), 64)})
+    y = (X["a"] == "x").astype(float).to_numpy() + rng.normal(scale=0.1, size=64)
+    model = ASRRegressor(num_embeddings="piecewise", numeric_scaling="quantile", max_epochs=2, batch_size=16)
+    model.fit(X, y)
+    assert model.embedded_columns_ == ["a", "b"]
+    pred = model.predict(X)
+    assert np.isfinite(pred).all()
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict(X), pred)
+
+
+def test_weight_average_trains_saves_and_validates(tmp_path):
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(96, 3))
+    y = X[:, 0] - X[:, 1] + rng.normal(scale=0.1, size=96)
+    plain = ASRRegressor(max_epochs=4, batch_size=16).fit(X, y)
+    averaged = ASRRegressor(max_epochs=4, batch_size=16, weight_average=0.5).fit(X, y)
+    assert not np.allclose(plain.predict(X), averaged.predict(X))
+    assert ASRRegressor(max_epochs=4, batch_size=16, weight_average=0.0).fit(X, y).predict(X) == pytest.approx(plain.predict(X))
+    averaged.save(tmp_path / "m")
+    loaded = ASRModel.load(tmp_path / "m")
+    assert loaded.weight_average == 0.5
+    assert np.allclose(loaded.predict(X), averaged.predict(X))
+    with pytest.raises(AshlarError):
+        ASRRegressor(weight_average=1.0).fit(X, y)
+
+
+def test_time_limit_stops_training_at_the_budget():
+    from ashlar import ASRRegressor
+
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(64, 2))
+    y = X[:, 0] + rng.normal(scale=0.1, size=64)
+    model = ASRRegressor(max_epochs=500, patience=0, batch_size=32, time_limit=1e-6).fit(X, y)
+    assert len(model.history_["train_loss"]) == 1
+    assert np.isfinite(model.predict(X)).all()
+    assert ASRRegressor(max_epochs=3, patience=0, batch_size=32).fit(X, y).history_["train_loss"].__len__() == 3
+    with pytest.raises(AshlarError):
+        ASRRegressor(time_limit=0).fit(X, y)
+
+
+def test_tabm_mini_fits_and_reloads(tmp_path):
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(64, 3))
+    y = (X[:, 0] > 0).astype(int)
+    mini = {**MICRO_TABM, "backbone_kwargs": {**MICRO_TABM["backbone_kwargs"], "arch_type": "tabm-mini"}}
+    model = ASRClassifier(**mini, max_epochs=2, batch_size=32).fit(X, y)
+    assert model.core_.backbone.adapter.shape[0] == 4
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict_proba(X), model.predict_proba(X), atol=1e-6)
+    with pytest.raises(AshlarError):
+        ASRClassifier(backbone="residual_mlp", backbone_kwargs={"arch_type": "tabm-mini"}).fit(X, y)
+
+
+def test_early_stopping_metric_roc_auc_picks_a_checkpoint(tmp_path):
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(160, 3))
+    y = (X[:, 0] + 0.5 * rng.normal(size=160) > 0).astype(int)
+    model = ASRClassifier(max_epochs=4, batch_size=32, early_stopping_metric="roc_auc").fit(X, y)
+    assert len(model.history_["val_score"]) == len(model.history_["val_loss"])
+    assert 0.5 < max(model.history_["val_score"]) <= 1.0
+    model.save(tmp_path / "m")
+    assert ASRModel.load(tmp_path / "m").early_stopping_metric == "roc_auc"
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", early_stopping_metric="roc_auc").fit(X, y.astype(float))
+
+
+@pytest.mark.parametrize("n_classes", [2, 3])
+def test_classification_random_effects_pool_groups(n_classes, tmp_path):
+    import pandas as pd
+
+    from ashlar import ASRClassifier
+
+    rng = np.random.default_rng(4)
+    X = pd.DataFrame({"g": rng.integers(0, 12, 120).astype(str), "x": rng.normal(size=120)})
+    y = rng.integers(0, n_classes, 120)
+    model = ASRClassifier(random_effects={"g": ["intercept", "embedding"]}, max_epochs=2, batch_size=32).fit(X, y)
+    proba = model.predict_proba(X)
+    assert proba.shape == (120, n_classes)
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+    model.save(tmp_path / "m")
+    assert np.allclose(ASRModel.load(tmp_path / "m").predict_proba(X), proba)
+
+
+@pytest.mark.slow
+def test_soft_trees_train_beside_the_network_and_survive_save(tmp_path):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(300, 3))
+    y = np.where(x[:, 0] > 0.3, 2.0, -1.0) + 0.1 * rng.normal(size=300)
+    model = ASRModel(task="regression", soft_trees=8, max_epochs=6, patience=0, **MICRO).fit(x, y)
+    assert model.core_.trees is not None
+    assert float(np.abs(np.asarray(model.core_.trees.layer.leaves)).max()) > 0.0
+    restored = ASRModel.load(model.save(tmp_path / "trees"))
+    assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    assert restored.soft_trees_dropout == model.soft_trees_dropout == 0.5
+    classes = (x[:, 1] > 0).astype(int)
+    classifier = ASRClassifier(soft_trees=4, max_epochs=3, patience=0, **MICRO).fit(x, classes)
+    assert np.allclose(classifier.predict_proba(x[:10]).sum(axis=1), 1.0, atol=1e-5)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=-1, **MICRO).fit(x, y)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=4, soft_trees_dropout=1.0, **MICRO).fit(x, y)
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", soft_trees=4, monotone={"x0": 1}, **MICRO).fit(x, y)
+
+
+@pytest.mark.slow
+def test_feature_gates_shut_noise_columns_and_survive_save(tmp_path):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(400, 6))
+    y = 2.0 * x[:, 0] + 0.1 * rng.normal(size=400)
+    plain = ASRModel(task="regression", max_epochs=2, patience=0, **MICRO).fit(x, y)
+    assert plain.feature_gates_ is None and plain.core_.gates is None
+    model = ASRModel(task="regression", feature_gates=0.05, max_epochs=40, patience=0, learning_rate=1e-2, **MICRO)
+    model.fit(x, y)
+    # The signal column stays open and the five noise columns shut.
+    assert model.feature_gates_ == ["x0"]
+    restored = ASRModel.load(model.save(tmp_path / "gated"))
+    assert restored.feature_gates_ == model.feature_gates_
+    assert np.allclose(restored.predict(x[:20]), model.predict(x[:20]))
+    with pytest.raises(AshlarError):
+        ASRModel(task="regression", feature_gates=-1.0, **MICRO).fit(x, y)

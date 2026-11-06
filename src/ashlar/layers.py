@@ -15,9 +15,13 @@ The TabM path follows the equations in ``tabm`` 0.0.3 (commit
 * The output ``LinearEnsemble`` is a head, not part of the backbone, so a
   residual MLP and TabM can use the same head.
 
-Deviations from a full paper run, recorded on purpose: no packed or mini
-architecture, no piecewise-linear or periodic embeddings, and no claim that a
-forward pass reproduces a published benchmark score.
+* ``arch_type="tabm-mini"`` is the paper's minimal variant: one per-member
+  scaling of the input (initialized like the first ``r`` above), then a plain
+  shared MLP. Only that scaling and the output head differ between members.
+
+Deviations from a full paper run, recorded on purpose: no packed
+architecture, and no claim that a forward pass reproduces a published
+benchmark score.
 """
 
 from __future__ import annotations
@@ -224,15 +228,25 @@ def _dropout(drop: nn.Dropout | None, x, key):
     return drop(x, key=key, inference=False)
 
 
-class TabMBackbone(Module):
-    """Batch-ensemble MLP trunk. Output shape ``(batch, member, d_block)``."""
+TABM_ARCH_TYPES = ("tabm", "tabm-mini")
 
-    layers: tuple[LinearBatchEnsemble, ...]
+
+class TabMBackbone(Module):
+    """Batch-ensemble MLP trunk. Output shape ``(batch, member, d_block)``.
+
+    ``arch_type="tabm"`` (default) gives every layer per-member scalings and
+    biases. ``"tabm-mini"`` scales the input once per member and shares the
+    rest of the trunk, as TabArena's TabM does.
+    """
+
+    layers: tuple[LinearBatchEnsemble | BatchedLinear, ...]
+    adapter: jax.Array | None
     dropout: nn.Dropout | None
     k: int = field(static=True)
     d_out: int = field(static=True)
     dropout_rate: float = field(static=True)
     share_training_batches: bool = field(static=True)
+    arch_type: str = field(static=True)
 
     def __init__(
         self,
@@ -246,13 +260,18 @@ class TabMBackbone(Module):
         start_scaling_init: str = "random-signs",
         scaling_chunks: list[int] | None = None,
         share_training_batches: bool = True,
+        arch_type: str = "tabm",
     ):
         if n_blocks < 1 or d_block < 1 or k < 1:
             raise ShapeError("TabM n_blocks, d_block, and k must be positive.")
         if not 0.0 <= dropout < 1.0:
             raise ShapeError("dropout must be in [0, 1).")
+        if arch_type not in TABM_ARCH_TYPES:
+            raise ShapeError(f"TabM arch_type must be one of {TABM_ARCH_TYPES}; received {arch_type!r}.")
+        mini = arch_type == "tabm-mini"
         keys = jax.random.split(key, n_blocks * 4)
         layers = []
+        adapter = None
         for index in range(n_blocks):
             in_features = d_in if index == 0 else d_block
             base = keys[index]
@@ -263,21 +282,30 @@ class TabMBackbone(Module):
             else:
                 r_dist = "ones"
                 r_chunks = None
+            weight = _rsqrt_uniform(weight_key, (d_block, in_features), in_features, jnp.float32)
             bias = _rsqrt_uniform(bias_key, (d_block,), in_features, jnp.float32)
+            if mini:
+                # One shared layer; the members differ only by the input scaling below and by the head.
+                if index == 0:
+                    adapter = _scaling(r_key, (k, in_features), r_dist, r_chunks, jnp.float32)
+                layers.append(BatchedLinear(weight=weight, bias=bias))
+                continue
             layers.append(
                 LinearBatchEnsemble(
-                    weight=_rsqrt_uniform(weight_key, (d_block, in_features), in_features, jnp.float32),
+                    weight=weight,
                     r=_scaling(r_key, (k, in_features), r_dist, r_chunks, jnp.float32),
                     s=jnp.ones((k, d_block), dtype=jnp.float32),
                     bias=jnp.repeat(bias[None, :], k, axis=0),
                 )
             )
         self.layers = tuple(layers)
+        self.adapter = adapter
         self.dropout = nn.Dropout(dropout) if dropout else None
         self.k = k
         self.d_out = d_block
         self.dropout_rate = dropout
         self.share_training_batches = bool(share_training_batches)
+        self.arch_type = arch_type
 
     def __call__(self, x, *, key):
         if x.ndim == 2 and not self.share_training_batches and key is not None:
@@ -288,6 +316,8 @@ class TabMBackbone(Module):
             x = x.reshape((x.shape[0] // self.k, self.k, x.shape[-1]))
         else:
             x = ensemble_view(x, self.k)
+        if self.adapter is not None:
+            x = x * self.adapter
         keys = None if key is None or self.dropout is None else jax.random.split(key, len(self.layers))
         for index, layer in enumerate(self.layers):
             x = jax.nn.relu(layer(x))
@@ -468,6 +498,51 @@ def quantile_edges(numeric_z, n_bins: int, max_rows: int = 200_000, seed: int = 
     return jnp.asarray(edges)
 
 
+def tree_edges(
+    numeric_z,
+    target,
+    n_bins: int,
+    *,
+    classification: bool,
+    min_samples_leaf: int = 64,
+    max_rows: int = 200_000,
+    seed: int = 0,
+):
+    """Target-aware bin edges, shape ``(n_features, n_bins + 1)``, from one decision tree per feature.
+
+    Each feature's edges are its observed minimum and maximum plus the split
+    thresholds of a tree with at most ``n_bins`` leaves fit from that feature
+    alone to ``target`` (class indices, or a regression target whose first
+    column is used). Leaves keep at least ``min_samples_leaf`` rows, or a
+    tenth of the rows on a small table. Padding repeats the top edge, as in
+    ``quantile_edges``.
+    """
+    import numpy as np
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+    values = np.asarray(numeric_z, dtype=np.float64)
+    y = np.asarray(target)
+    if y.ndim > 1:
+        y = y.reshape(y.shape[0], -1)[:, 0]
+    if values.shape[0] > max_rows:
+        rows = np.random.default_rng(seed).choice(values.shape[0], size=max_rows, replace=False)
+        values, y = values[rows], y[rows]
+    leaf = max(1, min(min_samples_leaf, values.shape[0] // 10))
+    edges = np.empty((values.shape[1], n_bins + 1), dtype=np.float32)
+    for column in range(values.shape[1]):
+        x = values[:, column : column + 1]
+        tree_cls = DecisionTreeClassifier if classification else DecisionTreeRegressor
+        tree = tree_cls(max_leaf_nodes=max(2, n_bins), min_samples_leaf=leaf, random_state=seed).fit(x, y)
+        inner = tree.tree_.threshold[tree.tree_.feature >= 0]
+        unique = np.unique(np.concatenate([[x.min(), x.max()], inner]))
+        if unique.size < 2:
+            unique = np.array([unique[0] - 0.5, unique[0] + 0.5])
+        unique = unique[: n_bins + 1]
+        edges[column, : unique.size] = unique
+        edges[column, unique.size :] = unique[-1]
+    return jnp.asarray(edges)
+
+
 class PiecewiseLinearEmbeddings(Module):
     """Piecewise-linear numeric embeddings, version B of ``rtdl_num_embeddings``.
 
@@ -583,6 +658,242 @@ class SetEmbeddings(Module):
             count = jnp.maximum(jnp.sum(mask[:, column], axis=1, keepdims=True), jnp.asarray(1.0, dtype=mask.dtype))
             pieces.append(summed / count)
         return jnp.concatenate(pieces, axis=-1)
+
+
+# Stochastic gates (Yamada et al. 2020, "Feature selection using stochastic gates"): the spread of the training
+# noise, and where each gate starts.
+GATE_SIGMA = 0.5
+GATE_START = 0.5
+# A gate's location is ``GATE_START + GATE_SPEED * offset``. Adam moves ``offset`` by about one learning rate a
+# step, so a gate can shut in about ``1 / (GATE_SPEED * learning_rate)`` steps, inside the epochs early stopping
+# allows, rather than ``1 / learning_rate``.
+GATE_SPEED = 5.0
+
+
+class FeatureGates(Module):
+    """A learned gate on each input field, pushed shut unless the loss needs that field.
+
+    A training step multiplies each field by ``clip(mu + GATE_SIGMA * noise, 0, 1)``, with fresh normal noise for
+    every row and field. Prediction multiplies by ``clip(mu, 0, 1)``, so a field whose ``mu`` has fallen to 0 or
+    below is shut. ``penalty`` is ``strength`` times the expected number of open gates, ``sum Phi(mu / sigma)``.
+    A field is one numeric column, one one-hot column, one learned embedding or one set, as in ``feature_chunks``.
+    """
+
+    offset: jax.Array
+    chunks: tuple[int, ...] = field(static=True)
+    strength: float = field(static=True)
+
+    def __init__(self, chunks, strength: float):
+        self.chunks = tuple(int(width) for width in chunks)
+        if not self.chunks or min(self.chunks) < 1:
+            raise ShapeError("feature gates need at least one field, each of positive width.")
+        self.strength = float(strength)
+        self.offset = jnp.zeros((len(self.chunks),), dtype=jnp.float32)
+
+    def location(self):
+        """``mu`` of each gate, ``(n_fields,)``."""
+        return GATE_START + GATE_SPEED * self.offset
+
+    def __call__(self, encoded, *, key=None):
+        width = sum(self.chunks)
+        if encoded.ndim != 2 or encoded.shape[1] != width:
+            raise ShapeError(f"feature gates expected (batch, {width}); received {encoded.shape}.")
+        mu = self.location()
+        if key is None:
+            gates = jnp.broadcast_to(jnp.clip(mu, 0.0, 1.0), (encoded.shape[0], len(self.chunks)))
+        else:
+            noise = jax.random.normal(key, (encoded.shape[0], len(self.chunks)), dtype=mu.dtype)
+            gates = jnp.clip(mu + GATE_SIGMA * noise, 0.0, 1.0)
+        scale = jnp.repeat(gates, np.asarray(self.chunks), axis=1, total_repeat_length=width)
+        return encoded * scale.astype(encoded.dtype)
+
+    def penalty(self):
+        """``strength`` times the expected number of open gates on a training step."""
+        from jax.scipy.special import ndtr
+
+        return self.strength * jnp.sum(ndtr(self.location() / GATE_SIGMA))
+
+    def open_fields(self) -> np.ndarray:
+        """Which fields prediction lets through, ``(n_fields,)`` booleans."""
+        return np.asarray(self.location() > 0.0)
+
+
+class ObliviousLayer(Module):
+    """Averaged ensemble of oblivious trees. Every split and every leaf is a parameter."""
+
+    feature_logits: jax.Array
+    thresholds: jax.Array
+    raw_scales: jax.Array
+    leaves: jax.Array
+
+    def __call__(self, features: jax.Array) -> jax.Array:
+        selectors = entmax15(self.feature_logits)
+        chosen = jnp.einsum("bf,tdf->btd", features, selectors)
+        scale = jax.nn.softplus(self.raw_scales) + 1e-3
+        score = (chosen - self.thresholds[None, :, :]) / scale[None, :, :]
+        gate = entmax15(jnp.stack([score, jnp.zeros_like(score)], axis=-1))[..., 0]
+        weights = jnp.ones((features.shape[0], gate.shape[1], 1), dtype=features.dtype)
+        for level in range(gate.shape[2]):
+            decision = gate[:, :, level]
+            stay = weights * (1.0 - decision[:, :, None])
+            go = weights * decision[:, :, None]
+            weights = jnp.concatenate([stay, go], axis=-1)
+        return jnp.einsum("btl,tlo->bo", weights, self.leaves) / self.leaves.shape[0]
+
+
+def _entmax15_forward(scores: jax.Array) -> jax.Array:
+    """1.5-entmax along the last axis. Matches the deep-spin forward pass."""
+
+    width = scores.shape[-1]
+    centered = scores - jnp.max(scores, axis=-1, keepdims=True)
+    scaled = centered / 2.0
+    ordered = jnp.flip(jnp.sort(scaled, axis=-1), axis=-1)
+    ranks = jnp.arange(1, width + 1, dtype=scaled.dtype).reshape((1,) * (scaled.ndim - 1) + (width,))
+    cumulative = jnp.cumsum(ordered, axis=-1)
+    cumulative_sq = jnp.cumsum(jnp.square(ordered), axis=-1)
+    mean = cumulative / ranks
+    mean_sq = cumulative_sq / ranks
+    second = ranks * (mean_sq - jnp.square(mean))
+    delta = (1.0 - second) / ranks
+    tau = mean - jnp.sqrt(jnp.clip(delta, 0.0))
+    support = jnp.clip(jnp.sum(tau <= ordered, axis=-1, keepdims=True), 1, width)
+    tau_star = jnp.take_along_axis(tau, support.astype(jnp.int32) - 1, axis=-1)
+    return jnp.square(jnp.clip(scaled - tau_star, 0.0))
+
+
+def _entmax15_backward(probs: jax.Array, gradient: jax.Array) -> jax.Array:
+    slope = jnp.sqrt(jnp.clip(probs, 0.0))
+    propagated = gradient * slope
+    total = jnp.sum(slope, axis=-1, keepdims=True)
+    correction = jnp.sum(propagated, axis=-1, keepdims=True) / jnp.clip(total, 1e-8)
+    return propagated - correction * slope
+
+
+@jax.custom_vjp
+def entmax15(scores: jax.Array) -> jax.Array:
+    return _entmax15_forward(scores)
+
+
+def _entmax15_fwd(scores: jax.Array):
+    probs = _entmax15_forward(scores)
+    return probs, probs
+
+
+def _entmax15_bwd(probs: jax.Array, gradient: jax.Array):
+    return (_entmax15_backward(probs, gradient),)
+
+
+entmax15.defvjp(_entmax15_fwd, _entmax15_bwd)
+
+
+# Soft oblivious trees beside the network (``soft_trees=``), NODE's layer above on the raw inputs.
+TREE_DEPTH = 6
+# Embedded categorical columns with at most this many levels also reach the trees, one-hot.
+TREE_MAX_LEVELS = 16
+# The branch is TREE_GAIN times the mean of its trees. Adam moves each leaf about the learning rate per step, so
+# without the gain a branch of 128 trees would move the output 128 times slower than one leaf moves.
+TREE_GAIN = 8.0
+# Rows of the training partition that place the first thresholds and the input scales.
+TREE_SAMPLE = 4096
+# The default share of training rows (per member) that get no tree term (``soft_trees_dropout=``).
+TREE_DROPOUT = 0.5
+
+
+class TreeBranch(Module):
+    """Soft oblivious trees on the raw inputs, added to the head's outputs beside the network.
+
+    The trees read the scaled numeric columns, the one-hot columns, and a one-hot copy of each embedded column with
+    at most ``TREE_MAX_LEVELS`` levels, each standardized by its training mean and spread. So they split the inputs
+    themselves, as a gradient-boosted tree does, while the trunk reads its embeddings. The branch adds
+    ``TREE_GAIN`` times the mean of its trees to the outputs that ``moves`` marks, the same for every member, and
+    for classification normalizes the log-probabilities again. The leaves start at zero, so a fit starts from the
+    network alone, and the thresholds start at the values of random training rows, as in ``ashlar.node``.
+
+    A training step (one with a key) drops the term for a ``dropout`` share of the rows, a draw per row and
+    member. Without that, the trees can fit the training rows before the network does and leave it nothing to
+    learn. With it, the network must still predict the dropped rows alone, so the trees learn what it misses.
+    Prediction adds the whole term.
+    """
+
+    layer: ObliviousLayer
+    center: jax.Array
+    spread: jax.Array
+    n_numeric: int = field(static=True)
+    n_onehot: int = field(static=True)
+    # ``(position in category_index, vocabulary size including the unknown row)`` for each one-hot copy.
+    views: tuple[tuple[int, int], ...] = field(static=True)
+    moves: tuple[float, ...] = field(static=True)
+    normalize: bool = field(static=True)
+    dropout: float = field(static=True)
+
+    def __init__(
+        self, n_numeric, n_onehot, views, moves, normalize, n_trees: int, depth: int, *, key, sample=None, dropout=0.0
+    ):
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ShapeError("soft tree dropout must be at least 0 and below 1.")
+        self.dropout = float(dropout)
+        self.n_numeric, self.n_onehot = int(n_numeric), int(n_onehot)
+        self.views = tuple((int(position), int(size)) for position, size in views)
+        self.moves = tuple(float(move) for move in moves)
+        self.normalize = bool(normalize)
+        width = self.n_numeric + self.n_onehot + sum(size for _, size in self.views)
+        if width < 1:
+            raise ShapeError("soft trees need a numeric column, a one-hot column, or a small categorical column.")
+        if int(n_trees) < 1 or not 1 <= int(depth) <= 10:
+            raise ShapeError("soft trees need at least one tree and a depth from 1 to 10.")
+        logit_key, pick_key = jax.random.split(key)
+        self.center = jnp.zeros((width,), dtype=jnp.float32)
+        self.spread = jnp.ones((width,), dtype=jnp.float32)
+        thresholds = jnp.zeros((int(n_trees), int(depth)), dtype=jnp.float32)
+        if sample is not None:
+            raw = np.asarray(self._raw(*(jnp.asarray(part) for part in sample)), dtype=np.float64)
+            spread = raw.std(axis=0)
+            self.center = jnp.asarray(raw.mean(axis=0), dtype=jnp.float32)
+            self.spread = jnp.asarray(np.where(spread < 1e-6, 1.0, spread), dtype=jnp.float32)
+            scaled = (raw - np.asarray(self.center)) / np.asarray(self.spread)
+            generator = np.random.default_rng(int(np.asarray(jax.random.bits(pick_key))))
+            rows = generator.integers(0, scaled.shape[0], size=(int(n_trees), int(depth)))
+            columns = generator.integers(0, width, size=(int(n_trees), int(depth)))
+            thresholds = jnp.asarray(scaled[rows, columns], dtype=jnp.float32)
+        self.layer = ObliviousLayer(
+            feature_logits=jax.random.uniform(logit_key, (int(n_trees), int(depth), width), dtype=jnp.float32),
+            thresholds=thresholds,
+            raw_scales=jnp.full((int(n_trees), int(depth)), float(np.log(np.expm1(2.0 - 1e-3))), dtype=jnp.float32),
+            leaves=jnp.zeros((int(n_trees), 2 ** int(depth), len(self.moves)), dtype=jnp.float32),
+        )
+
+    def _raw(self, numeric_z, categorical_onehot, category_index):
+        parts = []
+        if self.n_numeric:
+            parts.append(numeric_z.astype(jnp.float32))
+        if self.n_onehot:
+            parts.append(categorical_onehot.astype(jnp.float32))
+        for position, size in self.views:
+            parts.append(jax.nn.one_hot(category_index[:, position], size, dtype=jnp.float32))
+        return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=1)
+
+    def inputs(self, numeric_z, categorical_onehot, category_index):
+        """The trees' standardized inputs, ``(batch, width)``."""
+        raw = self._raw(numeric_z, categorical_onehot, category_index)
+        return (raw - jax.lax.stop_gradient(self.center)) / jax.lax.stop_gradient(self.spread)
+
+    def term(self, numeric_z, categorical_onehot, category_index):
+        """The branch's addition to every member's outputs, ``(batch, outputs)``."""
+        value = jnp.asarray(TREE_GAIN, dtype=jnp.float32) * self.layer(self.inputs(numeric_z, categorical_onehot, category_index))
+        return value * jnp.asarray(self.moves, dtype=value.dtype)
+
+    def __call__(self, outputs, numeric_z, categorical_onehot, category_index, *, key=None):
+        term = self.term(numeric_z, categorical_onehot, category_index).astype(outputs.dtype)
+        if term.shape[0] == outputs.shape[0]:
+            term = jnp.broadcast_to(term[:, None, :], outputs.shape)
+        else:
+            # A training step with a batch per member: the rows are (batch, member) flattened, member fastest.
+            term = term.reshape(outputs.shape[0], outputs.shape[1], term.shape[-1])
+        if key is not None and self.dropout > 0.0:
+            keep = jax.random.bernoulli(key, 1.0 - self.dropout, outputs.shape[:2] + (1,))
+            term = term * keep.astype(term.dtype)
+        moved = outputs + term
+        return jax.nn.log_softmax(moved, axis=-1) if self.normalize else moved
 
 
 class _FieldProjection(Module):

@@ -1,0 +1,1616 @@
+"""TabArena (AutoGluon ``AbstractModel``) wrappers for Ashlar.
+
+Two entries, one per recipe, so their configs get distinct names on the
+leaderboard:
+
+* ``AshlarModel`` (``ASR``): ``ASRRegressor`` / ``ASRClassifier`` defaults,
+  a residual MLP on piecewise-linear numeric embeddings.
+* ``AshlarTabMModel`` (``ASRTABM``): ``ashlar.tabm_piecewise``, the
+  accuracy recipe (TabM ensemble on piecewise embeddings, quantile scaling).
+
+This module must be importable (not ``__main__``) so Ray workers can unpickle
+the classes when the runner is not in debug mode.
+
+``time_limit`` is passed to Ashlar's ``time_limit`` (85% of it, to leave room
+for prediction): training stops at the first epoch end past it and keeps the
+best checkpoint. ``num_cpus`` holds the process to that many cores through CPU
+affinity (Linux only, and only before the process's first JAX computation;
+see ``_limit_cpus``).
+"""
+
+from __future__ import annotations
+
+import itertools
+import os
+import time
+
+import numpy as np
+import pandas as pd
+from autogluon.core.models import AbstractModel
+
+
+def _limit_cpus(num_cpus) -> None:
+    """Hold this process to ``num_cpus`` cores, which is how JAX on CPU can be limited.
+
+    XLA's CPU runtime has no thread-count setting (``XLA_FLAGS`` thread flags
+    are ignored by jax 0.12), but it sizes its thread pool from the process's
+    CPU affinity when the pool is first made. So this works only before the
+    process's first JAX computation, and only on Linux. Parallel workers
+    spread over disjoint blocks of the allowed cores by process id.
+    """
+    if not num_cpus or not hasattr(os, "sched_setaffinity"):
+        return
+    allowed = sorted(os.sched_getaffinity(0))
+    n = int(num_cpus)
+    if n >= len(allowed):
+        return
+    start = (os.getpid() % (len(allowed) // n)) * n
+    os.sched_setaffinity(0, allowed[start : start + n])
+
+
+def _tabm_batch_size(n_rows: int, n_features: int) -> int:
+    """TabArena TabM's batch size rule (tabm_utils.get_tabm_auto_batch_size): by rows, capped by width."""
+    by_rows = next((size for limit, size in ((2_800, 32), (4_500, 64), (6_400, 128), (32_000, 256)) if n_rows < limit), 512)
+    by_features = next((size for limit, size in ((256, 1024), (512, 512), (1024, 256), (2048, 64)) if n_features < limit), 32)
+    return min(by_rows, by_features)
+
+
+def _tempered(proba: np.ndarray, temperature: float) -> np.ndarray:
+    logits = np.log(np.clip(proba, 1e-12, None)) / temperature
+    logits -= logits.max(axis=1, keepdims=True)
+    out = np.exp(logits)
+    return out / out.sum(axis=1, keepdims=True)
+
+
+def _fit_temperature(proba: np.ndarray, y: np.ndarray) -> float:
+    """The temperature in [0.25, 4] that minimises validation log loss."""
+    from scipy.optimize import minimize_scalar
+
+    rows = np.arange(len(y))
+
+    def loss(log_t: float) -> float:
+        return -np.mean(np.log(np.clip(_tempered(proba, np.exp(log_t))[rows, y], 1e-12, None)))
+
+    return float(np.exp(minimize_scalar(loss, bounds=(np.log(0.25), np.log(4.0)), method="bounded").x))
+
+
+def _target_matrix(y: np.ndarray, n_classes: int | None) -> np.ndarray:
+    """One column per statistic: the target for regression, a class indicator per class after the first otherwise."""
+    if not n_classes:
+        return np.asarray(y, dtype=np.float64)[:, None]
+    onehot = np.eye(n_classes)[np.asarray(y, dtype=np.int64)]
+    return onehot[:, 1:] if n_classes > 2 else onehot[:, 1:2]
+
+
+def _stat_losses(S: np.ndarray, y: np.ndarray, n_classes: int | None) -> np.ndarray:
+    """Per-row loss of predicting ``y`` by a target statistic: squared error for regression, log loss otherwise.
+
+    ``S`` holds the statistic's columns as ``_target_matrix`` lays them out: the target, or the frequency of each
+    class after the first, so the first class gets the rest of the probability.
+    """
+    if not n_classes:
+        return (np.asarray(y, dtype=np.float64) - S[:, 0]) ** 2
+    return -np.log(_stat_proba(S)[np.arange(len(y)), np.asarray(y, dtype=np.int64)])
+
+
+def _stat_proba(S: np.ndarray) -> np.ndarray:
+    """A classification statistic in ``_target_matrix``'s layout as (rows, classes) probabilities."""
+    rest = np.clip(S, 1e-6, 1.0)
+    first = np.clip(1.0 - S.sum(axis=1, keepdims=True), 1e-6, 1.0)
+    proba = np.concatenate([first, rest], axis=1)
+    return proba / proba.sum(axis=1, keepdims=True)
+
+
+def _additive_losses(Sa, Sb, prior, y, n_classes: int | None, weight: float) -> np.ndarray:
+    """Per-row loss of two statistics combined as if their columns acted on the target independently.
+
+    Each statistic's departure from the prior is scaled by ``weight`` and the two are added: on the log-probability
+    scale for classification (naive Bayes at weight 1, the geometric mean at 0.5), on the target scale otherwise. A
+    network reading both columns finds this combination on its own, so a pair statistic only adds what beats it.
+    """
+    if not n_classes:
+        centre = prior[:, 0]
+        guess = centre + weight * ((Sa[:, 0] - centre) + (Sb[:, 0] - centre))
+        return (np.asarray(y, dtype=np.float64) - guess) ** 2
+    log_prior = np.log(_stat_proba(prior))
+    logits = log_prior + weight * ((np.log(_stat_proba(Sa)) - log_prior) + (np.log(_stat_proba(Sb)) - log_prior))
+    logits -= logits.max(axis=1, keepdims=True)
+    log_q = logits - np.log(np.exp(logits).sum(axis=1, keepdims=True))
+    return -log_q[np.arange(len(y)), np.asarray(y, dtype=np.int64)]
+
+
+class _OutOfFoldFeatures:
+    """Leak-free numeric features from the target, for the wrapper's input.
+
+    * Target statistics (CatBoost's main trick): for every object column with
+      at least ``min_levels`` levels, the smoothed mean of each target column
+      within the row's level, toward the global mean with weight ``prior``.
+      ``pairs`` (and ``triples``) add one statistic per combination of
+      columns with at least ``pair_min_levels`` levels.
+    * ``survey`` screens those statistics on the training rows before the
+      network trains, from the out-of-fold values themselves: a column is kept
+      when its statistic predicts the target better than the global mean, and
+      a combination when it beats the best of its parts. "Better" means the
+      loss falls by at least ``margin`` (as a share of the global mean's loss)
+      and the fall is ``z`` standard errors from zero, with the errors
+      clustered by level so a few large levels cannot pass on their own.
+      Survivors are ranked by that fall and the best ``max_pairs`` of each
+      kind are kept. ``screen_singles=False`` keeps every single column and
+      screens only the combinations. Without the survey every candidate is
+      kept, in column order, up to ``max_pairs``.
+    * ``cat_pairs`` adds a statistic for up to that many pairs of any two
+      object columns (2+ levels), the way CatBoost combines categories, apart
+      from the pairs above. Each pair is ranked by how much its out-of-fold
+      statistic lowers the loss below the better of its two columns' own
+      statistics, and only pairs that lower it at all are kept. A table with
+      more than ``CAT_POOL`` such columns first keeps its ``CAT_POOL`` most
+      predictive ones, which bounds the candidates at 2,016 pairs.
+      ``cat_pairs_additive`` also makes a pair beat its two columns' statistics
+      added together (``_additive_losses``), which the network finds without
+      the pair, and ``cat_pairs_z`` makes the fall that many standard errors
+      from zero, with the errors clustered by the pair's levels.
+    * Neighbour targets (retrieval, as in TabR or the in-context models): the
+      mean of each target column over the row's ``k`` nearest training rows
+      in the scaled numeric columns.
+
+    Training rows get out-of-fold values from ``folds`` splits, so a row never
+    sees its own label. Other rows get values from the whole training set.
+    """
+
+    def __init__(
+        self,
+        target_stats: bool,
+        neighbours: int,
+        folds: int = 5,
+        min_levels: int = 10,
+        prior: float = 10.0,
+        pairs: bool = False,
+        max_pairs: int = 64,
+        triples: bool = False,
+        survey: bool = False,
+        pair_min_levels: int | None = None,
+        margin: float = 0.001,
+        z: float = 1.0,
+        screen_singles: bool = True,
+        cat_pairs: int = 0,
+        cat_pairs_additive: bool = False,
+        cat_pairs_z: float = 0.0,
+    ):
+        self.target_stats, self.k, self.folds = target_stats, neighbours, folds
+        self.cat_pairs, self.cat_pairs_additive, self.cat_pairs_z = cat_pairs, cat_pairs_additive, cat_pairs_z
+        self.min_levels, self.prior = min_levels, prior
+        self.pairs, self.max_pairs, self.triples = pairs, max_pairs, triples
+        self.survey, self.margin, self.z, self.screen_singles = survey, margin, z, screen_singles
+        self.pair_min_levels = min_levels if pair_min_levels is None else pair_min_levels
+
+    def fit_transform(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, seed: int = 0) -> pd.DataFrame:
+        from itertools import combinations
+
+        from sklearn.model_selection import KFold
+
+        T = _target_matrix(y, n_classes)
+        self.prior_mean = T.mean(axis=0)
+        levels = {
+            col: X[col].nunique(dropna=False) for col in X.columns if self.target_stats and X[col].dtype == object
+        }
+        singles = [(col,) for col, n in levels.items() if n >= self.min_levels]
+        self.id_cols = [col for (col,) in singles]
+        pool = [col for col, n in levels.items() if n >= self.pair_min_levels]
+        pairs = list(combinations(pool, 2)) if self.pairs else []
+        triples = list(combinations(pool, 3)) if self.triples else []
+        if not self.survey:
+            pairs, triples = pairs[: self.max_pairs], triples[: self.max_pairs]
+        folds = list(KFold(self.folds, shuffle=True, random_state=seed).split(X))
+        cat_pairs = (
+            self._rank_cat_pairs(X, y, T, n_classes, folds, levels, exclude=set(combinations(pool, 2)))
+            if self.cat_pairs and self.target_stats
+            else []
+        )
+        # The survey also scores the single columns of the pool, as the parts a pair must beat.
+        scored = list(
+            dict.fromkeys(singles + ([(col,) for col in pool] if self.survey else []) + pairs + triples + cat_pairs)
+        )
+        self.levels = {col: pd.Index(pd.unique(X[col])) for col in {c for combo in scored for c in combo}}
+        codes = self._codes(X)
+        oof, keys = {}, {}
+        for combo in scored:
+            key = keys[combo] = self._key(codes, combo)
+            values = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                values[held] = self._means(key[train], T[train], key[held])
+            oof[combo] = values
+        if self.survey and oof:
+            base = _stat_losses(np.broadcast_to(self.prior_mean, T.shape), y, n_classes)
+            losses = {combo: _stat_losses(values, y, n_classes) for combo, values in oof.items()}
+            mean = {combo: loss.mean() for combo, loss in losses.items()}
+            lifts = {}
+            for combo in scored:
+                # The reference is the best scored part (any smaller combination of its columns), else the global mean.
+                parts = [sub for r in range(1, len(combo)) for sub in combinations(combo, r) if sub in losses]
+                ref = losses[min(parts, key=mean.get)] if parts and min(map(mean.get, parts)) < base.mean() else base
+                fall = ref - losses[combo]
+                _, level = np.unique(keys[combo], return_inverse=True)
+                se = np.sqrt(np.sum(np.bincount(level, weights=fall - fall.mean()) ** 2)) / len(fall)
+                lifts[combo] = (fall.mean() / base.mean(), fall.mean() / se if se > 0 else 0.0)
+
+            def passes(combo):
+                return lifts[combo][0] > self.margin and lifts[combo][1] > self.z
+
+            def kept(candidates):
+                return sorted(filter(passes, candidates), key=lambda c: lifts[c][0], reverse=True)[: self.max_pairs]
+
+            if self.screen_singles:
+                singles = list(filter(passes, singles))
+            kept_pairs, kept_triples = kept(pairs), kept(triples)
+            best = f"; best pair {' x '.join(kept_pairs[0])} lifts {lifts[kept_pairs[0]][0]:.2%}" if kept_pairs else ""
+            print(
+                f"[ashlar] target statistics survey: kept {len(singles)} columns, {len(kept_pairs)} of {len(pairs)} "
+                f"pairs and {len(kept_triples)} of {len(triples)} triples{best}",
+                flush=True,
+            )
+            pairs, triples = kept_pairs, kept_triples
+            self.survey_ = lifts
+        self.combos = singles + pairs + triples + cat_pairs
+        self.num_cols = [c for c in X.columns if X[c].dtype != object] if self.k else []
+        parts = [oof[combo] for combo in self.combos]
+        if self.num_cols:
+            values = X[self.num_cols].to_numpy(dtype=np.float64)
+            self.center = np.nanmedian(values, axis=0)
+            self.scale = np.nanstd(values, axis=0) + 1e-9
+            near = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                near[held] = self._neighbours(X.iloc[train], T[train], X.iloc[held])
+            parts.append(near)
+        # The training frame is kept only for neighbour lookups; the statistics need just the codes.
+        self.X_, self.T_, self.codes_ = (X if self.num_cols else None), T, codes
+        return self._join(X, np.concatenate(parts, axis=1) if parts else np.zeros((len(X), 0)))
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        codes = self._codes(X)
+        parts = [self._means(self._key(self.codes_, combo), self.T_, self._key(codes, combo)) for combo in self.combos]
+        if self.num_cols:
+            parts.append(self._neighbours(self.X_, self.T_, X))
+        return self._join(X, np.concatenate(parts, axis=1) if parts else np.zeros((len(X), 0)))
+
+    # Columns a table may pair among in ``cat_pairs``: 64 columns make 2,016 candidate pairs.
+    CAT_POOL = 64
+
+    def _rank_cat_pairs(self, X, y, T, n_classes, folds, levels, exclude) -> list[tuple[str, str]]:
+        """The best ``cat_pairs`` pairs of object columns by their lift over their parts (see the class docstring)."""
+        from itertools import combinations
+
+        cols = [col for col, n in levels.items() if n >= 2]
+        codes = {col: pd.Index(pd.unique(X[col])).get_indexer(X[col]).astype(np.int64) for col in cols}
+
+        def statistic(key):
+            values = np.zeros((len(X), T.shape[1]))
+            for train, held in folds:
+                values[held] = self._means(key[train], T[train], key[held])
+            return values
+
+        prior = np.broadcast_to(self.prior_mean, T.shape)
+        base = _stat_losses(prior, y, n_classes)
+        stats = {col: statistic(codes[col]) for col in cols}
+        own = {col: _stat_losses(stats[col], y, n_classes) for col in cols}
+        if len(cols) > self.CAT_POOL:
+            best = set(sorted(cols, key=lambda col: own[col].mean())[: self.CAT_POOL])
+            cols = [col for col in cols if col in best]
+        lifts, plain = {}, 0
+        for a, b in combinations(cols, 2):
+            if (a, b) in exclude:
+                continue
+            key = codes[a] * (codes[b].max() + 1) + codes[b]
+            pair = _stat_losses(statistic(key), y, n_classes)
+            parts = min(own[a], own[b], base, key=np.mean)
+            plain += bool(parts.mean() > pair.mean())
+            refs = [parts]
+            if self.cat_pairs_additive:
+                refs += [_additive_losses(stats[a], stats[b], prior, y, n_classes, w) for w in (0.5, 1.0)]
+            fall = min(refs, key=np.mean) - pair
+            z = 0.0
+            if self.cat_pairs_z:
+                _, level = np.unique(key, return_inverse=True)
+                se = np.sqrt(np.sum(np.bincount(level, weights=fall - fall.mean()) ** 2)) / len(fall)
+                z = fall.mean() / se if se > 0 else 0.0
+            lifts[(a, b)] = (fall.mean() / base.mean(), z)
+        passing = [pair for pair, (lift, z) in lifts.items() if lift > 0 and (not self.cat_pairs_z or z > self.cat_pairs_z)]
+        kept = sorted(passing, key=lambda pair: lifts[pair][0], reverse=True)[: self.cat_pairs]
+        best = ""
+        if kept:
+            best = f"; best {' x '.join(kept[0])} lifts {lifts[kept[0]][0]:.2%}"
+            best += f" (z {lifts[kept[0]][1]:.1f})" if self.cat_pairs_z else ""
+        rule = f" ({plain} beat their parts)" if self.cat_pairs_additive or self.cat_pairs_z else ""
+        print(f"[ashlar] category pairs: kept {len(kept)} of {len(lifts)} candidates{rule}{best}", flush=True)
+        return kept
+
+    def _codes(self, X):
+        """Each statistic column as integer codes over the training levels; -1 for a level not seen in training."""
+        return {col: index.get_indexer(X[col]) for col, index in self.levels.items()}
+
+    def _key(self, codes, combo):
+        """One int64 key per row for a column or a combination; -1 when any part is unseen."""
+        key = codes[combo[0]].astype(np.int64)
+        unseen = key < 0
+        for col in combo[1:]:
+            key = key * len(self.levels[col]) + codes[col]
+            unseen |= codes[col] < 0
+        return np.where(unseen, -1, key)
+
+    def _means(self, key_fit, T_fit, key_new):
+        uniq, inverse = np.unique(key_fit, return_inverse=True)
+        counts = np.bincount(inverse, minlength=len(uniq)).astype(np.float64)
+        sums = np.stack(
+            [np.bincount(inverse, weights=T_fit[:, j], minlength=len(uniq)) for j in range(T_fit.shape[1])], axis=1
+        )
+        means = (sums + self.prior * self.prior_mean) / (counts[:, None] + self.prior)
+        position = np.clip(np.searchsorted(uniq, key_new), 0, len(uniq) - 1)
+        found = (uniq[position] == key_new) & (key_new >= 0)
+        return np.where(found[:, None], means[position], self.prior_mean)
+
+    def _neighbours(self, X_fit, T_fit, X_new):
+        from sklearn.neighbors import NearestNeighbors
+
+        def scaled(frame):
+            return np.nan_to_num((frame[self.num_cols].to_numpy(dtype=np.float64) - self.center) / self.scale)
+
+        k = min(self.k, len(X_fit))
+        _, nearest = NearestNeighbors(n_neighbors=k).fit(scaled(X_fit)).kneighbors(scaled(X_new))
+        return T_fit[nearest].mean(axis=1)
+
+    def _join(self, X, out):
+        names = [f"__oof{i}" for i in range(out.shape[1])]
+        return pd.concat([X.reset_index(drop=True), pd.DataFrame(out, columns=names)], axis=1).set_axis(X.index)
+
+
+def _row_keys(X: pd.DataFrame) -> np.ndarray:
+    """One 64-bit hash per row over every column, so rows with equal inputs share a key."""
+    return pd.util.hash_pandas_object(X, index=False).to_numpy()
+
+
+class _DuplicatePool:
+    """Partial pooling of exact duplicate rows toward their observed labels.
+
+    A row whose inputs equal those of ``n`` training rows is predicted as
+    ``(n * observed + m * model) / (n + m)``: the network's prediction is the
+    prior and the duplicates are the evidence, one empirical-Bayes effect per
+    distinct row. ``observed`` is the duplicates' class frequencies, or their
+    mean target for regression. The strength ``m`` is picked on the validation
+    fold by log loss or squared error, and pooling stays off when fewer than
+    ``min_matches`` validation rows have a duplicate in training, or when no
+    strength beats the network alone.
+    """
+
+    # Down to 0.01 because some tables repeat rows with identical targets (wine_quality: a quarter of its test rows).
+    GRID = (0.01, 0.03, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+
+    def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, min_matches: int = 8):
+        T = np.eye(n_classes)[np.asarray(y, dtype=np.int64)] if n_classes else np.asarray(y, dtype=np.float64)[:, None]
+        grouped = pd.DataFrame(T).assign(_key=_row_keys(X)).groupby("_key", sort=False)
+        sizes = grouped.size()
+        self.index = pd.Index(sizes.index)
+        self.counts = sizes.to_numpy(dtype=np.float64)
+        self.sums = grouped.sum().reindex(sizes.index).to_numpy(dtype=np.float64)
+        self.n_classes, self.min_matches = n_classes, min_matches
+        self.strength: float | None = None
+        self.val_matches = 0
+
+    def _lookup(self, X: pd.DataFrame):
+        position = self.index.get_indexer(_row_keys(X))
+        found = position >= 0
+        n = np.where(found, self.counts[position], 0.0)
+        sums = np.where(found[:, None], self.sums[position], 0.0)
+        return n, sums
+
+    @staticmethod
+    def _blend(pred, n, sums, strength):
+        return (sums + strength * pred) / (n[:, None] + strength)
+
+    def _loss(self, pred, y):
+        if self.n_classes:
+            return -np.mean(np.log(np.clip(pred[np.arange(len(y)), np.asarray(y, dtype=np.int64)], 1e-12, None)))
+        return float(np.mean((pred[:, 0] - y) ** 2))
+
+    def choose(self, X_val: pd.DataFrame, y_val: np.ndarray, pred_val: np.ndarray) -> float | None:
+        n, sums = self._lookup(X_val)
+        self.val_matches = int((n > 0).sum())
+        if self.val_matches < self.min_matches:
+            return None
+        best = self._loss(pred_val, y_val)
+        for strength in self.GRID:
+            loss = self._loss(self._blend(pred_val, n, sums, strength), y_val)
+            if loss < best:
+                self.strength, best = strength, loss
+        return self.strength
+
+    def apply(self, X: pd.DataFrame, pred: np.ndarray) -> np.ndarray:
+        if self.strength is None:
+            return pred
+        n, sums = self._lookup(X)
+        return self._blend(pred, n, sums, self.strength)
+
+
+def _mix64(v: np.ndarray) -> np.ndarray:
+    """The splitmix64 finaliser, so that sums of keyed products spread over all 64 bits."""
+    v = v.astype(np.uint64)
+    v ^= v >> np.uint64(30)
+    v *= np.uint64(0xBF58476D1CE4E5B9)
+    v ^= v >> np.uint64(27)
+    v *= np.uint64(0x94D049BB133111EB)
+    v ^= v >> np.uint64(31)
+    return v
+
+
+class _MatchKeys:
+    """Integer keys for partial-match pooling: each numeric column's quantile bin at each resolution (training
+    edges; missing values get their own key), and each object column's training level (unseen levels match nothing)."""
+
+    def __init__(self, X: pd.DataFrame, resolutions: tuple[int, ...] = (4, 16)):
+        self.specs: list[tuple[str, str, object]] = []
+        self.labels: list[str] = []
+        for col in X.columns:
+            if X[col].dtype == object:
+                self.specs.append((col, "level", pd.Index(pd.unique(X[col].astype(str)))))
+                self.labels.append(col)
+                continue
+            values = pd.to_numeric(X[col], errors="coerce").to_numpy(dtype=np.float64)
+            finite = values[np.isfinite(values)]
+            seen = set()
+            for r in resolutions if finite.size else ():
+                edges = np.unique(np.quantile(finite, np.linspace(0, 1, r + 1)[1:-1]))
+                if edges.size == 0 or edges.tobytes() in seen:
+                    continue  # one value only, or the same bins as a coarser resolution
+                seen.add(edges.tobytes())
+                self.specs.append((col, "bins", edges))
+                self.labels.append(f"{col}/q{r}")
+        rng = np.random.default_rng(20261106)
+        self.mult = rng.integers(1, 2**62, size=len(self.specs), dtype=np.int64).astype(np.uint64) | np.uint64(1)
+
+    def transform(self, X: pd.DataFrame) -> np.ndarray:
+        out = np.empty((len(X), len(self.specs)), dtype=np.int64)
+        for j, (col, kind, payload) in enumerate(self.specs):
+            if kind == "level":
+                k = payload.get_indexer(X[col].astype(str))
+                out[:, j] = np.where(k < 0, -2, k)
+            else:
+                v = pd.to_numeric(X[col], errors="coerce").to_numpy(dtype=np.float64)
+                out[:, j] = np.where(np.isfinite(v), np.searchsorted(payload, v, side="right"), -1)
+        return out
+
+    def hash(self, keys: np.ndarray, subset) -> np.ndarray:
+        """One 64-bit hash per row of its keys on ``subset``, so rows that agree on all of them share it."""
+        h = np.zeros(len(keys), dtype=np.uint64)
+        for j in subset:
+            h += (keys[:, j] + 3).astype(np.uint64) * self.mult[j]
+        return _mix64(h)
+
+
+def _pmp_predict(params, base, stacks):
+    """base + sum over kernels of gamma * sum_S A_S G_S / (lambda + sum_S A_S H_S), with A_S = prod_{c in S} a_c.
+
+    a_c = exp(theta_c): a full conjunction often wants a_c in the tens, which a log scale reaches in a few dozen steps.
+    """
+    import jax.numpy as jnp
+
+    z = base
+    for p, (G, H, mask) in zip(params, stacks):
+        A = jnp.exp(mask @ jnp.clip(p["theta"], -15.0, 15.0))[:, None, None]
+        z = z + p["gamma"] * (A * G).sum(0) / (jnp.exp(p["log_lam"]) + (A * H).sum(0))
+    return z
+
+
+_PMP_STEPS: dict = {}
+
+
+def _pmp_step(classification: bool):
+    """A jitted Adam step on the validation loss of the corrected prediction, one per task kind."""
+    if classification not in _PMP_STEPS:
+        import jax
+        import optax
+
+        opt = optax.adam(0.05)
+
+        def loss(params, base, stacks, target):
+            z = _pmp_predict(params, base, stacks)
+            if classification:
+                return -(target * jax.nn.log_softmax(z, axis=1)).sum(1).mean()
+            return ((target - z) ** 2).mean()
+
+        @jax.jit
+        def step(params, state, base, stacks, target):
+            value, grads = jax.value_and_grad(loss)(params, base, stacks, target)
+            updates, state = opt.update(grads, state, params)
+            return optax.apply_updates(params, updates), state, value
+
+        _PMP_STEPS[classification] = (opt, step, jax.jit(loss))
+    return _PMP_STEPS[classification]
+
+
+class _PartialMatchPool:
+    """Partial-match pooling: ``_DuplicatePool`` with a learned match in place of an exact one.
+
+    A kernel over a few keys (``_MatchKeys``), ``w(q, r) = prod_c (1 + a_c [key_c(q) = key_c(r)]) - 1``, weights
+    each training row by the keys it shares with the query. Expanded, it is a weighted sum over every nonempty subset
+    S of the kernel's keys of the training rows that match the query on all of S, with weight ``prod_{c in S} a_c``:
+    a soft leaf that backs off from the full conjunction to its parts. The correction is a Newton step on the network's
+    training gradients g and Hessians h (``y - p`` and ``p (1 - p)`` per class on the log-probabilities, or ``y - f``
+    and 1 for regression), ``gamma * sum_r w g / (lambda + sum_r w h)``, the leaf value of a boosted tree, and the
+    kernels add up. Every sum comes from per-subset group tables of g and h, which do not depend on a, so a, lambda
+    and gamma are fitted exactly by gradient descent on the validation fold, whose rows never see their own labels.
+    Kernels grow greedily: a new kernel from one key or a pair of keys (so a pure interaction is found), or one more
+    key in a kernel. Each half of the validation rows proposes a move with weights fitted on its own rows, and the
+    other half judges it: a move is kept only if it lowers the judging half's loss by ``z_min`` standard errors of the
+    per-row differences (when both halves propose the same move, both judgements count). The kept kernels' weights
+    are then refitted on every validation row. With one kernel over every column and a large a, it is exact duplicate
+    pooling.
+    """
+
+    def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, pred: np.ndarray):
+        self.keys = _MatchKeys(X)
+        self.n_classes = n_classes
+        self._train = self.keys.transform(X)
+        pred = np.asarray(pred, dtype=np.float64)
+        if n_classes:
+            P = np.clip(pred, 1e-6, 1.0)
+            P /= P.sum(1, keepdims=True)
+            self._g = np.eye(n_classes)[np.asarray(y, dtype=np.int64)] - P
+            self._h = P * (1.0 - P)
+        else:
+            self._g = (np.asarray(y, dtype=np.float64) - pred[:, 0])[:, None]
+            self._h = np.ones_like(self._g)
+        self.tables: dict = {}
+        self.kernels: list[list[int]] = []
+        self.params: list[dict] = []
+        self.trace: list = []
+        self.report = "off"
+
+    def _table(self, S, keep: bool):
+        S = tuple(sorted(S))
+        if S in self.tables:
+            return self.tables[S]
+        codes, uniques = pd.factorize(self.keys.hash(self._train, S))
+        G = np.stack([np.bincount(codes, weights=self._g[:, c], minlength=len(uniques)) for c in range(self._g.shape[1])], 1)
+        H = np.stack([np.bincount(codes, weights=self._h[:, c], minlength=len(uniques)) for c in range(self._h.shape[1])], 1)
+        table = (pd.Index(uniques), G.astype(np.float32), H.astype(np.float32))
+        if keep:
+            self.tables[S] = table
+        return table
+
+    def _lookup(self, S, keys: np.ndarray, keep: bool = True):
+        index, G, H = self._table(S, keep)
+        pos = index.get_indexer(self.keys.hash(keys, tuple(sorted(S))))
+        found = (pos >= 0)[:, None]
+        pos = np.maximum(pos, 0)
+        return np.where(found, G[pos], 0.0), np.where(found, H[pos], 0.0)
+
+    def _stack(self, kernel, keys):
+        subsets = [S for r in range(1, len(kernel) + 1) for S in itertools.combinations(range(len(kernel)), r)]
+        Gs, Hs = zip(*(self._lookup([kernel[j] for j in S], keys) for S in subsets))
+        mask = np.zeros((len(subsets), len(kernel)), dtype=np.float32)
+        for i, S in enumerate(subsets):
+            mask[i, list(S)] = 1.0
+        return np.stack(Gs).astype(np.float32), np.stack(Hs).astype(np.float32), mask
+
+    def _base(self, pred):
+        pred = np.asarray(pred, dtype=np.float64)
+        return np.log(np.clip(pred, 1e-6, 1.0)) if self.n_classes else pred
+
+    def _rows(self, z, target):
+        if self.n_classes:
+            z = z - z.max(1, keepdims=True)
+            return -((z - np.log(np.exp(z).sum(1, keepdims=True))) * target).sum(1)
+        return (target[:, 0] - z[:, 0]) ** 2
+
+    def _fit(self, kernels, init, base, target, keys, steps):
+        import jax.numpy as jnp
+
+        opt, step, loss = _pmp_step(bool(self.n_classes))
+        stacks = [tuple(jnp.asarray(v) for v in self._stack(k, keys)) for k in kernels]
+        base, target = jnp.asarray(base, jnp.float32), jnp.asarray(target, jnp.float32)
+        params, state = init, opt.init(init)
+        for _ in range(steps):
+            params, state, _ = step(params, state, base, stacks, target)
+        return params, float(loss(params, base, stacks, target)), stacks
+
+    def _needed(self, kernels):
+        return {tuple(sorted(k[j] for j in S)) for k in kernels for r in range(1, len(k) + 1) for S in itertools.combinations(range(len(k)), r)}
+
+    def choose(self, X_val, y_val, pred_val, max_kernels=4, max_keys=4, max_steps=8, n_single=24, n_pair=24, n_add=12,
+               z_min=0.75, max_seconds=300.0, seed=0, cross=True):
+        """Greedy search on one half of the validation rows, judged on the other half, then a refit on all of them.
+
+        The search tries many moves, so the loss it sees is optimistic. Each half proposes its best move with weights
+        fitted on its own rows, and a move is kept only if it lowers the loss of the other half by ``z_min`` standard
+        errors of the per-row differences. When both halves propose the same move, both judgements count, so the test
+        uses every validation row; ``cross=False`` searches on one half only.
+        """
+        import jax.numpy as jnp
+
+        started = time.monotonic()
+        keys = self.keys.transform(X_val)
+        base = self._base(pred_val)
+        target = np.eye(self.n_classes)[np.asarray(y_val, dtype=np.int64)] if self.n_classes else np.asarray(y_val, dtype=np.float64)[:, None]
+        lam0 = 2.0 if self.n_classes else 10.0
+        one = 0.0  # theta for a = 1
+
+        def fresh(k):
+            return {"theta": jnp.full((k,), one, jnp.float32), "log_lam": jnp.float32(np.log(lam0)), "gamma": jnp.float32(1.0)}
+
+        def corrected(params, kernels, half):
+            k, b, _ = data[half]
+            stacks = [tuple(jnp.asarray(v) for v in self._stack(kern, k)) for kern in kernels]
+            return np.asarray(_pmp_predict(params, jnp.asarray(b, jnp.float32), stacks), dtype=np.float64)
+
+        def label(ks):
+            return "&".join(self.keys.labels[c] for c in ks)
+
+        def build(move, params):
+            """The kernels and initial weights after ``move``: ("new", keys) adds a kernel, ("grow", j, c) a key."""
+            if move[0] == "new":
+                return self.kernels + [list(move[1])], params + [fresh(len(move[1]))]
+            _, j, c = move
+            grown = [{**p, "theta": jnp.concatenate([p["theta"], jnp.full((1,), one, jnp.float32)])} if i == j else p for i, p in enumerate(params)]
+            return [k + [c] if i == j else k for i, k in enumerate(self.kernels)], grown
+
+        self.trace = []
+        perm = np.random.default_rng(seed).permutation(len(base))
+        halves = [np.sort(perm[: len(perm) // 2]), np.sort(perm[len(perm) // 2 :])]
+        data = [(keys[h], base[h], target[h]) for h in halves]
+        params = [[], []]  # the kernels' weights fitted on each half
+        own = [data[i][1].copy() for i in range(2)]  # each half's prediction under its own weights, where its search starts
+        judged = [self._rows(data[i][1], data[i][2]) for i in range(2)]  # each half's loss under the other half's weights
+        before = np.concatenate(judged).mean() if cross else judged[1].mean()
+
+        def search(i):
+            """Half i's best move and the trial kernels' weights fitted on half i."""
+            k_i, b_i, t_i = data[i]
+
+            def screen(S):
+                g, h = self._lookup(S, k_i, keep=False)
+                return self._rows(own[i] + g / (lam0 + h), t_i).mean()
+
+            single = np.array([screen((c,)) for c in range(n_keys)])
+            ranked = list(np.argsort(single))
+            top, pool = ranked[:n_single], ranked[: 2 * n_single]
+            pairs = [(a, b) for n, a in enumerate(top) for b in pool if b != a and (b not in top or top.index(b) > n)]
+            pair_scores = np.array([screen(pr) for pr in pairs]) if pairs else np.zeros(0)
+            have = {frozenset(k) for k in self.kernels}
+            moves = []
+            if len(self.kernels) < max_kernels:
+                moves += [("new", (int(c),)) for c in top[:n_add]]
+                moves += [("new", tuple(sorted(int(v) for v in pairs[n]))) for n in np.argsort(pair_scores)[:n_pair]]
+                moves = [mv for mv in moves if frozenset(mv[1]) not in have]
+            moves += [
+                ("grow", j, int(c))
+                for j, k in enumerate(self.kernels)
+                if len(k) < max_keys
+                for c in top[:n_add]
+                if c not in k and frozenset(k + [int(c)]) not in have
+            ]
+            best = None
+            for mv in dict.fromkeys(moves):
+                trial, init = build(mv, params[i])
+                p, value, _ = self._fit(trial, init, b_i, t_i, k_i, steps=60)
+                if best is None or value < best[0]:
+                    best = (value, mv, p)
+                if time.monotonic() - started > max_seconds:
+                    break
+            if best is None:
+                return None
+            trial, _ = build(best[1], params[i])
+            return best[1], self._fit(trial, best[2], b_i, t_i, k_i, steps=500)[0]
+
+        n_keys = len(self.keys.specs)
+        for _ in range(max_steps if n_keys and len(halves[1]) > 1 else 0):
+            if time.monotonic() - started > max_seconds:
+                break
+            proposals = [search(0), search(1) if cross else None]
+            fitted = {}  # move -> {half: weights fitted on that half}
+            for i, prop in enumerate(proposals):
+                if prop is not None:
+                    fitted.setdefault(prop[0], {})[i] = prop[1]
+            best = None
+            for mv, by_half in fitted.items():
+                trial, _ = build(mv, params[0])
+                # A half's weights are judged on the other half's rows.
+                d = np.concatenate([judged[1 - i] - self._rows(corrected(p, trial, 1 - i), data[1 - i][2]) for i, p in by_half.items()])
+                z = float(d.mean() / (d.std(ddof=1) / np.sqrt(len(d)) + 1e-12))
+                if best is None or z > best[0]:
+                    best = (z, mv, by_half)
+            if best is None:
+                break
+            z, mv, by_half = best
+            trial, _ = build(mv, params[0])
+            self.trace.append((f"new {label(mv[1])}" if mv[0] == "new" else f"{label(self.kernels[mv[1]])} + {label([mv[2]])}", round(z, 2), len(by_half)))
+            if z < z_min:
+                break
+            for i in range(2 if cross else 1):
+                if i not in by_half:
+                    t, init = build(mv, params[i])
+                    by_half[i] = self._fit(t, init, data[i][1], data[i][2], data[i][0], steps=500)[0]
+            self.kernels = trial
+            params = [by_half.get(0, []), by_half.get(1, [])]
+            for i in range(2 if cross else 1):
+                own[i] = corrected(params[i], trial, i)
+                judged[1 - i] = self._rows(corrected(params[i], trial, 1 - i), data[1 - i][2])
+            # Keep only the accepted kernels' tables between steps, so the trial moves do not pile up memory.
+            needed = self._needed(self.kernels)
+            self.tables = {S: t for S, t in self.tables.items() if S in needed}
+        if self.kernels:
+            # The structure stays; its weights are refitted on every validation row.
+            self.params, _, _ = self._fit(self.kernels, params[0], base, target, keys, steps=500)
+        needed = self._needed(self.kernels)
+        self.tables = {S: t for S, t in self.tables.items() if S in needed}
+        self.params = [{name: np.asarray(v) for name, v in p.items()} for p in self.params]
+        del self._train, self._g, self._h
+        after = (np.concatenate(judged) if cross else judged[1]).mean()
+        names = [[self.keys.labels[c] for c in k] for k in self.kernels]
+        where = "validation, each half judged by the other" if cross else "held-out half of validation"
+        steps = ", ".join(f"{move} z {z:.2f} ({'both halves' if n == 2 else 'one half'})" for move, z, n in self.trace)
+        self.report = (f"kernels {names}, {where} {before:.5f} -> {after:.5f}" if self.kernels else f"nothing kept ({where} {before:.5f})") + f"; steps: {steps or 'none'}"
+        return bool(self.kernels)
+
+    def apply(self, X: pd.DataFrame, pred: np.ndarray) -> np.ndarray:
+        if not self.kernels:
+            return pred
+        import jax.numpy as jnp
+
+        keys = self.keys.transform(X)
+        stacks = [tuple(jnp.asarray(v) for v in self._stack(k, keys)) for k in self.kernels]
+        params = [{name: jnp.asarray(v) for name, v in p.items()} for p in self.params]
+        z = np.asarray(_pmp_predict(params, jnp.asarray(self._base(pred), jnp.float32), stacks), dtype=np.float64)
+        if not self.n_classes:
+            return z
+        z -= z.max(1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(1, keepdims=True)
+
+
+# Flat hyperparameters the search space samples; they go into backbone_kwargs.
+_BACKBONE_KEYS = ("n_blocks", "d_block", "dropout", "k", "arch_type")
+
+
+class AshlarModel(AbstractModel):
+    """Ashlar: distributional neural networks for tabular data, in JAX.
+
+    Codebase: https://github.com/maxmbay/ashlar (PyPI: ashlar-tabular)
+    License: Apache-2.0
+    """
+
+    ag_key = "ASR"
+    ag_name = "Ashlar"
+    ag_priority = 65
+    seed_name = "random_state"
+    _supported_problem_types = ["binary", "multiclass", "regression"]
+    recipe = "default"
+    #: Defaults applied under the sampled hyperparameters.
+    defaults: dict = {}
+    #: TabArena TabM's batch size by training rows (32 below 2,800 up to 512 above 32k), instead of Ashlar's "auto".
+    batch_rule: bool = False
+    #: Pool categorical columns with at least this many training levels as random effects (intercept + embedding).
+    pool_min_levels: int | None = None
+    #: Early-stop binary tasks on validation ROC AUC, the metric TabArena scores them on.
+    stop_on_auc: bool = False
+    #: Early-stop on the metric TabArena scores, of the averaged ensemble, as TabArena's TabM does. Maps the problem
+    #: type to an Ashlar early_stopping_metric; a missing type keeps the loss.
+    stop_on_metric: dict | None = None
+    #: Add a 0/1 categorical "<column>__missing" for each numeric column with missing training values (TabM's
+    #: SimpleImputer(add_indicator=True)). Ashlar alone fills them with the median.
+    missing_indicators: bool = False
+    #: Out-of-fold CatBoost-style target statistics for object columns with 10+ levels.
+    target_stats: bool = False
+    #: Out-of-fold mean target of this many nearest training rows (0 = off).
+    neighbour_targets: int = 0
+    #: Minimum training levels for target statistics, and whether pairs of those columns get their own.
+    target_stats_min_levels: int = 10
+    target_stats_pairs: bool = False
+    target_stats_triples: bool = False
+    #: Screen the statistics before training and keep only those that predict the target (see _OutOfFoldFeatures),
+    #: and the level count from which a column may join a pair (default: target_stats_min_levels).
+    target_stats_survey: bool = False
+    target_stats_pair_min_levels: int | None = None
+    #: The survey's bar: the loss fall a statistic needs (share of the global mean's loss), its standard errors, and
+    #: whether single columns are screened too or always kept.
+    target_stats_survey_margin: float = 0.001
+    target_stats_survey_z: float = 1.0
+    target_stats_survey_singles: bool = True
+    #: Feed the network the statistics instead of the ID-like columns themselves (no embedding for those columns),
+    #: as CatBoost does for high-cardinality categoricals. A table keeps its columns if nothing else would be left.
+    target_stats_replace: bool = False
+    #: Also add statistics for up to this many pairs of any two categorical columns, ranked by their lift over their
+    #: parts (``_OutOfFoldFeatures.cat_pairs``). Needs ``target_stats``.
+    target_stats_cat_pairs: int = 0
+    target_stats_cat_pairs_additive: bool = False
+    target_stats_cat_pairs_z: float = 0.0
+    #: One-hot categorical columns with at most this many training levels and embed the rest, as RealMLP does with 9
+    #: (TabArena's TabM one-hots every column). ``None`` embeds every categorical column, Ashlar's default.
+    onehot_max_levels: int | None = None
+    #: With per-member batches, fall back to shared batches when a network input column has this many levels.
+    #: Each member then updates a rare level's shared embedding on its own step, k times per epoch instead of once.
+    member_batches_max_levels: int | None = None
+    #: Fit a softmax temperature on the validation fold (classification).
+    temperature_scaling: bool = False
+    temperature_: float = 1.0
+    #: Pool rows that exactly repeat training rows toward the repeats' labels (see ``_DuplicatePool``).
+    duplicate_pooling: bool = False
+    _pool: _DuplicatePool | None = None
+    #: After training, correct the network with a learned match over binned columns (see ``_PartialMatchPool``).
+    partial_match_pooling: bool = False
+    _pmp: _PartialMatchPool | None = None
+    #: Give every categorical column whose 3 to ``numeric_categories_max_levels`` levels all read as numbers a
+    #: numeric copy, ``<column>__num``, so the network can order and interpolate them. The category stays.
+    numeric_categories: bool = False
+    numeric_categories_max_levels: int = 100
+    #: Merge levels seen fewer than this many times in training into one trained "__rare__" level, which also takes
+    #: levels never seen in training. Without it an unseen level gets the embedding's untrained unknown row.
+    rare_min_count: int = 0
+    #: Add log(1 + training count) of the level, ``<column>__count``, for object columns with at least this many
+    #: training levels (0 = off). Popularity is CatBoost's other categorical statistic, and it needs no labels.
+    count_min_levels: int = 0
+
+    def _preprocess(self, X: pd.DataFrame, is_train: bool = False, **kwargs) -> pd.DataFrame:
+        X = super()._preprocess(X, **kwargs)
+        X = X.copy()
+        X.columns = [str(c) for c in X.columns]
+        # Ashlar embeds non-numeric columns. AutoGluon hands categoricals as
+        # pandas ``category``, whose integer categories would read as numeric,
+        # so pass them as strings. Missing becomes its own "nan" level.
+        if is_train:
+            # AutoGluon recodes two-valued columns as uint8 0/1 ("bool" special type); keep them categorical so they
+            # get an embedding, not piecewise numeric bins over two points.
+            self._bool_features = [str(c) for c in self._feature_metadata.get_features(required_special_types=["bool"])]
+        flags = set(getattr(self, "_bool_features", []))
+        if is_train:
+            self._missing_columns = [
+                col
+                for col in X.columns
+                if self.missing_indicators
+                and col not in flags
+                and pd.api.types.is_numeric_dtype(X[col].dtype)
+                and X[col].isna().any()
+            ]
+            if self.missing_indicators:
+                print(f"[ashlar] missing flags: {len(self._missing_columns)} numeric columns with missing values", flush=True)
+        if is_train:
+            self._numeric_copies = []
+            for col in X.columns if self.numeric_categories else []:
+                if col in flags or not isinstance(X[col].dtype, pd.CategoricalDtype):
+                    continue
+                levels = pd.Series(X[col].cat.categories).astype(str)
+                if 3 <= len(levels) <= self.numeric_categories_max_levels and pd.to_numeric(levels, errors="coerce").notna().all():
+                    self._numeric_copies.append(col)
+        copies = {
+            f"{col}__num": pd.to_numeric(X[col].astype(str), errors="coerce").astype(np.float64)
+            for col in getattr(self, "_numeric_copies", [])
+        }
+        for col in X.columns:
+            if isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == bool or col in flags:
+                X[col] = X[col].astype(str).astype(object)
+        for name, values in copies.items():
+            X[name] = values
+        for col in getattr(self, "_missing_columns", []):
+            X[f"{col}__missing"] = np.where(X[col].isna(), "1", "0").astype(object)
+        return X
+
+    def _level_features(self, X: pd.DataFrame, is_train: bool = False) -> pd.DataFrame:
+        """Level counts and the rare-level bucket, after ``preprocess`` (whose rows the duplicate pool compares)."""
+        if not (self.rare_min_count or self.count_min_levels):
+            return X
+        X = X.copy()
+        if is_train:
+            objects = [col for col in X.columns if X[col].dtype == object]
+            counts = {col: X[col].value_counts(dropna=False) for col in objects}
+            self._count_tables = (
+                {col: counts[col] for col in objects if len(counts[col]) >= self.count_min_levels}
+                if self.count_min_levels
+                else {}
+            )
+            self._kept_levels = {}
+            for col in objects if self.rare_min_count else []:
+                frequent = counts[col][counts[col] >= self.rare_min_count]
+                if len(frequent) < len(counts[col]):
+                    self._kept_levels[col] = set(frequent.index)
+        for col, table in getattr(self, "_count_tables", {}).items():
+            X[f"{col}__count"] = np.log1p(X[col].map(table).fillna(0).to_numpy(dtype=np.float64))
+        for col, kept in getattr(self, "_kept_levels", {}).items():
+            X[col] = X[col].where(X[col].isin(kept), "__rare__")
+        return X
+
+    def _build(self, params: dict):
+        from ashlar import ASRClassifier, ASRRegressor, tabm_piecewise
+
+        params = {**self.defaults, **params}
+        backbone = {key: params.pop(key) for key in _BACKBONE_KEYS if key in params}
+        classification = self.problem_type in ("binary", "multiclass")
+        if not classification:
+            # Classification-only settings shared by a variant's defaults.
+            params.pop("label_smoothing", None)
+            params.pop("soft_stages", None)
+            if params.get("early_stopping_metric") in {"log_loss", "accuracy", "roc_auc"}:
+                params.pop("early_stopping_metric")
+        # A distribution head for regression (its mean is the point prediction).
+        task = "classification" if classification else params.pop("task", "regression")
+        params.pop("task", None)
+        if self.recipe == "tabm_piecewise":
+            if backbone:
+                base = {"n_blocks": 2, "d_block": 256, "dropout": 0.1, "k": 32, "start_scaling_init": "normal"}
+                params["backbone_kwargs"] = {**base, **backbone}
+            return tabm_piecewise(task=task, **params)
+        if backbone:
+            backbone.pop("k", None)
+            backbone.pop("arch_type", None)
+            params["backbone_kwargs"] = {"n_blocks": 3, "d_block": 256, "dropout": 0.1, **backbone}
+        if classification:
+            return ASRClassifier(**params)
+        return ASRRegressor(**params) if task == "regression" else ASRRegressor(task=task, **params)
+
+    def _fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        X_val: pd.DataFrame | None = None,
+        y_val: pd.Series | None = None,
+        time_limit: float | None = None,
+        num_cpus: int = 1,
+        num_gpus: float = 0,
+        **kwargs,
+    ) -> None:
+        _limit_cpus(num_cpus)
+        X = self.preprocess(X, is_train=True)
+        y = np.asarray(y, dtype=np.float32 if self.problem_type == "regression" else np.int64)
+        validation = None
+        if X_val is not None and y_val is not None:
+            X_val = self.preprocess(X_val)
+            y_val = np.asarray(y_val, dtype=y.dtype)
+            validation = (X_val, y_val)
+        n_classes = None if self.problem_type == "regression" else int(self.num_classes)
+        self._pool = _DuplicatePool(X, y, n_classes) if self.duplicate_pooling and validation is not None else None
+        raw_train, raw_val = X, X_val
+        X = self._level_features(X, is_train=True)
+        if validation is not None:
+            X_val = self._level_features(X_val)
+            validation = (X_val, y_val)
+        self._oof = None
+        if self.target_stats or self.neighbour_targets:
+            self._oof = _OutOfFoldFeatures(
+                self.target_stats,
+                self.neighbour_targets,
+                min_levels=self.target_stats_min_levels,
+                pairs=self.target_stats_pairs,
+                triples=self.target_stats_triples,
+                survey=self.target_stats_survey,
+                pair_min_levels=self.target_stats_pair_min_levels,
+                margin=self.target_stats_survey_margin,
+                z=self.target_stats_survey_z,
+                screen_singles=self.target_stats_survey_singles,
+                cat_pairs=self.target_stats_cat_pairs,
+                cat_pairs_additive=self.target_stats_cat_pairs_additive,
+                cat_pairs_z=self.target_stats_cat_pairs_z,
+            )
+            X = self._oof.fit_transform(X, y, n_classes)
+            if validation is not None:
+                X_val = self._oof.transform(X_val)
+                validation = (X_val, y_val)
+            self._replaced = []
+            if self.target_stats_replace and len(self._oof.id_cols) < X.shape[1]:
+                self._replaced = list(self._oof.id_cols)
+                X = X.drop(columns=self._replaced)
+                if validation is not None:
+                    X_val = X_val.drop(columns=self._replaced)
+                    validation = (X_val, y_val)
+                if self._replaced:
+                    print(f"[ashlar] statistics replace {len(self._replaced)} ID columns: {self._replaced}", flush=True)
+        params = self._get_model_params()
+        if self.member_batches_max_levels is not None and not {**self.defaults, **params}.get(
+            "share_training_batches", True
+        ):
+            wide = {
+                col: n
+                for col in X.columns
+                if X[col].dtype == object and (n := X[col].nunique(dropna=False)) >= self.member_batches_max_levels
+            }
+            if wide:
+                params["share_training_batches"] = True
+                print(f"[ashlar] shared batches: {len(wide)} columns with {max(wide.values())}+ levels", flush=True)
+        if self.onehot_max_levels is not None and "categorical_embeddings" not in params:
+            objects = [col for col in X.columns if X[col].dtype == object]
+            params["categorical_embeddings"] = [
+                col for col in objects if X[col].nunique(dropna=False) > self.onehot_max_levels
+            ]
+            print(
+                f"[ashlar] one-hot {len(objects) - len(params['categorical_embeddings'])} categorical columns, "
+                f"embed {len(params['categorical_embeddings'])}",
+                flush=True,
+            )
+        if self.batch_rule and "batch_size" not in params:
+            params["batch_size"] = _tabm_batch_size(*X.shape)
+        if self.stop_on_metric and self.problem_type in self.stop_on_metric:
+            params.setdefault("early_stopping_metric", self.stop_on_metric[self.problem_type])
+        if self.stop_on_auc and self.problem_type == "binary":
+            params.setdefault("early_stopping_metric", "roc_auc")
+        if self.pool_min_levels is not None and "random_effects" not in params:
+            pooled = {
+                col: ["intercept", "embedding"]
+                for col in X.columns
+                if X[col].dtype == object and X[col].nunique(dropna=True) >= self.pool_min_levels
+            }
+            if pooled:
+                params["random_effects"] = pooled
+        if time_limit is not None and "time_limit" not in params:
+            # Leave room for the post-training finish, pickling and out-of-fold prediction.
+            params["time_limit"] = max(1.0, 0.85 * float(time_limit))
+        self.model = self._build(params)
+        started = time.monotonic()
+        self.model.fit(X, y, validation=validation)
+        # One line per fold model in the run log: a fit cut short by the budget is not comparable across variants.
+        deadline = getattr(self.model, "_deadline", None)
+        stopped = deadline is not None and time.monotonic() >= deadline
+        print(
+            f"[ashlar] {len((getattr(self.model, 'history_', None) or {}).get('train_loss', []))} epochs in "
+            f"{time.monotonic() - started:.0f}s" + (f", stopped by the {params['time_limit']:.0f}s budget" if stopped else ""),
+            flush=True,
+        )
+        if getattr(self.model.core_, "trees", None) is not None and validation is not None:
+            self._report_trees(X_val, y_val)
+        if getattr(self.model.core_, "gates", None) is not None:
+            opened = np.asarray(self.model.core_.gates.open_fields())
+            print(f"[ashlar] feature gates: {int(opened.sum())} of {opened.size} fields open", flush=True)
+        if self.temperature_scaling and validation is not None and self.problem_type != "regression":
+            self.temperature_ = _fit_temperature(self._aligned_proba(X_val), y_val)
+        if self._pool is not None:
+            self._pool.choose(raw_val, y_val, self._network_prediction(X_val))
+            # One line per fold model in the run log, since TabArena keeps predictions, not models.
+            print(
+                f"[ashlar] duplicate pooling: {self._pool.val_matches} of {len(y_val)} validation rows repeat a "
+                f"training row; strength {self._pool.strength}",
+                flush=True,
+            )
+        self._pmp = None
+        if self.partial_match_pooling and validation is not None:
+            started = time.monotonic()
+            pmp = _PartialMatchPool(raw_train, y, n_classes, self._network_prediction(X))
+            pred_val = self._network_prediction(X_val)
+            if self._pool is not None:
+                pred_val = self._pool.apply(raw_val, pred_val)
+            budget = 300.0 if time_limit is None else max(30.0, 0.08 * float(time_limit))
+            if pmp.choose(raw_val, y_val, pred_val, max_seconds=budget):
+                self._pmp = pmp
+            print(f"[ashlar] partial-match pooling: {pmp.report}, {time.monotonic() - started:.0f}s", flush=True)
+
+    def _report_trees(self, X_val: pd.DataFrame, y_val: np.ndarray) -> None:
+        """One line per fold model: the validation loss with the soft trees and with their leaves set to zero.
+
+        Zero leaves add nothing to the head's outputs, so the second number is the network alone. A wide gap with
+        no gain over tabm_v4 means the trees took over signal the network finds anyway.
+        """
+        import equinox as eqx
+        import jax.numpy as jnp
+
+        def loss(pred: np.ndarray) -> float:
+            if self.problem_type == "regression":
+                return float(np.sqrt(np.mean((pred[:, 0] - y_val) ** 2)))
+            return float(-np.mean(np.log(np.clip(pred[np.arange(len(y_val)), y_val], 1e-15, None))))
+
+        fitted = self.model.core_
+        with_trees = loss(self._network_prediction(X_val))
+        self.model.core_ = eqx.tree_at(lambda core: core.trees.layer.leaves, fitted, jnp.zeros_like(fitted.trees.layer.leaves))
+        try:
+            without = loss(self._network_prediction(X_val))
+        finally:
+            self.model.core_ = fitted
+        name = "RMSE" if self.problem_type == "regression" else "log loss"
+        print(f"[ashlar] soft trees: validation {name} {with_trees:.4f} with them, {without:.4f} without", flush=True)
+
+    def _network_prediction(self, X: pd.DataFrame) -> np.ndarray:
+        """The network's prediction on model-ready inputs: (rows, classes) probabilities, or (rows, 1) targets."""
+        if self.problem_type == "regression":
+            return np.asarray(self.model.predict(X), dtype=np.float64).reshape(-1, 1)
+        full = self._aligned_proba(X)
+        return _tempered(full, self.temperature_) if self.temperature_ != 1.0 else full
+
+    def _predict_proba(self, X, **kwargs) -> np.ndarray:
+        X = self.preprocess(X, **kwargs)
+        raw = X
+        X = self._level_features(X)
+        if getattr(self, "_oof", None) is not None:
+            X = self._oof.transform(X)
+            if getattr(self, "_replaced", None):
+                X = X.drop(columns=self._replaced)
+        pred = self._network_prediction(X)
+        if getattr(self, "_pool", None) is not None:
+            pred = self._pool.apply(raw, pred)
+        if getattr(self, "_pmp", None) is not None:
+            pred = self._pmp.apply(raw, pred)
+        if self.problem_type == "regression":
+            return pred[:, 0].astype(np.float32)
+        return self._convert_proba_to_unified_form(pred.astype(np.float32))
+
+    def _aligned_proba(self, X: pd.DataFrame) -> np.ndarray:
+        proba = np.asarray(self.model.predict_proba(X), dtype=np.float64)
+        # AutoGluon labels are 0..K-1; align columns to them in case a class
+        # was missing from a training fold.
+        classes = list(np.asarray(self.model.classes_).astype(int))
+        full = np.zeros((len(X), self.num_classes), dtype=np.float64)
+        full[:, classes] = proba
+        return full
+
+    def _set_default_params(self) -> None:
+        self._set_default_param_value("random_state", 0)
+
+    def _get_default_auxiliary_params(self) -> dict:
+        params = super()._get_default_auxiliary_params()
+        params.update({"valid_raw_types": ["int", "float", "category", "bool"]})
+        return params
+
+    def _more_tags(self) -> dict:
+        return {"can_refit_full": False}
+
+    @classmethod
+    def search_space(cls) -> dict:
+        from autogluon.common.space import Categorical, Int, Real
+
+        return {
+            "learning_rate": Real(3e-4, 5e-3, log=True),
+            "weight_decay": Categorical(0.0, 1e-5, 1e-4, 1e-3),
+            "n_blocks": Int(1, 4),
+            "d_block": Categorical(128, 256, 512),
+            "dropout": Real(0.0, 0.4),
+            "num_embedding_bins": Int(8, 96),
+            "num_embedding_dim": Categorical(8, 16, 24),
+        }
+
+    @classmethod
+    def config_generator(cls):
+        from tabarena.utils.config_utils import ConfigGenerator
+
+        return ConfigGenerator(model_cls=cls, manual_configs=[{}], search_space=cls.search_space())
+
+
+class AshlarTabMModel(AshlarModel):
+    """Ashlar's ``tabm_piecewise`` recipe."""
+
+    ag_key = "ASRTABM"
+    ag_name = "AshlarTabM"
+    recipe = "tabm_piecewise"
+
+
+# Train until early stopping (patience 16, best epoch restored) instead of the
+# ``max_epochs="auto"`` budget of 20-100 epochs. Constant learning rate, since
+# the cosine schedule's warmup and decay are spread over ``max_epochs``.
+_RIP = {"max_epochs": 2000, "learning_rate_schedule": "constant"}
+
+
+class AshlarRipModel(AshlarModel):
+    """Ashlar defaults, trained until early stopping."""
+
+    ag_key = "ASRRIP"
+    ag_name = "AshlarRip"
+    defaults = _RIP
+
+
+class AshlarTabMRipModel(AshlarTabMModel):
+    """``tabm_piecewise``, trained until early stopping."""
+
+    ag_key = "ASRTABMRIP"
+    ag_name = "AshlarTabMRip"
+    defaults = _RIP
+
+
+# Candidate defaults, all trained until early stopping. ``n_blocks``,
+# ``d_block``, ``dropout`` and ``k`` go into backbone_kwargs (see _build).
+SWEEP = {
+    "base": ("default", {}),
+    "deep": ("default", {"n_blocks": 5}),
+    "wide": ("default", {"d_block": 512, "dropout": 0.15}),
+    "bottleneck": ("default", {"bottleneck": True}),
+    "lr1e3": ("default", {"learning_rate": 1e-3}),
+    "batch128": ("default", {"batch_size": 128}),
+    "regularized": ("default", {"dropout": 0.25, "weight_decay": 1e-3}),
+    "tabm_wide": ("tabm_piecewise", {"n_blocks": 3, "d_block": 512}),
+}
+SWEEP_MODELS = {}
+for _name, (_recipe, _overrides) in SWEEP.items():
+    _key = "ASRS" + _name.upper().replace("_", "")
+    _cls = type(
+        f"AshlarSweep_{_name}",
+        (AshlarModel,),
+        {
+            "ag_key": _key,
+            "ag_name": f"AshlarSweep-{_name}",
+            "recipe": _recipe,
+            "defaults": {**_RIP, **_overrides},
+            "__module__": __name__,
+        },
+    )
+    globals()[_cls.__name__] = _cls
+    SWEEP_MODELS[f"sweep_{_name}"] = _cls
+
+
+# Round 4: Ashlar's own ideas on top of the TabM recipe with TabM's batch rule.
+class AshlarTabMBsModel(AshlarTabMRipModel):
+    """``tabm_piecewise`` until early stopping, with TabM's batch-size rule: the base for round 4."""
+
+    ag_key = "ASRTABMBS"
+    ag_name = "AshlarTabMRipBs"
+    batch_rule = True
+
+
+class AshlarTabMBsAucModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSAUC"
+    ag_name = "AshlarTabMBs-auc"
+    stop_on_auc = True
+
+
+class AshlarTabMBsPooledModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSPOOL"
+    ag_name = "AshlarTabMBs-pooled"
+    pool_min_levels = 30
+
+
+class AshlarTabMBsAvgModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSAVG"
+    ag_name = "AshlarTabMBs-avg"
+    defaults = {**_RIP, "weight_average": 0.8}
+
+
+class AshlarTabMBsAllModel(AshlarTabMBsModel):
+    ag_key = "ASRTABMBSALL"
+    ag_name = "AshlarTabMBs-all"
+    stop_on_auc = True
+    pool_min_levels = 30
+    defaults = {**_RIP, "weight_average": 0.8}
+
+
+ROUND4_MODELS = {
+    "tabm_bs": AshlarTabMBsModel,
+    "tabm_bs_auc": AshlarTabMBsAucModel,
+    "tabm_bs_pooled": AshlarTabMBsPooledModel,
+    "tabm_bs_avg": AshlarTabMBsAvgModel,
+    "tabm_bs_all": AshlarTabMBsAllModel,
+}
+
+
+# Local sweep on the Mac (default architecture, then what the single-model
+# neural baselines leave on the table), all trained until early stopping.
+# ``Bs`` is TabM's batch-size rule.
+def _variant(base, key, name, batch_rule=True, **params):
+    return type(
+        name + "Model",
+        (base,),
+        {"ag_key": key, "ag_name": name, "defaults": {**_RIP, **params}, "batch_rule": batch_rule, "__module__": __name__},
+    )
+
+
+AshlarRipBsModel = _variant(AshlarRipModel, "ASRBS", "AshlarRipBs")
+AshlarRipBsDeepModel = _variant(AshlarRipModel, "ASRBSDEEP", "AshlarRipBsDeep", n_blocks=6)
+AshlarRipBsWideModel = _variant(AshlarRipModel, "ASRBSWIDE", "AshlarRipBsWide", d_block=512)
+AshlarRipBsNeckModel = _variant(AshlarRipModel, "ASRBSNECK", "AshlarRipBsNeck", bottleneck=True)
+AshlarRipBsOneHotModel = _variant(AshlarRipModel, "ASRBSOH", "AshlarRipBsOneHot", categorical_embeddings=[])
+AshlarTabMRipParityModel = _variant(
+    AshlarTabMRipModel, "ASRTABMPAR", "AshlarTabMRipParity", d_block=512, weight_decay=3e-4, gradient_clip=1.0
+)
+AshlarTabMOneHotModel = _variant(AshlarTabMRipModel, "ASRTABMOH", "AshlarTabMOneHot", categorical_embeddings=[])
+AshlarTabMPeriodicModel = _variant(AshlarTabMRipModel, "ASRTABMPER", "AshlarTabMPeriodic", num_embeddings="periodic")
+# TabArena's TabM samples batches per member, for classification as well as regression.
+AshlarTabMMemberBatchesModel = _variant(
+    AshlarTabMRipModel, "ASRTABMMB", "AshlarTabMMemberBatches", share_training_batches=False
+)
+AshlarTabMQuantileTabrModel = _variant(
+    AshlarTabMRipModel, "ASRTABMQT", "AshlarTabMQuantileTabr", numeric_scaling="quantile_tabr"
+)
+AshlarTabMKitchenModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMKIT",
+    "AshlarTabMKitchen",
+    d_block=512,
+    weight_decay=3e-4,
+    gradient_clip=1.0,
+    categorical_embeddings=[],
+    share_training_batches=False,
+)
+# Temperature scaling on the bagging fold for log loss, and distribution heads
+# (their mean as the point) for skewed or heteroscedastic regression targets.
+AshlarTabMTempModel = _variant(AshlarTabMRipModel, "ASRTABMT", "AshlarTabMTemp")
+AshlarTabMTempModel.temperature_scaling = True
+AshlarTabMMixtureModel = _variant(AshlarTabMRipModel, "ASRTABMMIX", "AshlarTabMMixture", task="mixture")
+AshlarTabMGaussianModel = _variant(AshlarTabMRipModel, "ASRTABMGAU", "AshlarTabMGaussian", task="gaussian")
+# The submission config with per-member batches: the candidate fix for multiclass log loss.
+AshlarTabMRipBsMemberModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSMB", "AshlarTabMRipBsMember", share_training_batches=False
+)
+
+# Classification fixes for log loss: label smoothing (as RealMLP), and early
+# stopping on the log loss of the averaged prediction instead of the mean
+# member loss. Regression ignores both.
+AshlarTabMRipBsSmoothModel = _variant(AshlarTabMRipModel, "ASRTABMBSLS", "AshlarTabMRipBsSmooth", label_smoothing=0.1)
+AshlarTabMRipBsLogLossModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSLL", "AshlarTabMRipBsLogLoss", early_stopping_metric="log_loss"
+)
+AshlarTabMRipBsSmoothLogLossModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMBSLSLL",
+    "AshlarTabMRipBsSmoothLogLoss",
+    label_smoothing=0.1,
+    early_stopping_metric="log_loss",
+)
+
+# From the audit of TabArena's TabM (Nov 4): it early-stops on the scored metric of the probability-averaged ensemble,
+# adds missing-value indicators, and trains d_block 512 with weight decay 3e-4 and gradient clipping 1.0.
+AshlarTabMRipBsMetricModel = _variant(AshlarTabMRipModel, "ASRTABMBSMET", "AshlarTabMRipBsMetric")
+AshlarTabMRipBsMetricModel.stop_on_metric = {"binary": "roc_auc", "multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsEnsembleLossModel = _variant(AshlarTabMRipModel, "ASRTABMBSENS", "AshlarTabMRipBsEnsembleLoss")
+AshlarTabMRipBsEnsembleLossModel.stop_on_metric = {"multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsMissingModel = _variant(AshlarTabMRipModel, "ASRTABMBSNA", "AshlarTabMRipBsMissing")
+AshlarTabMRipBsMissingModel.missing_indicators = True
+AshlarTabMRipBsParityModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSPAR", "AshlarTabMRipBsParity", d_block=512, weight_decay=3e-4, gradient_clip=1.0
+)
+
+# Creative round (Nov 4): retrieval and target-statistic features, target-aware bins, soft tree stages.
+AshlarTabMRipBsStatsModel = _variant(AshlarTabMRipModel, "ASRTABMBSTS", "AshlarTabMRipBsStats")
+AshlarTabMRipBsStatsModel.target_stats = True
+AshlarTabMRipBsNeighboursModel = _variant(AshlarTabMRipModel, "ASRTABMBSKNN", "AshlarTabMRipBsNeighbours")
+AshlarTabMRipBsNeighboursModel.neighbour_targets = 16
+AshlarTabMRipBsTreeBinsModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSTB", "AshlarTabMRipBsTreeBins", num_embedding_bin_method="tree"
+)
+
+# Soft stumps on the class logits (classification only; regression ignores the setting).
+AshlarTabMRipBsStumpsModel = _variant(AshlarTabMRipModel, "ASRTABMBSST", "AshlarTabMRipBsStumps", soft_stages=16)
+# Everything at once, with multiclass/regression ensemble stopping.
+AshlarTabMRipBsCreativeModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSCR", "AshlarTabMRipBsCreative", num_embedding_bin_method="tree"
+)
+AshlarTabMRipBsCreativeModel.target_stats = True
+AshlarTabMRipBsCreativeModel.neighbour_targets = 16
+AshlarTabMRipBsCreativeModel.stop_on_metric = {"multiclass": "log_loss", "regression": "rmse"}
+
+# Target statistics for ID-like columns only (100+ levels), and for every pair of them, as CatBoost's combinations.
+AshlarTabMRipBsIdStatsModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDS", "AshlarTabMRipBsIdStats")
+AshlarTabMRipBsIdStatsModel.target_stats = True
+AshlarTabMRipBsIdStatsModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdPairsModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDP", "AshlarTabMRipBsIdPairs")
+AshlarTabMRipBsIdPairsModel.target_stats = True
+AshlarTabMRipBsIdPairsModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdPairsModel.target_stats_pairs = True
+# The Amazon Kaggle winners also used triples of the ID columns.
+AshlarTabMRipBsIdTriplesModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDT", "AshlarTabMRipBsIdTriples")
+AshlarTabMRipBsIdTriplesModel.target_stats = True
+AshlarTabMRipBsIdTriplesModel.target_stats_min_levels = 100
+AshlarTabMRipBsIdTriplesModel.target_stats_pairs = True
+AshlarTabMRipBsIdTriplesModel.target_stats_triples = True
+
+# Round 3 (Nov 4), all on ensloss: TabArena TabM's minimal architecture, alone and as a replica of TabArena TabM's
+# default training (also width 512, weight decay 3e-4, clipping 1.0, per-member batches); pooling of exact duplicate
+# rows toward their observed labels; numeric copies of number-like categories.
+_ENSEMBLE_STOP = {"multiclass": "log_loss", "regression": "rmse"}
+AshlarTabMRipBsMiniModel = _variant(AshlarTabMRipModel, "ASRTABMBSMINI", "AshlarTabMRipBsMini", arch_type="tabm-mini")
+AshlarTabMRipBsReplicaModel = _variant(
+    AshlarTabMRipModel,
+    "ASRTABMBSREP",
+    "AshlarTabMRipBsReplica",
+    arch_type="tabm-mini",
+    d_block=512,
+    weight_decay=3e-4,
+    gradient_clip=1.0,
+    share_training_batches=False,
+)
+AshlarTabMRipBsDupsModel = _variant(AshlarTabMRipModel, "ASRTABMBSDUP", "AshlarTabMRipBsDups")
+AshlarTabMRipBsDupsModel.duplicate_pooling = True
+AshlarTabMRipBsNumCatModel = _variant(AshlarTabMRipModel, "ASRTABMBSNUM", "AshlarTabMRipBsNumCat")
+AshlarTabMRipBsNumCatModel.numeric_categories = True
+# For high-cardinality categoricals: a trained bucket for rare and unseen levels, and each level's training count.
+AshlarTabMRipBsCountsModel = _variant(AshlarTabMRipModel, "ASRTABMBSCNT", "AshlarTabMRipBsCounts")
+AshlarTabMRipBsCountsModel.rare_min_count = 3
+AshlarTabMRipBsCountsModel.count_min_levels = 30
+for _cls in (
+    AshlarTabMRipBsMiniModel,
+    AshlarTabMRipBsReplicaModel,
+    AshlarTabMRipBsDupsModel,
+    AshlarTabMRipBsNumCatModel,
+    AshlarTabMRipBsCountsModel,
+):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+
+# Max (Nov 4): decide automatically whether a table gets the pair statistics. The survey screens each column, pair
+# and triple on the training rows before the network trains and keeps only those that add signal over their parts.
+# idsurvey keeps the 100-level bar; survey30 lets columns with 30+ levels join pairs, which the screen makes safe.
+AshlarTabMRipBsIdSurveyModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDSV", "AshlarTabMRipBsIdSurvey")
+AshlarTabMRipBsSurvey30Model = _variant(AshlarTabMRipModel, "ASRTABMBSSV30", "AshlarTabMRipBsSurvey30")
+for _cls in (AshlarTabMRipBsIdSurveyModel, AshlarTabMRipBsSurvey30Model):
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_survey = True
+AshlarTabMRipBsSurvey30Model.target_stats_pair_min_levels = 30
+
+# Candidate defaults built from the panel's keepers, for the 25 dev datasets: ensemble-metric stopping and target
+# statistics for ID-like columns and their pairs, with and without duplicate pooling. Each is a no-op where its data
+# condition is absent (binary tasks, no 100+ level columns, no repeated rows), so those datasets need no rerun.
+AshlarTabMV2Model = _variant(AshlarTabMRipModel, "ASRTABMV2", "AshlarTabMV2")
+AshlarTabMV2DupsModel = _variant(AshlarTabMRipModel, "ASRTABMV2D", "AshlarTabMV2Dups")
+AshlarTabMV2DupsModel.duplicate_pooling = True
+for _cls in (AshlarTabMV2Model, AshlarTabMV2DupsModel):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+
+# Round 4 (Nov 4), from the overnight keepers. replica (TabArena TabM's training recipe) won 4 of 5 panel datasets
+# but lost 22% on Amazon; replica_shared isolates its per-member batches there. v3 joins the keepers: the replica
+# recipe, ensemble-metric stopping, surveyed pair and triple statistics and duplicate pooling, with per-member batches
+# only when no input column has 100+ levels. nogate keeps per-member batches everywhere (do the statistics rescue
+# Amazon?), and replace feeds the statistics instead of the ID columns, which also lifts the gate.
+# feature_gates strength for the gate rivals, from a synthetic wide table (10 real among 190 noise columns, the v4
+# recipe): 1e-4 cut 1-AUC from .2965 to .2590 with 5 real and 4 noise columns open, and 3e-5 to .2602 with 9 real
+# and 43 noise columns open; 3e-4 kept 3 real columns and gained nothing; 3e-3 shut 9 real columns, 1e-2 all of them.
+GATE_STRENGTH = 1e-4
+_REPLICA = {
+    "arch_type": "tabm-mini",
+    "d_block": 512,
+    "weight_decay": 3e-4,
+    "gradient_clip": 1.0,
+    "share_training_batches": False,
+}
+AshlarTabMRipBsReplicaSharedModel = _variant(
+    AshlarTabMRipModel, "ASRTABMBSREPS", "AshlarTabMRipBsReplicaShared", **{**_REPLICA, "share_training_batches": True}
+)
+AshlarTabMRipBsReplicaSharedModel.stop_on_metric = _ENSEMBLE_STOP
+AshlarTabMV3Model = _variant(AshlarTabMRipModel, "ASRTABMV3", "AshlarTabMV3", **_REPLICA)
+AshlarTabMV3NoGateModel = _variant(AshlarTabMRipModel, "ASRTABMV3NG", "AshlarTabMV3NoGate", **_REPLICA)
+AshlarTabMV3ReplaceModel = _variant(AshlarTabMRipModel, "ASRTABMV3RP", "AshlarTabMV3Replace", **_REPLICA)
+for _cls in (AshlarTabMV3Model, AshlarTabMV3NoGateModel, AshlarTabMV3ReplaceModel):
+    _cls.stop_on_metric = _ENSEMBLE_STOP
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_triples = True
+    _cls.target_stats_survey = True
+    _cls.duplicate_pooling = True
+AshlarTabMV3Model.member_batches_max_levels = 100
+AshlarTabMV3ReplaceModel.member_batches_max_levels = 100
+AshlarTabMV3ReplaceModel.target_stats_replace = True
+
+# The survey at its first bar (0.1% and one standard error) lost to keeping every pair on Amazon (+1.2%),
+# Diabetes130US (+0.3%) and kddcup09 (+2.8%): statistics that barely predict the label alone still helped the
+# network. The loose bar keeps every single column and drops only combinations that do no better than their parts.
+AshlarTabMRipBsIdLooseModel = _variant(AshlarTabMRipModel, "ASRTABMBSIDL", "AshlarTabMRipBsIdLoose")
+AshlarTabMRipBsIdLoose3Model = _variant(AshlarTabMRipModel, "ASRTABMBSIDL3", "AshlarTabMRipBsIdLoose3")
+for _cls in (AshlarTabMRipBsIdLooseModel, AshlarTabMRipBsIdLoose3Model):
+    _cls.target_stats = True
+    _cls.target_stats_min_levels = 100
+    _cls.target_stats_pairs = True
+    _cls.target_stats_survey = True
+    _cls.target_stats_survey_margin = 0.0
+    _cls.target_stats_survey_z = 0.0
+    _cls.target_stats_survey_singles = False
+AshlarTabMRipBsIdLoose3Model.target_stats_triples = True
+
+# Round 5 (Nov 5), from the overnight checks. Replacing the ID columns by their statistics gave the best neural result
+# on all three dev tables with 100+ level columns (Amazon .1273, Diabetes130US .3282, kddcup09 .1680), and neither
+# survey bar beat keeping every pair. So v4 is v3 without the survey and with the raw ID columns dropped. Without
+# them the gate does not fire and per-member batches stay on; it remains for a table made only of ID columns, where
+# nothing is dropped. On every other table v4 trains exactly as v3.
+AshlarTabMV4Model = _variant(AshlarTabMRipModel, "ASRTABMV4", "AshlarTabMV4", **_REPLICA)
+AshlarTabMV4Model.stop_on_metric = _ENSEMBLE_STOP
+AshlarTabMV4Model.target_stats = True
+AshlarTabMV4Model.target_stats_min_levels = 100
+AshlarTabMV4Model.target_stats_pairs = True
+AshlarTabMV4Model.target_stats_triples = True
+AshlarTabMV4Model.target_stats_replace = True
+AshlarTabMV4Model.duplicate_pooling = True
+AshlarTabMV4Model.member_batches_max_levels = 100
+
+# Rivals to v4 (Nov 5), one hypothesis each from the dev-25 results, each a no-op on tables without its condition.
+# binstop: binary tasks stop on the averaged ensemble's log loss, as multiclass does; 8 of v3's 10 losses to CatBoost
+# are binary, and binary still stops on the mean member loss. missing: 0/1 flags for numeric columns with missing
+# values (TabArena's TabM adds them; 77% of kddcup09's numeric cells are missing). onehot9: one-hot categoricals with
+# 9 or fewer levels; hosted TabM, which one-hots them, beats v3 on six tables that carry their signal there. catpairs:
+# statistics for the 64 best pairs of any categorical columns, as CatBoost combines categories (splice is 11% behind
+# it). gates: a learned gate per input field for wide tables (Bioresponse, kddcup09, NATICUSdroid, splice).
+AshlarTabMV4BinaryStopModel = _variant(AshlarTabMV4Model, "ASRTABMV4BIN", "AshlarTabMV4BinaryStop", **_REPLICA)
+AshlarTabMV4BinaryStopModel.stop_on_metric = {"binary": "log_loss", **_ENSEMBLE_STOP}
+AshlarTabMV4MissingModel = _variant(AshlarTabMV4Model, "ASRTABMV4NA", "AshlarTabMV4Missing", **_REPLICA)
+AshlarTabMV4MissingModel.missing_indicators = True
+AshlarTabMV4OneHot9Model = _variant(AshlarTabMV4Model, "ASRTABMV4OH", "AshlarTabMV4OneHot9", **_REPLICA)
+AshlarTabMV4OneHot9Model.onehot_max_levels = 9
+AshlarTabMV4CatPairsModel = _variant(AshlarTabMV4Model, "ASRTABMV4CP", "AshlarTabMV4CatPairs", **_REPLICA)
+AshlarTabMV4CatPairsModel.target_stats_cat_pairs = 64
+# Category pairs won on splice (-7.3%, 60 DNA positions) and lost on four small mixed tables (+2.9% to +7.0%),
+# where the network can combine a few columns itself. So a pair must also beat its two columns added together,
+# by 2 standard errors.
+AshlarTabMV4CatPairsStrictModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4CPS", "AshlarTabMV4CatPairsStrict", **_REPLICA
+)
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs = 64
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs_additive = True
+AshlarTabMV4CatPairsStrictModel.target_stats_cat_pairs_z = 2.0
+AshlarTabMV4GatesModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4G", "AshlarTabMV4Gates", **_REPLICA, feature_gates=GATE_STRENGTH
+)
+AshlarTabMV4GatesWeakModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4GW", "AshlarTabMV4GatesWeak", **_REPLICA, feature_gates=GATE_STRENGTH / 3
+)
+# Max (Nov 5): the entry stays one differentiable model, so the tree rival is 64 soft oblivious trees trained with the
+# network on the raw inputs (library soft_trees), aimed at the tables where CatBoost wins, not a boosted tree beside it.
+AshlarTabMV4TreesModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4T", "AshlarTabMV4Trees", **_REPLICA, soft_trees=64, soft_trees_dropout=0.0
+)
+# On Bioresponse the trees above fit the training rows first and the network beside them stayed at chance
+# (validation log loss 0.69 with the leaves zeroed). Dropping the trees on half the rows keeps the network learning.
+AshlarTabMV4TreesDropModel = _variant(
+    AshlarTabMV4Model, "ASRTABMV4TD", "AshlarTabMV4TreesDrop", **_REPLICA, soft_trees=64, soft_trees_dropout=0.5
+)
+
+# Nov 6: partial-match pooling. v4's two best parts are label memories over groups of rows (ID-pair statistics and
+# exact-duplicate pooling), and the trees that beat it predict from groups too: a leaf is a conjunction of bins. This
+# corrects the trained network with a learned conjunction kernel over binned columns, fitted on the validation fold
+# (see _PartialMatchPool). On a synthetic table of pair effects among 20-60 level categoricals, 1-AUC went from .336
+# to .349 (v4 recipe; LightGBM .349 to .355) to .215 to .227 over three seeds. A first version judged each step on
+# the rows it searched; each step is now judged by the half of the validation rows that did not propose it.
+AshlarTabMV4PartialPoolModel = _variant(AshlarTabMV4Model, "ASRTABMV4PMP", "AshlarTabMV4PartialPool", **_REPLICA)
+AshlarTabMV4PartialPoolModel.partial_match_pooling = True
+
+LOCAL_SWEEP_MODELS = {
+    "tabm_v4": AshlarTabMV4Model,
+    "tabm_v4_pmp": AshlarTabMV4PartialPoolModel,
+    "tabm_v4_binstop": AshlarTabMV4BinaryStopModel,
+    "tabm_v4_missing": AshlarTabMV4MissingModel,
+    "tabm_v4_onehot9": AshlarTabMV4OneHot9Model,
+    "tabm_v4_catpairs": AshlarTabMV4CatPairsModel,
+    "tabm_v4_catpairs_strict": AshlarTabMV4CatPairsStrictModel,
+    "tabm_v4_gates": AshlarTabMV4GatesModel,
+    "tabm_v4_gates_weak": AshlarTabMV4GatesWeakModel,
+    "tabm_v4_trees": AshlarTabMV4TreesModel,
+    "tabm_v4_trees_drop": AshlarTabMV4TreesDropModel,
+    "tabm_bs_idloose": AshlarTabMRipBsIdLooseModel,
+    "tabm_bs_idloose3": AshlarTabMRipBsIdLoose3Model,
+    "tabm_v3": AshlarTabMV3Model,
+    "tabm_v3_nogate": AshlarTabMV3NoGateModel,
+    "tabm_v3_replace": AshlarTabMV3ReplaceModel,
+    "tabm_bs_replica_shared": AshlarTabMRipBsReplicaSharedModel,
+    "tabm_bs_idsurvey": AshlarTabMRipBsIdSurveyModel,
+    "tabm_bs_survey30": AshlarTabMRipBsSurvey30Model,
+    "tabm_v2": AshlarTabMV2Model,
+    "tabm_v2_dups": AshlarTabMV2DupsModel,
+    "tabm_bs_mini": AshlarTabMRipBsMiniModel,
+    "tabm_bs_replica": AshlarTabMRipBsReplicaModel,
+    "tabm_bs_dups": AshlarTabMRipBsDupsModel,
+    "tabm_bs_numcat": AshlarTabMRipBsNumCatModel,
+    "tabm_bs_counts": AshlarTabMRipBsCountsModel,
+    "tabm_bs_idstats": AshlarTabMRipBsIdStatsModel,
+    "tabm_bs_idpairs": AshlarTabMRipBsIdPairsModel,
+    "tabm_bs_idtriples": AshlarTabMRipBsIdTriplesModel,
+    "tabm_bs_stumps": AshlarTabMRipBsStumpsModel,
+    "tabm_bs_creative": AshlarTabMRipBsCreativeModel,
+    "tabm_bs_stats": AshlarTabMRipBsStatsModel,
+    "tabm_bs_knn": AshlarTabMRipBsNeighboursModel,
+    "tabm_bs_treebins": AshlarTabMRipBsTreeBinsModel,
+    "tabm_bs_metric": AshlarTabMRipBsMetricModel,
+    "tabm_bs_ensloss": AshlarTabMRipBsEnsembleLossModel,
+    "tabm_bs_missing": AshlarTabMRipBsMissingModel,
+    "tabm_bs_parity": AshlarTabMRipBsParityModel,
+    "tabm_bs_smooth": AshlarTabMRipBsSmoothModel,
+    "tabm_bs_logloss": AshlarTabMRipBsLogLossModel,
+    "tabm_bs_smooth_logloss": AshlarTabMRipBsSmoothLogLossModel,
+    "rip_bs": AshlarRipBsModel,
+    "rip_bs_deep": AshlarRipBsDeepModel,
+    "rip_bs_wide": AshlarRipBsWideModel,
+    "rip_bs_neck": AshlarRipBsNeckModel,
+    "rip_bs_onehot": AshlarRipBsOneHotModel,
+    "tabm_rip_bs": AshlarTabMBsModel,
+    "tabm_rip_parity": AshlarTabMRipParityModel,
+    "tabm_onehot": AshlarTabMOneHotModel,
+    "tabm_periodic": AshlarTabMPeriodicModel,
+    "tabm_member_batches": AshlarTabMMemberBatchesModel,
+    "tabm_quantile_tabr": AshlarTabMQuantileTabrModel,
+    "tabm_kitchen": AshlarTabMKitchenModel,
+    "tabm_temp": AshlarTabMTempModel,
+    "tabm_mixture": AshlarTabMMixtureModel,
+    "tabm_gaussian": AshlarTabMGaussianModel,
+    "tabm_bs_member": AshlarTabMRipBsMemberModel,
+}
+
+# A bagged fit pickles each model by its class's name, so a class stored under another name fails in every fold.
+_UNREACHABLE = [key for key, cls in LOCAL_SWEEP_MODELS.items() if globals().get(cls.__name__) is not cls]
+if _UNREACHABLE:
+    raise ImportError(f"these LOCAL_SWEEP_MODELS classes are not stored under their own names: {_UNREACHABLE}")

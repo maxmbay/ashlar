@@ -4,7 +4,8 @@ The layer is the default NODE architecture from Popov, Morozov, and Babenko
 (arXiv:1909.06312): depth 6, 1.5-entmax feature choices, 1.5-entmax soft
 thresholds, trained end to end. Tree count is reduced from that paper's 2048
 so the leaf tensor fits this CPU. The residual regression default does not
-use this module.
+use this module. The layer and 1.5-entmax live in ``ashlar.layers``, where
+the network's tree branch (``soft_trees=``) uses them too.
 """
 
 from __future__ import annotations
@@ -14,12 +15,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from equinox import Module
 from sklearn.model_selection import train_test_split
 
 from ashlar._compat import renamed
 from ashlar.errors import AshlarError
 from ashlar.estimator import _stratified_indices
+from ashlar.layers import ObliviousLayer, entmax15  # noqa: F401
 
 TREE_COUNT = 512
 DEPTH = 6
@@ -29,74 +30,6 @@ MAX_EPOCHS = 80
 PATIENCE = 16
 CHECKPOINT_AVERAGE = 5
 SCALE_INIT = 2.0
-
-
-class ObliviousLayer(Module):
-    """Averaged ensemble of oblivious trees. Every split and every leaf is a parameter."""
-
-    feature_logits: jax.Array
-    thresholds: jax.Array
-    raw_scales: jax.Array
-    leaves: jax.Array
-
-    def __call__(self, features: jax.Array) -> jax.Array:
-        selectors = entmax15(self.feature_logits)
-        chosen = jnp.einsum("bf,tdf->btd", features, selectors)
-        scale = jax.nn.softplus(self.raw_scales) + 1e-3
-        score = (chosen - self.thresholds[None, :, :]) / scale[None, :, :]
-        gate = entmax15(jnp.stack([score, jnp.zeros_like(score)], axis=-1))[..., 0]
-        weights = jnp.ones((features.shape[0], gate.shape[1], 1), dtype=features.dtype)
-        for level in range(gate.shape[2]):
-            decision = gate[:, :, level]
-            stay = weights * (1.0 - decision[:, :, None])
-            go = weights * decision[:, :, None]
-            weights = jnp.concatenate([stay, go], axis=-1)
-        return jnp.einsum("btl,tlo->bo", weights, self.leaves) / self.leaves.shape[0]
-
-
-def _entmax15_forward(scores: jax.Array) -> jax.Array:
-    """1.5-entmax along the last axis. Matches the deep-spin forward pass."""
-
-    width = scores.shape[-1]
-    centered = scores - jnp.max(scores, axis=-1, keepdims=True)
-    scaled = centered / 2.0
-    ordered = jnp.flip(jnp.sort(scaled, axis=-1), axis=-1)
-    ranks = jnp.arange(1, width + 1, dtype=scaled.dtype).reshape((1,) * (scaled.ndim - 1) + (width,))
-    cumulative = jnp.cumsum(ordered, axis=-1)
-    cumulative_sq = jnp.cumsum(jnp.square(ordered), axis=-1)
-    mean = cumulative / ranks
-    mean_sq = cumulative_sq / ranks
-    second = ranks * (mean_sq - jnp.square(mean))
-    delta = (1.0 - second) / ranks
-    tau = mean - jnp.sqrt(jnp.clip(delta, 0.0))
-    support = jnp.clip(jnp.sum(tau <= ordered, axis=-1, keepdims=True), 1, width)
-    tau_star = jnp.take_along_axis(tau, support.astype(jnp.int32) - 1, axis=-1)
-    return jnp.square(jnp.clip(scaled - tau_star, 0.0))
-
-
-def _entmax15_backward(probs: jax.Array, gradient: jax.Array) -> jax.Array:
-    slope = jnp.sqrt(jnp.clip(probs, 0.0))
-    propagated = gradient * slope
-    total = jnp.sum(slope, axis=-1, keepdims=True)
-    correction = jnp.sum(propagated, axis=-1, keepdims=True) / jnp.clip(total, 1e-8)
-    return propagated - correction * slope
-
-
-@jax.custom_vjp
-def entmax15(scores: jax.Array) -> jax.Array:
-    return _entmax15_forward(scores)
-
-
-def _entmax15_fwd(scores: jax.Array):
-    probs = _entmax15_forward(scores)
-    return probs, probs
-
-
-def _entmax15_bwd(probs: jax.Array, gradient: jax.Array):
-    return (_entmax15_backward(probs, gradient),)
-
-
-entmax15.defvjp(_entmax15_fwd, _entmax15_bwd)
 
 
 def _labels(y) -> np.ndarray:

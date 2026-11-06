@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from copy import copy, deepcopy
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from ashlar.layers import (
     DEFAULT_BOTTLENECK_WIDTH,
     AdditiveBackbone,
     CategoricalEmbeddings,
+    FeatureGates,
     FeatureTransformer,
     LateBottleneck,
     SOFT_STAGE_SHRINKAGE,
@@ -54,12 +56,20 @@ from ashlar.layers import (
     ResidualMLP,
     SetEmbeddings,
     SetEncoder,
+    TABM_ARCH_TYPES,
     TabMBackbone,
+    TREE_DEPTH,
+    TREE_DROPOUT,
+    TREE_MAX_LEVELS,
+    TREE_SAMPLE,
+    TreeBranch,
     quantile_edges,
+    tree_edges,
 )
 from ashlar.objectives import (
     classification_accuracy,
     classification_objective,
+    make_smoothed_classification_objective,
     normal_objective,
     make_distribution_objective,
     make_hurdle_objective,
@@ -441,6 +451,9 @@ def _thresholds(threshold, shape) -> np.ndarray:
     return values
 
 
+_STOPPING_METRICS = (None, "loss", "log_loss", "accuracy", "roc_auc", "rmse")
+
+
 class ASRModel(BaseEstimator):
     """Generic estimator. Architecture and task are constructor arguments.
 
@@ -472,7 +485,10 @@ class ASRModel(BaseEstimator):
     backbone:
         ``residual_mlp``, ``tabm``, ``transformer``, ``set``, ``additive``, or
         an Equinox class with ``__init__(d_in, *, key, **kwargs)`` and
-        attributes ``k`` and ``d_out``. ``additive`` gives each column, and
+        attributes ``k`` and ``d_out``. ``tabm`` takes
+        ``backbone_kwargs={"arch_type": "tabm-mini"}`` for the paper's minimal
+        variant: one per-member scaling of the input and a shared trunk,
+        instead of per-member scalings on every layer. ``additive`` gives each column, and
         each pair named in ``backbone_kwargs={"pairs": [[a, b], ...]}``, a
         network of its own, so every head output is a sum of one shape per
         term; ``shape_functions`` reads them (``ashlar.shapes``).
@@ -502,6 +518,27 @@ class ASRModel(BaseEstimator):
     feature_dropout:
         Probability of dropping each input field on a training step. ``0``
         turns it off. Prediction does not drop fields. The default is ``0``.
+    feature_gates:
+        Strength of a learned gate on each input field (stochastic gates,
+        Yamada et al. 2020): the penalty, in units of the training loss per
+        row, for each field a gate keeps open. Gates the loss does not need
+        shut, and prediction then ignores those fields; ``feature_gates_``
+        names the fields left open. Meant for wide tables where most columns
+        are noise. ``0`` (the default) turns the gates off.
+    soft_trees:
+        Number of soft oblivious decision trees (``ashlar.node``'s layer, depth
+        6) beside the network, trained with it end to end and added to the
+        head's outputs. They read the raw inputs (the scaled numeric columns,
+        the one-hot columns, and categorical columns with up to 16 levels), so
+        they split them as a gradient-boosted tree would while the trunk reads
+        its embeddings. For classification and the tasks with a location.
+        ``0`` (the default) adds none.
+    soft_trees_dropout:
+        Share of training rows, drawn per row and ensemble member, that get no
+        tree term in a step, so the network still learns to predict them on
+        its own and the trees learn what it misses. At ``0`` the trees can fit
+        the training rows before the network learns anything. Prediction adds
+        the whole term. Default 0.5.
     numeric_scaling:
         ``robust`` (default) is median impute, median center, interquartile
         scale, then a smooth clip that saturates at ±3. ``standard`` is
@@ -535,7 +572,7 @@ class ASRModel(BaseEstimator):
     share_training_batches:
         ``True`` (default) shows every member the same minibatch. ``False``
         gives each TabM member its own shuffle. Prediction still averages
-        members on the same rows. Regression only.
+        members on the same rows. Regression and classification.
     bottleneck:
         ``None`` (default) leaves the head on the backbone width. ``True``
         inserts a per-member linear map of width 32 and a ReLU after the
@@ -590,9 +627,46 @@ class ASRModel(BaseEstimator):
         group with the prior, the population answer. For
         ``regression``, ``gaussian``, ``mixture``, ``flow``, ``student_t``,
         ``quantile``, ``quantile_spline``, ``poisson``,
-        ``negative_binomial``, and ``hurdle``, and ``chain``, which gives
-        every column with a location an offset of its own. See
+        ``negative_binomial``, and ``hurdle``, ``classification``, which
+        gives every class after the first an offset on its logit, and
+        ``chain``, which gives every column with a location an offset of its
+        own. See
         ``ashlar.effects``, ``random_effects_``, and ``with_context``.
+    weight_average:
+        ``None`` (default) keeps the trained weights as they are. A decay in
+        ``[0, 1)`` keeps a running average of the weights at each epoch end,
+        ``decay * average + (1 - decay) * weights``. Validation, early
+        stopping, and the fitted model use the average, which is usually
+        smoother than any single epoch. ``0.9`` averages roughly the last ten
+        epochs.
+    num_embedding_bin_method:
+        Where piecewise numeric embeddings put their bin edges. ``quantile``
+        (default) uses training quantiles of each feature. ``tree`` uses the
+        split points of a small decision tree fit from that feature to the
+        target (Gorishniy et al. 2022), so bins are narrow where the target
+        changes and wide where it does not. At most ``num_embedding_bins``
+        bins; the edges are saved with the model, so ``load`` needs no target.
+    label_smoothing:
+        ``0`` (default) trains classification on the plain cross-entropy. A
+        share in ``(0, 1)`` moves that much of each label's mass evenly over
+        all classes, which keeps the members from growing overconfident.
+        Early stopping then watches the smoothed loss unless
+        ``early_stopping_metric="log_loss"``.
+    time_limit:
+        ``None`` (default) trains until ``max_epochs`` or early stopping. A
+        number of seconds is a wall-clock budget for the whole ``fit``,
+        counted from its start: training stops at the first epoch end past
+        it and keeps the best checkpoint so far. Not saved with the model.
+    early_stopping_metric:
+        What picks the checkpoint and stops training. ``None`` or ``loss``
+        (default) is the validation loss. For classification, ``log_loss``,
+        ``accuracy`` or ``roc_auc`` (two classes) score the predicted
+        probabilities on the whole validation partition instead, which
+        matters when a model is judged on that metric. ``log_loss`` differs
+        from ``loss`` for an ensemble: the loss averages each member's
+        cross-entropy, while ``log_loss`` scores the averaged prediction.
+        For regression, ``rmse`` scores the members' averaged prediction in
+        the same way.
     sample_weight:
         Direct loss weights, accepted for every task. ``None`` means uniform
         weights. This is not row sampling.
@@ -642,6 +716,9 @@ class ASRModel(BaseEstimator):
         weight_decay: float = 1e-4,
         gradient_clip: float | None = None,
         feature_dropout: float = 0.0,
+        feature_gates: float = 0.0,
+        soft_trees: int = 0,
+        soft_trees_dropout: float = TREE_DROPOUT,
         numeric_scaling: str = "robust",
         numeric_clip: float | None = 3.0,
         prediction_policy: str | None = None,
@@ -657,6 +734,11 @@ class ASRModel(BaseEstimator):
         tree: dict | None = None,
         monotone: dict | None = None,
         random_effects: dict | None = None,
+        weight_average: float | None = None,
+        early_stopping_metric: str | None = None,
+        time_limit: float | None = None,
+        label_smoothing: float = 0.0,
+        num_embedding_bin_method: str = "quantile",
     ):
         self.task = task
         self.backbone = backbone
@@ -688,6 +770,9 @@ class ASRModel(BaseEstimator):
         self.weight_decay = weight_decay
         self.gradient_clip = gradient_clip
         self.feature_dropout = feature_dropout
+        self.feature_gates = feature_gates
+        self.soft_trees = soft_trees
+        self.soft_trees_dropout = soft_trees_dropout
         self.numeric_scaling = numeric_scaling
         self.numeric_clip = numeric_clip
         self.prediction_policy = prediction_policy
@@ -703,6 +788,11 @@ class ASRModel(BaseEstimator):
         self.cyclical = cyclical
         self.random_state = random_state
         self.tree = tree
+        self.weight_average = weight_average
+        self.early_stopping_metric = early_stopping_metric
+        self.time_limit = time_limit
+        self.label_smoothing = label_smoothing
+        self.num_embedding_bin_method = num_embedding_bin_method
 
     def _check_config(self):
         if check_monotone(self.monotone):
@@ -737,6 +827,22 @@ class ASRModel(BaseEstimator):
                 raise AshlarError(f"{name} must be a positive integer or 'auto'.")
         if self.patience < 0:
             raise AshlarError("patience must be non-negative.")
+        if self.weight_average is not None and not 0.0 <= float(self.weight_average) < 1.0:
+            raise AshlarError("weight_average is a per-epoch decay in [0, 1), or None.")
+        if self.num_embedding_bin_method not in {"quantile", "tree"}:
+            raise AshlarError("num_embedding_bin_method must be 'quantile' or 'tree'.")
+        if not 0.0 <= float(self.label_smoothing) < 1.0:
+            raise AshlarError("label_smoothing is a share in [0, 1).")
+        if float(self.label_smoothing) > 0 and self.task != "classification":
+            raise AshlarError("label_smoothing is for classification.")
+        if self.time_limit is not None and (isinstance(self.time_limit, bool) or not float(self.time_limit) > 0):
+            raise AshlarError("time_limit is a positive number of seconds, or None.")
+        if self.early_stopping_metric not in _STOPPING_METRICS:
+            raise AshlarError("early_stopping_metric must be None, 'loss', 'log_loss', 'accuracy', 'roc_auc', or 'rmse'.")
+        if self.early_stopping_metric in {"log_loss", "accuracy", "roc_auc"} and self.task != "classification":
+            raise AshlarError(f"early_stopping_metric={self.early_stopping_metric!r} is for classification.")
+        if self.early_stopping_metric == "rmse" and self.task != "regression":
+            raise AshlarError("early_stopping_metric='rmse' is for regression.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
         if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
@@ -745,6 +851,19 @@ class ASRModel(BaseEstimator):
             )
         if not 0.0 <= float(self.feature_dropout) < 1.0:
             raise AshlarError("feature_dropout must be in [0, 1).")
+        if not 0.0 <= float(self.feature_gates) < float("inf"):
+            raise AshlarError("feature_gates must be a finite number of at least 0.")
+        if isinstance(self.soft_trees, bool) or not isinstance(self.soft_trees, (int, np.integer)) or self.soft_trees < 0:
+            raise AshlarError("soft_trees must be a whole number of trees, 0 for none.")
+        if not 0.0 <= float(self.soft_trees_dropout) < 1.0:
+            raise AshlarError("soft_trees_dropout must be in [0, 1).")
+        if self.soft_trees:
+            if self.task not in ("classification", *MONOTONE_TASKS):
+                raise AshlarError(
+                    f"soft_trees needs classification or one of {', '.join(MONOTONE_TASKS)}; this model is {self.task}."
+                )
+            if check_monotone(self.monotone):
+                raise AshlarError("soft_trees cannot be combined with monotone: the trees would read the constrained features.")
         if self.numeric_scaling not in NUMERIC_SCALINGS:
             raise AshlarError(
                 "numeric_scaling must be 'standard', 'robust', 'quantile', or 'quantile_tabr'."
@@ -760,8 +879,8 @@ class ASRModel(BaseEstimator):
             raise AshlarError(f"the {self.task} head works on a standardized axis, so standardize_target must stay on.")
         if self.share_training_batches not in {True, False}:
             raise AshlarError("share_training_batches must be true or false.")
-        if not self.share_training_batches and self.task != "regression":
-            raise AshlarError("share_training_batches=False is implemented for regression.")
+        if not self.share_training_batches and self.task not in {"regression", "classification"}:
+            raise AshlarError("share_training_batches=False is implemented for regression and classification.")
         if self.num_embeddings not in _NUM_EMBEDDINGS:
             raise AshlarError("num_embeddings must be None, 'linear_relu', 'periodic', 'piecewise', or 'piecewise_relu'.")
         head = self.head
@@ -820,11 +939,14 @@ class ASRModel(BaseEstimator):
         self._expectation_weight()
         self._soft_stage_count()
         kwargs = dict(self.backbone_kwargs or {})
-        if "scaling_chunks" in kwargs or "arch_type" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
+        if "scaling_chunks" in kwargs or "feature_chunks" in kwargs or "terms" in kwargs:
             raise AshlarError(
-                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema, and arch_type "
-                "other than batch-ensemble TabM is not implemented. Refusing to ignore those arguments."
+                "scaling_chunks, feature_chunks, and terms are derived from the fitted schema. "
+                "Refusing to ignore those arguments."
             )
+        arch_type = kwargs.get("arch_type")
+        if "arch_type" in kwargs and (self._backbone_cls() is not TabMBackbone or arch_type not in TABM_ARCH_TYPES):
+            raise AshlarError(f"arch_type is a TabM backbone setting: backbone='tabm' with one of {TABM_ARCH_TYPES}.")
         if self._backbone_cls() is AdditiveBackbone:
             self._check_additive()
         elif isinstance(self.backbone, str) and "pairs" in kwargs:
@@ -870,6 +992,7 @@ class ASRModel(BaseEstimator):
         A dict widens that grid. See ``ashlar.search.DEFAULT_SEARCH``.
         """
         self._check_config()
+        self._deadline = None if self.time_limit is None else time.monotonic() + float(self.time_limit)
         self.tree_ = parse_tree(tree_json(self.tree)) if self.task == "tree" else None
         if resume and search not in (None, False):
             raise AshlarError("resume=True continues the current core. Omit search, or pass search=False.")
@@ -1158,8 +1281,6 @@ class ASRModel(BaseEstimator):
             numeric_scaling=self.numeric_scaling,
             numeric_clip=self.numeric_clip,
         )
-        if self.num_embeddings is not None and encoder.n_numeric == 0:
-            raise AshlarError("num_embeddings was requested, but the training partition has no numeric columns.")
         n_events, n_classes = self._output_sizes(y_train_model, classes)
         encoded = encoder.transform(train_frame)
         numeric_z = encoder.numeric_transform(encoded.numeric_raw)
@@ -1179,6 +1300,8 @@ class ASRModel(BaseEstimator):
                 init_key,
                 head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
                 numeric_z=numeric_z,
+                bin_target=y_train_model,
+                encoded=encoded,
             )
             opt_state = None
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
@@ -1186,6 +1309,8 @@ class ASRModel(BaseEstimator):
             encoder, names, columns, y_array, weights, val_idx, val_pack, classes, n_events
         )
         resolved = self._resolved_training()
+        if not self.share_training_batches and (getattr(self, "_candidates", None) is not None or self._observing()):
+            raise AshlarError("share_training_batches=False needs exact labels; coarse or observed labels train with shared batches.")
         trained, opt_state, history = fit_loop(
             core,
             numeric_z,
@@ -1208,6 +1333,9 @@ class ASRModel(BaseEstimator):
             set_tokens=encoded.set_tokens,
             set_mask=encoded.set_mask,
             units=units,
+            weight_average=None if self.weight_average is None else float(self.weight_average),
+            validation_score=self._validation_score(validation, n_classes),
+            deadline=getattr(self, "_deadline", None),
         )
         self.encoder_ = encoder
         self.embedded_columns_ = [column.name for column in encoder.embedding_columns]
@@ -1332,6 +1460,8 @@ class ASRModel(BaseEstimator):
             init_key,
             head_kwargs=self._head_kwargs_for_fit(y_train_model, n_classes),
             numeric_z=numeric_z,
+            bin_target=y_train_model,
+            encoded=encoded,
         )
         y_device, w_device, units = self._train_targets(y_train_model, w_train)
         validation = self._validation_device(
@@ -1397,9 +1527,9 @@ class ASRModel(BaseEstimator):
         effects = check_random_effects(self.random_effects)
         if not effects:
             return
-        if self.task not in (*RANDOM_EFFECT_TASKS, "chain"):
+        if self.task not in (*RANDOM_EFFECT_TASKS, "chain", "classification"):
             raise AshlarError(
-                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, or chain, "
+                f"random effects move a head's location: task must be one of {', '.join(RANDOM_EFFECT_TASKS)}, classification, or chain, "
                 f"not {self.task!r}."
             )
         if not (self.head is None or isinstance(self.head, str)) or self._cure():
@@ -1590,6 +1720,8 @@ class ASRModel(BaseEstimator):
         if self.task in HURDLE_TASKS:
             return make_hurdle_objective(self._severity())
         base = _OBJECTIVES[self.task]
+        if self.task == "classification" and float(self.label_smoothing) > 0:
+            return make_smoothed_classification_objective(float(self.label_smoothing))
         weight = self._expectation_weight()
         if weight is None:
             return base
@@ -1768,6 +1900,13 @@ class ASRModel(BaseEstimator):
             # One offset per column with a location, and per class after the first of a categorical column.
             targets, _ = chain_targets(head.columns)
             locations, scales = [position for target in targets for position in target], None
+        elif self.task == "classification":
+            # One offset per class after the first: that class's logit against the first, as in a chain's categorical column.
+            shape = jax.eval_shape(
+                lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+            )
+            targets = [(position,) for position in range(1, int(shape.shape[-1]))]
+            locations, scales = [position for (position,) in targets], None
         else:
             shape = jax.eval_shape(
                 lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
@@ -1821,17 +1960,129 @@ class ASRModel(BaseEstimator):
             raise AshlarError("soft_stages is an ordinal leaf histogram. It does not apply to other tasks.")
         return int(value)
 
+    def _validation_score(self, validation, n_classes):
+        """``early_stopping_metric`` as a whole-partition score of a core, higher is better, or ``None`` for the loss."""
+        metric = self.early_stopping_metric
+        if metric in (None, "loss") or validation is None:
+            return None
+        if metric == "roc_auc" and n_classes != 2:
+            raise AshlarError("early_stopping_metric='roc_auc' needs two classes; use 'loss' (log loss) for more.")
+        *features, y_val, w_val = validation
+        w_np = np.asarray(w_val, dtype=np.float64)
+        policy = self._policy()
+        import equinox as eqx
+
+        if metric == "rmse":
+            # The averaged prediction on the training scale; a z-scored target leaves the ranking unchanged.
+            target = np.asarray(y_val, dtype=np.float64)
+
+            @eqx.filter_jit
+            def point(core, *chunk):
+                return _point_from_raw("regression", policy, core(*chunk, key=None), None)
+
+            def rmse_score(core):
+                n_rows = int(target.shape[0])
+                pred = np.concatenate(
+                    [
+                        np.asarray(point(core, *(array[start : start + EVAL_CHUNK_ROWS] for array in features)))
+                        for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+                    ],
+                    axis=0,
+                ).reshape(target.shape)
+                squared = np.square(pred - target).reshape(n_rows, -1).mean(axis=1)
+                return -float(np.sqrt(np.sum(w_np * squared) / np.sum(w_np)))
+
+            return rmse_score
+        y_np = np.asarray(y_val).astype(np.int64)
+
+        @eqx.filter_jit
+        def probabilities(core, *chunk):
+            return _point_from_raw("classification", policy, core(*chunk, key=None), None)
+
+        def score(core):
+            n_rows = int(y_np.shape[0])
+            parts = [
+                np.asarray(probabilities(core, *(array[start : start + EVAL_CHUNK_ROWS] for array in features)))
+                for start in range(0, n_rows, EVAL_CHUNK_ROWS)
+            ]
+            proba = np.concatenate(parts, axis=0)
+            if metric == "accuracy":
+                return float(np.sum(w_np * (np.argmax(proba, axis=1) == y_np)) / np.sum(w_np))
+            if metric == "log_loss":
+                chosen = np.clip(proba[np.arange(n_rows), y_np], 1e-15, None)
+                return float(np.sum(w_np * np.log(chosen)) / np.sum(w_np))
+            from sklearn.metrics import roc_auc_score
+
+            if len(np.unique(y_np[w_np > 0])) < 2:
+                return 0.0
+            return float(roc_auc_score(y_np, proba[:, 1], sample_weight=w_np))
+
+        return score
+
+    def _tree_branch(self, encoder, head, members: int, d_head: int, numeric_z, encoded, key):
+        """The ``TreeBranch`` for ``soft_trees=``, or ``None``.
+
+        ``encoded`` is the training partition, whose rows place the first thresholds and scale the inputs. Without
+        it, as on ``load``, the branch has placeholders of the right shape.
+        """
+        if not self.soft_trees:
+            return None
+        shape = jax.eval_shape(
+            lambda hidden: head(hidden, key=None), jax.ShapeDtypeStruct((1, members, int(d_head)), jnp.float32)
+        )
+        width = int(shape.shape[-1])
+        if self.task == "classification":
+            moves, normalize = (1.0,) * width, True
+        else:
+            moves, normalize = tuple(float(abs(sign)) for sign in output_signs(self.task, width)), False
+        views = [
+            (position, 1 + len(column.categories))
+            for position, column in enumerate(encoder.embedding_columns)
+            if len(column.categories) <= TREE_MAX_LEVELS
+        ]
+        sample = None
+        if numeric_z is not None and encoded is not None:
+            numeric = np.asarray(numeric_z)
+            take = np.random.default_rng(int(self.random_state)).permutation(numeric.shape[0])[:TREE_SAMPLE]
+            sample = (numeric[take], np.asarray(encoded.categorical_onehot)[take], np.asarray(encoded.category_index)[take])
+        return TreeBranch(
+            encoder.n_numeric,
+            sum(encoder.categorical_widths),
+            views,
+            moves,
+            normalize,
+            int(self.soft_trees),
+            TREE_DEPTH,
+            key=key,
+            sample=sample,
+            dropout=float(self.soft_trees_dropout),
+        )
+
+    def _numeric_embeddings(self, encoder: FeatureEncoder) -> str | None:
+        """``num_embeddings``, or ``None`` when there are no numeric columns to embed.
+
+        A table of only categorical columns still embeds those; the numeric setting has nothing to act on.
+        """
+        return None if encoder.n_numeric == 0 else self.num_embeddings
+
     def _build_core(
-        self, encoder: FeatureEncoder, n_events: int, n_classes: int, key, head_kwargs=None, numeric_z=None
+        self,
+        encoder: FeatureEncoder,
+        n_events: int,
+        n_classes: int,
+        key,
+        head_kwargs=None,
+        numeric_z=None,
+        bin_target=None,
+        encoded=None,
     ):
         """Initial core. ``numeric_z`` is the scaled training partition; piecewise bins come from it.
 
         Without it, as on ``load``, the bins are placeholders of the right shape.
         """
         emb_key, cat_key, set_key, backbone_key, head_key = jax.random.split(key, 5)
-        embedding_dim = None
-        if self.num_embeddings is not None:
-            embedding_dim = int(self.num_embedding_dim)
+        num_embeddings = self._numeric_embeddings(encoder)
+        embedding_dim = None if num_embeddings is None else int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
         fields = self._core_fields(encoder)
         effects = check_random_effects(self.random_effects)
@@ -1848,17 +2099,25 @@ class ASRModel(BaseEstimator):
             kwargs["feature_chunks"] = chunks
             kwargs["terms"] = self._additive_terms([name for name, _ in fields], kwargs.pop("pairs", None))[0]
         embeddings = None
-        if self.num_embeddings == "linear_relu":
+        if num_embeddings == "linear_relu":
             embeddings = LinearReLUEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
-        elif self.num_embeddings == "periodic":
+        elif num_embeddings == "periodic":
             embeddings = PeriodicEmbeddings(encoder.n_numeric, embedding_dim, key=emb_key)
-        elif self.num_embeddings in {"piecewise", "piecewise_relu"}:
+        elif num_embeddings in {"piecewise", "piecewise_relu"}:
             if numeric_z is None:
                 edges = jnp.tile(jnp.linspace(-1.0, 1.0, int(self.num_embedding_bins) + 1), (encoder.n_numeric, 1))
+            elif self.num_embedding_bin_method == "tree" and bin_target is not None:
+                edges = tree_edges(
+                    numeric_z,
+                    bin_target,
+                    int(self.num_embedding_bins),
+                    classification=self.task in {"classification", "ordinal"},
+                    seed=int(self.random_state),
+                )
             else:
                 edges = quantile_edges(numeric_z, int(self.num_embedding_bins), seed=int(self.random_state))
             embeddings = PiecewiseLinearEmbeddings(
-                edges, embedding_dim, key=emb_key, activation=self.num_embeddings == "piecewise_relu"
+                edges, embedding_dim, key=emb_key, activation=num_embeddings == "piecewise_relu"
             )
         embedded = [column for column in encoder.embedding_columns if column.name not in effects]
         categorical_embeddings = _category_tables(embedded, cat_dim, cat_key, hidden=bool(self.categorical_embedding_hidden))
@@ -1924,7 +2183,20 @@ class ASRModel(BaseEstimator):
             set_length=encoder.set_length,
             feature_dropout=float(self._resolved_training()["feature_dropout"]),
             feature_chunks=tuple(int(width) for width in chunks),
+            gates=FeatureGates(chunks, float(self.feature_gates)) if float(self.feature_gates) > 0.0 else None,
+            trees=self._tree_branch(encoder, head, int(backbone.k), d_head, numeric_z, encoded, jax.random.fold_in(key, 10)),
         )
+
+    @property
+    def feature_gates_(self) -> list[str] | None:
+        """The input fields ``feature_gates`` left open, in the core's field order. ``None`` without gates."""
+        if not getattr(self, "is_fitted_", False):
+            raise AttributeError("feature_gates_ is set by fit.")
+        gates = getattr(self.core_, "gates", None)
+        if gates is None:
+            return None
+        names = [name for name, _ in self._core_fields(self.encoder_)]
+        return [name for name, keep in zip(names, gates.open_fields(), strict=True) if keep]
 
     def _core_fields(self, encoder: FeatureEncoder) -> list[tuple[str, int]]:
         """``(column, width)`` of each field the backbone reads, in the core's order (``FeatureEncoder.fields``).
@@ -1932,7 +2204,7 @@ class ASRModel(BaseEstimator):
         A grouping column of ``random_effects`` reaches the network only
         through its pooled embedding, a field of its own after the others.
         """
-        embedding_dim = None if self.num_embeddings is None else int(self.num_embedding_dim)
+        embedding_dim = None if self._numeric_embeddings(encoder) is None else int(self.num_embedding_dim)
         cat_dim = int(self.categorical_embedding_dim)
         fields = encoder.fields(embedding_dim, cat_dim, legacy=bool(getattr(self, "_legacy_field_order", False)))
         effects = check_random_effects(self.random_effects)
@@ -2476,6 +2748,9 @@ class ASRModel(BaseEstimator):
         """
         module = getattr(self.core_, "random_effects", None)
         if module is None or not module.has_offsets or self.task == "regression" or self._observing():
+            return
+        if self.task == "classification" and len(module.targets) > 1:
+            # One offset per class after the first: the update reads one offset per row, so the variational posteriors stay.
             return
         rows = np.asarray(train_idx)
         if val_idx is not None and len(val_idx):
@@ -3763,6 +4038,10 @@ class ASRModel(BaseEstimator):
             "learning_rate_schedule": self.learning_rate_schedule,
             "standardize_target": bool(self.standardize_target),
             "share_training_batches": bool(self.share_training_batches),
+            "weight_average": None if self.weight_average is None else float(self.weight_average),
+            "early_stopping_metric": self.early_stopping_metric,
+            "label_smoothing": float(self.label_smoothing),
+            "num_embedding_bin_method": self.num_embedding_bin_method,
             "bottleneck": self._bottleneck_width(),
             "histogram_variance": None if self.histogram_variance is None else float(self.histogram_variance),
             "expectation_weight": self._expectation_weight(),
@@ -3772,6 +4051,9 @@ class ASRModel(BaseEstimator):
             "calibration": getattr(self, "calibration_", None),
             "weight_decay": (getattr(self, "resolved_", None) or self._resolved_training())["weight_decay"],
             "feature_dropout": (getattr(self, "resolved_", None) or self._resolved_training())["feature_dropout"],
+            "feature_gates": float(self.feature_gates),
+            "soft_trees": int(self.soft_trees),
+            "soft_trees_dropout": float(self.soft_trees_dropout),
             "numeric_scaling": self.numeric_scaling,
             "numeric_clip": None if self.numeric_clip is None else float(self.numeric_clip),
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
@@ -3838,6 +4120,10 @@ class ASRModel(BaseEstimator):
             learning_rate_schedule=payload.get("learning_rate_schedule", "constant"),
             standardize_target=bool(payload.get("standardize_target", False)),
             share_training_batches=bool(payload.get("share_training_batches", True)),
+            weight_average=payload.get("weight_average"),
+            early_stopping_metric=payload.get("early_stopping_metric"),
+            label_smoothing=float(payload.get("label_smoothing", 0.0)),
+            num_embedding_bin_method=payload.get("num_embedding_bin_method", "quantile"),
             bottleneck=payload.get("bottleneck"),
             histogram_variance=payload.get("histogram_variance"),
             expectation_weight=payload.get("expectation_weight"),
@@ -3846,6 +4132,10 @@ class ASRModel(BaseEstimator):
             gradient_clip=payload.get("gradient_clip"),
             cyclical=payload.get("cyclical"),
             feature_dropout=payload.get("feature_dropout", 0.0),
+            feature_gates=payload.get("feature_gates", 0.0),
+            soft_trees=payload.get("soft_trees", 0),
+            # A model saved before the dropout existed trained without it.
+            soft_trees_dropout=payload.get("soft_trees_dropout", 0.0),
             numeric_scaling=payload.get("numeric_scaling", "standard"),
             numeric_clip=payload.get("numeric_clip", 3.0),
             prediction_policy=payload["prediction_policy"],
@@ -4428,4 +4718,6 @@ def _resolved_backbone_kwargs(core):
     payload = {"k": int(backbone.k), "d_out": int(backbone.d_out), "dropout": float(backbone.dropout_rate)}
     if hasattr(backbone, "activation"):
         payload["activation"] = backbone.activation
+    if hasattr(backbone, "arch_type"):
+        payload["arch_type"] = backbone.arch_type
     return payload
