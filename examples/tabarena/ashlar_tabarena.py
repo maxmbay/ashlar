@@ -485,14 +485,15 @@ class _MatchKeys:
 
 
 def _pmp_predict(params, base, stacks):
-    """base + sum over kernels of gamma * sum_S A_S G_S / (lambda + sum_S A_S H_S), with A_S = prod_{c in S} a_c."""
-    import jax
+    """base + sum over kernels of gamma * sum_S A_S G_S / (lambda + sum_S A_S H_S), with A_S = prod_{c in S} a_c.
+
+    a_c = exp(theta_c): a full conjunction often wants a_c in the tens, which a log scale reaches in a few dozen steps.
+    """
     import jax.numpy as jnp
 
     z = base
     for p, (G, H, mask) in zip(params, stacks):
-        a = jax.nn.softplus(p["theta"])
-        A = jnp.exp(mask @ jnp.log(a + 1e-12))[:, None, None]
+        A = jnp.exp(mask @ jnp.clip(p["theta"], -15.0, 15.0))[:, None, None]
         z = z + p["gamma"] * (A * G).sum(0) / (jnp.exp(p["log_lam"]) + (A * H).sum(0))
     return z
 
@@ -536,8 +537,11 @@ class _PartialMatchPool:
     kernels add up. Every sum comes from per-subset group tables of g and h, which do not depend on a, so a, lambda
     and gamma are fitted exactly by gradient descent on the validation fold, whose rows never see their own labels.
     Kernels grow greedily: a new kernel from one key or a pair of keys (so a pure interaction is found), or one more
-    key in a kernel. A step is kept only if it lowers the validation loss by ``z_min`` standard errors of the per-row
-    differences. With one kernel over every column and a large a, it is exact duplicate pooling.
+    key in a kernel. Each half of the validation rows proposes a move with weights fitted on its own rows, and the
+    other half judges it: a move is kept only if it lowers the judging half's loss by ``z_min`` standard errors of the
+    per-row differences (when both halves propose the same move, both judgements count). The kept kernels' weights
+    are then refitted on every validation row. With one kernel over every column and a large a, it is exact duplicate
+    pooling.
     """
 
     def __init__(self, X: pd.DataFrame, y: np.ndarray, n_classes: int | None, pred: np.ndarray):
@@ -556,6 +560,7 @@ class _PartialMatchPool:
         self.tables: dict = {}
         self.kernels: list[list[int]] = []
         self.params: list[dict] = []
+        self.trace: list = []
         self.report = "off"
 
     def _table(self, S, keep: bool):
@@ -610,7 +615,14 @@ class _PartialMatchPool:
         return {tuple(sorted(k[j] for j in S)) for k in kernels for r in range(1, len(k) + 1) for S in itertools.combinations(range(len(k)), r)}
 
     def choose(self, X_val, y_val, pred_val, max_kernels=4, max_keys=4, max_steps=8, n_single=24, n_pair=24, n_add=12,
-               z_min=2.0, max_seconds=300.0):
+               z_min=0.75, max_seconds=300.0, seed=0, cross=True):
+        """Greedy search on one half of the validation rows, judged on the other half, then a refit on all of them.
+
+        The search tries many moves, so the loss it sees is optimistic. Each half proposes its best move with weights
+        fitted on its own rows, and a move is kept only if it lowers the loss of the other half by ``z_min`` standard
+        errors of the per-row differences. When both halves propose the same move, both judgements count, so the test
+        uses every validation row; ``cross=False`` searches on one half only.
+        """
         import jax.numpy as jnp
 
         started = time.monotonic()
@@ -618,77 +630,123 @@ class _PartialMatchPool:
         base = self._base(pred_val)
         target = np.eye(self.n_classes)[np.asarray(y_val, dtype=np.int64)] if self.n_classes else np.asarray(y_val, dtype=np.float64)[:, None]
         lam0 = 2.0 if self.n_classes else 10.0
+        one = 0.0  # theta for a = 1
 
         def fresh(k):
-            return {"theta": jnp.full((k,), np.log(np.expm1(1.0)), jnp.float32), "log_lam": jnp.float32(np.log(lam0)), "gamma": jnp.float32(1.0)}
+            return {"theta": jnp.full((k,), one, jnp.float32), "log_lam": jnp.float32(np.log(lam0)), "gamma": jnp.float32(1.0)}
 
-        cur_z, before = base.copy(), self._rows(base, target)
-        cur_rows = before
+        def corrected(params, kernels, half):
+            k, b, _ = data[half]
+            stacks = [tuple(jnp.asarray(v) for v in self._stack(kern, k)) for kern in kernels]
+            return np.asarray(_pmp_predict(params, jnp.asarray(b, jnp.float32), stacks), dtype=np.float64)
 
-        def screen(S):
-            g, h = self._lookup(S, keys, keep=False)
-            return self._rows(cur_z + g / (lam0 + h), target).mean()
+        def label(ks):
+            return "&".join(self.keys.labels[c] for c in ks)
 
-        n_keys = len(self.keys.specs)
-        for _ in range(max_steps if n_keys else 0):
-            if time.monotonic() - started > max_seconds:
-                break
+        def build(move, params):
+            """The kernels and initial weights after ``move``: ("new", keys) adds a kernel, ("grow", j, c) a key."""
+            if move[0] == "new":
+                return self.kernels + [list(move[1])], params + [fresh(len(move[1]))]
+            _, j, c = move
+            grown = [{**p, "theta": jnp.concatenate([p["theta"], jnp.full((1,), one, jnp.float32)])} if i == j else p for i, p in enumerate(params)]
+            return [k + [c] if i == j else k for i, k in enumerate(self.kernels)], grown
+
+        self.trace = []
+        perm = np.random.default_rng(seed).permutation(len(base))
+        halves = [np.sort(perm[: len(perm) // 2]), np.sort(perm[len(perm) // 2 :])]
+        data = [(keys[h], base[h], target[h]) for h in halves]
+        params = [[], []]  # the kernels' weights fitted on each half
+        own = [data[i][1].copy() for i in range(2)]  # each half's prediction under its own weights, where its search starts
+        judged = [self._rows(data[i][1], data[i][2]) for i in range(2)]  # each half's loss under the other half's weights
+        before = np.concatenate(judged).mean() if cross else judged[1].mean()
+
+        def search(i):
+            """Half i's best move and the trial kernels' weights fitted on half i."""
+            k_i, b_i, t_i = data[i]
+
+            def screen(S):
+                g, h = self._lookup(S, k_i, keep=False)
+                return self._rows(own[i] + g / (lam0 + h), t_i).mean()
+
             single = np.array([screen((c,)) for c in range(n_keys)])
             ranked = list(np.argsort(single))
             top, pool = ranked[:n_single], ranked[: 2 * n_single]
-            pairs = [(a, b) for i, a in enumerate(top) for b in pool if b != a and (b not in top or top.index(b) > i)]
+            pairs = [(a, b) for n, a in enumerate(top) for b in pool if b != a and (b not in top or top.index(b) > n)]
             pair_scores = np.array([screen(pr) for pr in pairs]) if pairs else np.zeros(0)
-            moves = []
             have = {frozenset(k) for k in self.kernels}
+            moves = []
             if len(self.kernels) < max_kernels:
-                moves += [[int(c)] for c in top[:n_add]] + [[int(v) for v in pairs[i]] for i in np.argsort(pair_scores)[:n_pair]]
-                moves = [mv for mv in moves if frozenset(mv) not in have]
-            grow = [
-                (j, int(c))
+                moves += [("new", (int(c),)) for c in top[:n_add]]
+                moves += [("new", tuple(sorted(int(v) for v in pairs[n]))) for n in np.argsort(pair_scores)[:n_pair]]
+                moves = [mv for mv in moves if frozenset(mv[1]) not in have]
+            moves += [
+                ("grow", j, int(c))
                 for j, k in enumerate(self.kernels)
                 if len(k) < max_keys
                 for c in top[:n_add]
                 if c not in k and frozenset(k + [int(c)]) not in have
             ]
             best = None
-            for mv in moves + grow:
-                if isinstance(mv, list):
-                    trial, init = self.kernels + [mv], self.params + [fresh(len(mv))]
-                else:
-                    j, c = mv
-                    trial = [k + [c] if i == j else k for i, k in enumerate(self.kernels)]
-                    init = [
-                        {**p, "theta": jnp.concatenate([p["theta"], jnp.full((1,), np.log(np.expm1(1.0)), jnp.float32)])} if i == j else p
-                        for i, p in enumerate(self.params)
-                    ]
-                params, value, _ = self._fit(trial, init, base, target, keys, steps=60)
+            for mv in dict.fromkeys(moves):
+                trial, init = build(mv, params[i])
+                p, value, _ = self._fit(trial, init, b_i, t_i, k_i, steps=60)
                 if best is None or value < best[0]:
-                    best = (value, trial, params)
+                    best = (value, mv, p)
                 if time.monotonic() - started > max_seconds:
                     break
             if best is None:
+                return None
+            trial, _ = build(best[1], params[i])
+            return best[1], self._fit(trial, best[2], b_i, t_i, k_i, steps=500)[0]
+
+        n_keys = len(self.keys.specs)
+        for _ in range(max_steps if n_keys and len(halves[1]) > 1 else 0):
+            if time.monotonic() - started > max_seconds:
                 break
-            _, trial, params = best
-            params, _, stacks = self._fit(trial, params, base, target, keys, steps=500)
-            z = np.asarray(_pmp_predict(params, jnp.asarray(base, jnp.float32), stacks), dtype=np.float64)
-            rows = self._rows(z, target)
-            d = cur_rows - rows
-            if d.mean() / (d.std(ddof=1) / np.sqrt(len(d)) + 1e-12) < z_min:
+            proposals = [search(0), search(1) if cross else None]
+            fitted = {}  # move -> {half: weights fitted on that half}
+            for i, prop in enumerate(proposals):
+                if prop is not None:
+                    fitted.setdefault(prop[0], {})[i] = prop[1]
+            best = None
+            for mv, by_half in fitted.items():
+                trial, _ = build(mv, params[0])
+                # A half's weights are judged on the other half's rows.
+                d = np.concatenate([judged[1 - i] - self._rows(corrected(p, trial, 1 - i), data[1 - i][2]) for i, p in by_half.items()])
+                z = float(d.mean() / (d.std(ddof=1) / np.sqrt(len(d)) + 1e-12))
+                if best is None or z > best[0]:
+                    best = (z, mv, by_half)
+            if best is None:
                 break
-            self.kernels, self.params, cur_z, cur_rows = trial, params, z, rows
+            z, mv, by_half = best
+            trial, _ = build(mv, params[0])
+            self.trace.append((f"new {label(mv[1])}" if mv[0] == "new" else f"{label(self.kernels[mv[1]])} + {label([mv[2]])}", round(z, 2), len(by_half)))
+            if z < z_min:
+                break
+            for i in range(2 if cross else 1):
+                if i not in by_half:
+                    t, init = build(mv, params[i])
+                    by_half[i] = self._fit(t, init, data[i][1], data[i][2], data[i][0], steps=500)[0]
+            self.kernels = trial
+            params = [by_half.get(0, []), by_half.get(1, [])]
+            for i in range(2 if cross else 1):
+                own[i] = corrected(params[i], trial, i)
+                judged[1 - i] = self._rows(corrected(params[i], trial, 1 - i), data[1 - i][2])
             # Keep only the accepted kernels' tables between steps, so the trial moves do not pile up memory.
             needed = self._needed(self.kernels)
             self.tables = {S: t for S, t in self.tables.items() if S in needed}
+        if self.kernels:
+            # The structure stays; its weights are refitted on every validation row.
+            self.params, _, _ = self._fit(self.kernels, params[0], base, target, keys, steps=500)
         needed = self._needed(self.kernels)
         self.tables = {S: t for S, t in self.tables.items() if S in needed}
         self.params = [{name: np.asarray(v) for name, v in p.items()} for p in self.params]
         del self._train, self._g, self._h
+        after = (np.concatenate(judged) if cross else judged[1]).mean()
         names = [[self.keys.labels[c] for c in k] for k in self.kernels]
-        self.report = (
-            f"kernels {names}, validation loss {before.mean():.5f} -> {cur_rows.mean():.5f}"
-            if self.kernels
-            else f"nothing kept (validation loss {before.mean():.5f})"
-        )
+        where = "validation, each half judged by the other" if cross else "held-out half of validation"
+        steps = ", ".join(f"{move} z {z:.2f} ({'both halves' if n == 2 else 'one half'})" for move, z, n in self.trace)
+        self.report = (f"kernels {names}, {where} {before:.5f} -> {after:.5f}" if self.kernels else f"nothing kept ({where} {before:.5f})") + f"; steps: {steps or 'none'}"
         return bool(self.kernels)
 
     def apply(self, X: pd.DataFrame, pred: np.ndarray) -> np.ndarray:
@@ -1486,8 +1544,9 @@ AshlarTabMV4TreesDropModel = _variant(
 # Nov 6: partial-match pooling. v4's two best parts are label memories over groups of rows (ID-pair statistics and
 # exact-duplicate pooling), and the trees that beat it predict from groups too: a leaf is a conjunction of bins. This
 # corrects the trained network with a learned conjunction kernel over binned columns, fitted on the validation fold
-# (see _PartialMatchPool); a synthetic table of pair effects among 20-60 level categoricals went from 1-AUC .346
-# (v4 recipe) and .349 (LightGBM) to .225.
+# (see _PartialMatchPool). On a synthetic table of pair effects among 20-60 level categoricals, 1-AUC went from .336
+# to .349 (v4 recipe; LightGBM .349 to .355) to .215 to .227 over three seeds. A first version judged each step on
+# the rows it searched; each step is now judged by the half of the validation rows that did not propose it.
 AshlarTabMV4PartialPoolModel = _variant(AshlarTabMV4Model, "ASRTABMV4PMP", "AshlarTabMV4PartialPool", **_REPLICA)
 AshlarTabMV4PartialPoolModel.partial_match_pooling = True
 
