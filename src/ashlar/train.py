@@ -125,6 +125,34 @@ def make_optimizer(learning_rate, weight_decay: float, gradient_clip: float | No
     return optax.chain(optax.clip_by_global_norm(float(gradient_clip)), adamw)
 
 
+def _is_adam(node) -> bool:
+    return isinstance(node, optax.ScaleByAdamState)
+
+
+def _with_moments(state, source):
+    """``state`` with its AdamW moments and step count replaced by ``source``'s."""
+    moments = iter([node for node in jax.tree_util.tree_leaves(source, is_leaf=_is_adam) if _is_adam(node)])
+    return jax.tree_util.tree_map(lambda node: next(moments) if _is_adam(node) else node, state, is_leaf=_is_adam)
+
+
+def _rate_at(learning_rate, state) -> float:
+    """The AdamW rate of ``learning_rate`` (a number or an optax schedule) at the step count ``state`` holds."""
+    if not callable(learning_rate):
+        return float(learning_rate)
+    counts = [node.count for node in jax.tree_util.tree_leaves(state, is_leaf=_is_adam) if _is_adam(node)]
+    return float(learning_rate(counts[0] if counts else 0))
+
+
+def cooldown_optimizer(start_rate: float, steps: int, weight_decay: float, gradient_clip: float | None = None):
+    """AdamW whose rate falls linearly from ``start_rate`` to 0 over ``steps`` steps, then stays at 0."""
+    steps = max(1, int(steps))
+
+    def rate(count):
+        return start_rate * jnp.clip(1.0 - count / steps, 0.0, 1.0)
+
+    return make_optimizer(rate, weight_decay, gradient_clip)
+
+
 def surface_learning_rate(n_train: int, curvature: float, grad_rms: float) -> float:
     """AdamW rate from one training batch's loss scale.
 
@@ -233,6 +261,7 @@ def fit_loop(
     share_training_batches: bool = True,
     gradient_clip: float | None = None,
     units=None,
+    cooldown_epochs: int = 0,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
 
@@ -243,6 +272,14 @@ def fit_loop(
 
     ``units`` keeps observations that span several adjacent rows, such as
     group totals, whole inside each minibatch; see ``_fit_scanned``.
+
+    ``cooldown_epochs`` anneals the checkpoint early stopping picks. With
+    validation, training stops as before; then the best epoch's weights and
+    AdamW moments train ``cooldown_epochs`` more epochs on the same rows while
+    the rate falls linearly from its value at that epoch to zero, and the
+    final iterate is returned. The history records ``best_epoch`` (counted
+    from 1) and the cooldown's rate and losses. Without validation the budget
+    already ends where it ends, so there is no cooldown.
     """
     n_rows = int(numeric_z.shape[0])
     batch_size = max(1, min(int(batch_size), n_rows))
@@ -250,13 +287,10 @@ def fit_loop(
     if units is not None and (surface or not (share_training_batches or int(core.backbone.k) == 1)):
         raise AshlarError("observations that span several rows train with shared minibatches and a fixed schedule, not surface.")
     if surface:
-        optimizer = make_optimizer(SURFACE_PROBE_RATE, weight_decay, gradient_clip)
+        rate = SURFACE_PROBE_RATE
     else:
-        optimizer = make_optimizer(
-            _learning_rate_arg(learning_rate, learning_rate_schedule, n_rows, batch_size, max_epochs),
-            weight_decay,
-            gradient_clip,
-        )
+        rate = _learning_rate_arg(learning_rate, learning_rate_schedule, n_rows, batch_size, max_epochs)
+    optimizer = make_optimizer(rate, weight_decay, gradient_clip)
     params = eqx_filter(core, is_array)
     if opt_state is None:
         opt_state = optimizer.init(params)
@@ -328,19 +362,23 @@ def fit_loop(
             validation=validation,
             score_fn=score_fn,
             units=units,
+            cooldown=_cooldown_plan(cooldown_epochs, lambda state: _rate_at(rate, state), weight_decay, gradient_clip),
         )
     history = {"train_loss": [], "val_loss": []}
     best_core = core
     best_state = opt_state
     best_val = None
     best_score = None
+    best_epoch = 0
     stale = 0
     steps_per_epoch = max(1, (n_rows + batch_size - 1) // batch_size)
     warmup_limit = min(20, steps_per_epoch) if surface else 0
     warmup_seen = 0
     surface_ready = not surface
 
-    for epoch in range(max_epochs):
+    def train_epoch(epoch):
+        """One epoch of minibatches; returns its mean training loss. The surface schedule sets its rate here."""
+        nonlocal core, opt_state, optimizer, step, warmup_seen, surface_ready, rate
         epoch_key = jax.random.fold_in(key, epoch)
         perm_key, batch_key = jax.random.split(epoch_key)
         member_count = int(core.backbone.k)
@@ -413,9 +451,16 @@ def fit_loop(
                 history["surface_n_train"] = int(n_rows)
                 history["surface_warmup_steps"] = int(warmup_seen)
                 history["surface_probe_rate"] = float(SURFACE_PROBE_RATE)
+                rate = chosen
         if not train_losses:
             raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
-        history["train_loss"].append(float(np_mean(train_losses)))
+        if not train_losses:
+            raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
+        return float(np_mean(train_losses))
+
+    epoch = 0
+    for epoch in range(max_epochs):
+        history["train_loss"].append(train_epoch(epoch))
         if validation is None:
             best_core, best_state = core, opt_state
             continue
@@ -436,7 +481,7 @@ def fit_loop(
             if improved:
                 best_score = metric
         if improved:
-            best_core, best_state = core, opt_state
+            best_core, best_state, best_epoch = core, opt_state, epoch + 1
             stale = 0
         else:
             stale += 1
@@ -444,7 +489,23 @@ def fit_loop(
                 break
     if surface and not surface_ready:
         raise WeightError("the surface schedule finished before its warmup, so no learning rate was set.")
-    return best_core, best_state, history
+    if validation is None:
+        return best_core, best_state, history
+    history["best_epoch"] = best_epoch
+    if int(cooldown_epochs) <= 0:
+        return best_core, best_state, history
+    start_rate = _rate_at(rate, best_state)
+    optimizer = cooldown_optimizer(start_rate, int(cooldown_epochs) * steps_per_epoch, weight_decay, gradient_clip)
+    step = _adamw_step(optimizer, objective)
+    core = best_core
+    opt_state = _with_moments(optimizer.init(eqx_filter(core, is_array)), best_state)
+    history.update(
+        cooldown_epochs=int(cooldown_epochs), cooldown_start_rate=start_rate, cooldown_train_loss=[], cooldown_val_loss=[]
+    )
+    for extra in range(int(cooldown_epochs)):
+        history["cooldown_train_loss"].append(train_epoch(epoch + 1 + extra))
+        history["cooldown_val_loss"].append(float(evaluate(core, *validation)))
+    return core, _with_moments(best_state, opt_state), history
 
 
 def np_mean(values: list[float]) -> float:
@@ -514,6 +575,13 @@ def chunked_weighted(fn, arrays, weights, chunk_rows: int = EVAL_CHUNK_ROWS):
     return total / mass if mass > 0.0 else float("nan")
 
 
+def _cooldown_plan(epochs: int, start_rate, weight_decay: float, gradient_clip: float | None):
+    """``(epochs, start_rate(state), build(rate, steps))`` for a cooldown after early stopping, or ``None``."""
+    if int(epochs) <= 0:
+        return None
+    return int(epochs), start_rate, lambda rate, steps: cooldown_optimizer(rate, steps, weight_decay, gradient_clip)
+
+
 def _fit_scanned(
     core,
     data,
@@ -528,6 +596,7 @@ def _fit_scanned(
     validation,
     score_fn,
     units=None,
+    cooldown=None,
 ):
     """Shared-minibatch training with one compiled scan per epoch.
 
@@ -540,6 +609,10 @@ def _fit_scanned(
     such as group totals. Each epoch then shuffles observations instead of
     rows and packs them whole into minibatches (``pack_units``), with at
     least two of the largest per batch.
+
+    ``cooldown`` is ``_cooldown_plan``'s: with validation, the best
+    checkpoint trains that many more epochs at a rate falling to zero, and
+    the final iterate is returned (see ``fit_loop``).
     """
     n_rows = int(data[0].shape[0])
     if units is not None:
@@ -552,46 +625,68 @@ def _fit_scanned(
     padded = steps_per_epoch * batch_size
     params, static = eqx_partition(core, is_array)
 
-    def scan_epoch(params, state, index, mask, batch_key):
-        def body(carry, inputs):
-            params, state = carry
-            take, keep, step_index = inputs
-            batch = tuple(array[take] for array in data)
-            *features, y_batch, w_batch = batch
-            w_batch = jnp.where(keep, w_batch, jnp.zeros_like(w_batch))
-            step_key = jax.random.fold_in(batch_key, step_index)
+    def runners(optimizer):
+        """The compiled epoch, over rows and over packed observations, for ``optimizer``."""
 
-            def loss_fn(candidate_params):
-                candidate = eqx_combine(candidate_params, static)
-                raw = candidate(*features, key=step_key)
-                return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
+        def scan_epoch(params, state, index, mask, batch_key):
+            def body(carry, inputs):
+                params, state = carry
+                take, keep, step_index = inputs
+                batch = tuple(array[take] for array in data)
+                *features, y_batch, w_batch = batch
+                w_batch = jnp.where(keep, w_batch, jnp.zeros_like(w_batch))
+                step_key = jax.random.fold_in(batch_key, step_index)
 
-            has_mass = jnp.sum(w_batch) > 0
+                def loss_fn(candidate_params):
+                    candidate = eqx_combine(candidate_params, static)
+                    raw = candidate(*features, key=step_key)
+                    return _loss(objective, raw, y_batch, w_batch, step_key) + _penalty(candidate)
 
-            def update(_):
-                loss, grads = jax.value_and_grad(loss_fn)(params)
-                updates, new_state = optimizer.update(grads, state, params)
-                return optax.apply_updates(params, updates), new_state, loss
+                has_mass = jnp.sum(w_batch) > 0
 
-            def skip(_):
-                return params, state, jnp.asarray(0.0, dtype=jnp.float32)
+                def update(_):
+                    loss, grads = jax.value_and_grad(loss_fn)(params)
+                    updates, new_state = optimizer.update(grads, state, params)
+                    return optax.apply_updates(params, updates), new_state, loss
 
-            new_params, new_state, loss = jax.lax.cond(has_mass, update, skip, None)
-            return (new_params, new_state), (loss, has_mass)
+                def skip(_):
+                    return params, state, jnp.asarray(0.0, dtype=jnp.float32)
 
-        steps = jnp.arange(steps_per_epoch)
-        (params, state), (losses, seen) = jax.lax.scan(body, (params, state), (index, mask, steps))
-        return params, state, losses, seen
+                new_params, new_state, loss = jax.lax.cond(has_mass, update, skip, None)
+                return (new_params, new_state), (loss, has_mass)
 
-    @filter_jit
-    def run_epoch(params, state, order, batch_key):
-        valid = jnp.arange(padded) < n_rows
-        index = jnp.where(valid, jnp.pad(order, (0, padded - n_rows)), 0)
-        index = index.reshape(steps_per_epoch, batch_size)
-        mask = valid.reshape(steps_per_epoch, batch_size)
-        return scan_epoch(params, state, index, mask, batch_key)
+            steps = jnp.arange(steps_per_epoch)
+            (params, state), (losses, seen) = jax.lax.scan(body, (params, state), (index, mask, steps))
+            return params, state, losses, seen
 
-    run_packed_epoch = filter_jit(scan_epoch)
+        @filter_jit
+        def run_epoch(params, state, order, batch_key):
+            valid = jnp.arange(padded) < n_rows
+            index = jnp.where(valid, jnp.pad(order, (0, padded - n_rows)), 0)
+            index = index.reshape(steps_per_epoch, batch_size)
+            mask = valid.reshape(steps_per_epoch, batch_size)
+            return scan_epoch(params, state, index, mask, batch_key)
+
+        return run_epoch, filter_jit(scan_epoch)
+
+    def train_epoch(compiled, params, state, epoch):
+        """One epoch: the new params and state and the epoch's mean training loss."""
+        run_epoch, run_packed_epoch = compiled
+        epoch_key = jax.random.fold_in(key, epoch)
+        perm_key, batch_key = jax.random.split(epoch_key)
+        if units is None:
+            order = jax.random.permutation(perm_key, n_rows)
+            params, state, losses, seen = run_epoch(params, state, order, batch_key)
+        else:
+            order = np.asarray(jax.random.permutation(perm_key, len(first)))
+            index, keep = pack_units(first, size, order, batch_size, steps_per_epoch)
+            params, state, losses, seen = run_packed_epoch(params, state, jnp.asarray(index), jnp.asarray(keep), batch_key)
+        seen = np.asarray(losses)[np.asarray(seen)]
+        if seen.size == 0:
+            raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
+        if not np.isfinite(seen).all():
+            raise WeightError("training loss is not finite. Check targets, weights, and the learning rate.")
+        return params, state, float(seen.mean())
 
     @filter_jit
     def evaluate(model, *batch):
@@ -602,37 +697,30 @@ def _fit_scanned(
     eval_rows = EVAL_CHUNK_ROWS
     if getattr(objective, "stochastic", False):
         eval_rows = max(256, EVAL_CHUNK_ROWS // _DRAWN_CHUNK_DIVISOR // max(1, int(core.backbone.k)))
+
+    def validation_loss(model):
+        loss = chunked_weighted(lambda *chunk: evaluate(model, *chunk), validation, validation[-1], eval_rows)
+        if loss != loss:
+            raise WeightError("validation loss is not finite.")
+        return loss
+
+    compiled = runners(optimizer)
     history = {"train_loss": [], "val_loss": []}
     best_core = core
     best_state = opt_state
     best_val = None
     best_score = None
+    best_epoch = 0
     stale = 0
+    epoch = 0
     for epoch in range(max_epochs):
-        epoch_key = jax.random.fold_in(key, epoch)
-        perm_key, batch_key = jax.random.split(epoch_key)
-        if units is None:
-            order = jax.random.permutation(perm_key, n_rows)
-            params, opt_state, losses, seen = run_epoch(params, opt_state, order, batch_key)
-        else:
-            order = np.asarray(jax.random.permutation(perm_key, len(first)))
-            index, keep = pack_units(first, size, order, batch_size, steps_per_epoch)
-            params, opt_state, losses, seen = run_packed_epoch(
-                params, opt_state, jnp.asarray(index), jnp.asarray(keep), batch_key
-            )
-        seen = np.asarray(losses)[np.asarray(seen)]
-        if seen.size == 0:
-            raise WeightError("every training batch has zero total weight, so there is nothing to optimize.")
-        if not np.isfinite(seen).all():
-            raise WeightError("training loss is not finite. Check targets, weights, and the learning rate.")
-        history["train_loss"].append(float(seen.mean()))
+        params, opt_state, train_loss = train_epoch(compiled, params, opt_state, epoch)
+        history["train_loss"].append(train_loss)
         core = eqx_combine(params, static)
         if validation is None:
             best_core, best_state = core, opt_state
             continue
-        val_loss = chunked_weighted(lambda *chunk: evaluate(core, *chunk), validation, validation[-1], eval_rows)
-        if val_loss != val_loss:
-            raise WeightError("validation loss is not finite.")
+        val_loss = validation_loss(core)
         history["val_loss"].append(val_loss)
         if score_fn is None:
             improved = best_val is None or val_loss < best_val
@@ -647,10 +735,26 @@ def _fit_scanned(
             if improved:
                 best_score = metric
         if improved:
-            best_core, best_state = core, opt_state
+            best_core, best_state, best_epoch = core, opt_state, epoch + 1
             stale = 0
         else:
             stale += 1
             if patience > 0 and stale >= patience:
                 break
-    return best_core, best_state, history
+    if validation is None:
+        return best_core, best_state, history
+    history["best_epoch"] = best_epoch
+    if cooldown is None:
+        return best_core, best_state, history
+    epochs, start_rate, build = cooldown
+    rate = start_rate(best_state)
+    cool = build(rate, epochs * steps_per_epoch)
+    params = eqx_partition(best_core, is_array)[0]
+    state = _with_moments(cool.init(params), best_state)
+    compiled = runners(cool)
+    history.update(cooldown_epochs=epochs, cooldown_start_rate=rate, cooldown_train_loss=[], cooldown_val_loss=[])
+    for extra in range(epochs):
+        params, state, train_loss = train_epoch(compiled, params, state, epoch + 1 + extra)
+        history["cooldown_train_loss"].append(train_loss)
+        history["cooldown_val_loss"].append(validation_loss(eqx_combine(params, static)))
+    return eqx_combine(params, static), _with_moments(best_state, state), history
