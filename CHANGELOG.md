@@ -2,6 +2,22 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## 0.0.6 — 2026-11-09
+
+### Added
+
+- **A cooldown after early stopping, opt-in.** `cooldown_epochs=N` anneals the checkpoint early stopping picks: training goes on from the best validation epoch's weights and AdamW moments for `N` more epochs on the training rows, while the rate falls linearly from its value at that epoch to zero, and the final iterate is the fitted model. Under the default cosine budget the best epoch often comes a few epochs in, near the peak rate, so a refit with another `random_state` lands elsewhere along directions held-out loss barely sees, and anything that weights rows unevenly, such as a per-group mean of predictions, moves with it.
+  - On the issue's synthetic table (100,000 rows, five seeds, the validation set fixed), `cooldown_epochs=3` raised the cross-seed agreement of 40 group means from .989 to .998 with the test groups held out of training, and from .982 to .999 with them in it. It cut the seed SD of those means, each seed's overall offset removed, from .0019 to .0008 and from .0022 to .0007. Test log loss was .2398 against .2402, and .2421 against .2425, and each fit took 5 to 8 seconds longer than 53 to 62. The total seed SD, which counts a shift common to every group, fell less (.0035 to .0020, .0047 to .0026), still two to three times the 6-epoch fit annealed to zero without early stopping.
+  - `history_` now records `best_epoch` (counted from 1) whenever there is a validation partition, and with a cooldown its starting rate and its training and validation losses. `validation_size=0` has no early stopping and so no cooldown; `patience=0` still cools the best epoch of the full budget; `save`, `load`, and `resume=True` keep it.
+  - The default stays `0` until the benchmarks in [docs/benchmarks.md](docs/benchmarks.md) have been rerun with it. ([#89](https://github.com/maxmbay/ashlar/issues/89))
+
+### Fixed
+
+- **Random effects on a `flow` or `mixture` head could end with absurd offsets.** The refit that `fit` runs after training (Laplace's method, by Newton steps on each group's log posterior) took plain Newton steps. Where a group's log likelihood curved the wrong way in its offset, as a flow's sharp spline bins and a mixture's valleys can, the curvature cap was applied after the prior's curvature had been added, so the step became about 1e8 times the gradient and sent offsets to ±1e11 or left a posterior sd of 1e4 target SDs. Every row of such a group then got an absurd density: on the issue's synthetic table a flow broke 23 to 38 of 60 groups and 62% to 74% of held-out rows scored below -50.
+  - The likelihood's curvature is now capped at zero before the prior's is added, so the prior's always remains; no step moves a term by more than one prior SD; each step halves until it raises the group's log posterior, or the group stays put; and a group keeps its trained posterior unless the refit ends finite and at least as high. A row whose derivatives are not finite no longer drops the prior with it.
+  - On the issue's reproduction (seeds 0 and 1, and the intercept-only case) no group of either head breaks, and the held-out log density is where training left it or slightly better (median -0.612 against -0.608 for seed 0's flow, -0.593 against -0.595 for seed 1's). `with_context` uses the same update and gets the same guarantees. ([#90](https://github.com/maxmbay/ashlar/issues/90))
+- The `learning_rate_schedule` docstring said `constant` was the default; it is `cosine`, and the docstring now describes it.
+
 ## 0.0.5 — 2026-11-03
 
 ### Added
