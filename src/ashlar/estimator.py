@@ -497,6 +497,19 @@ class ASRModel(BaseEstimator):
         training partition only. ``validation_size=0`` uses every row for
         training and disables early stopping. ``patience=0`` also disables
         early stopping while still holding out the validation slice.
+    cooldown_epochs:
+        ``0`` (default) returns the best validation epoch's weights as they
+        were trained, at whatever rate the schedule had reached. A positive
+        number anneals them: training goes on from that checkpoint, with its
+        AdamW moments, for that many more epochs on the training rows while
+        the rate falls linearly from its value at the best epoch to zero, and
+        the final iterate is the fitted model. A checkpoint from high in the
+        schedule sits at one point of a noisy walk, so refits with another
+        ``random_state`` scatter along directions held-out loss barely sees,
+        such as a per-group mean of predictions; the annealed fits agree.
+        ``history_`` records ``best_epoch`` (counted from 1) and the
+        cooldown's starting rate and losses. Without a validation partition
+        there is no early stopping, so there is no cooldown either.
     weight_decay:
         AdamW penalty. ``0`` turns it off. The default is ``1e-4``.
     feature_dropout:
@@ -520,11 +533,13 @@ class ASRModel(BaseEstimator):
         ``None`` when rows may fall outside the training range (see
         ``docs/benchmarks.md``, "Spread past the training range").
     learning_rate_schedule:
-        ``constant`` (default) keeps the AdamW rate fixed. ``linear`` decays
-        that same rate to zero across the epoch budget. ``surface`` warms up
-        at ``1e-4`` for one epoch, capped at 20 steps, then sets the AdamW
-        rate from the training-batch curvature. The optimizer stays AdamW.
-        The default schedule is ``constant``.
+        ``cosine`` (default) warms the AdamW rate up linearly over the first
+        5% of the epoch budget's steps, then follows a half cosine down to
+        zero at the end of the budget; early stopping does not shorten it.
+        ``constant`` keeps the rate fixed. ``linear`` decays it to zero
+        across the epoch budget. ``surface`` warms up at ``1e-4`` for one
+        epoch, capped at 20 steps, then sets the AdamW rate from the
+        training-batch curvature. The optimizer stays AdamW.
     standardize_target:
         Regression only. ``None`` turns it on for regression and off for
         every other task. ``True`` fits the training mean and population
@@ -657,6 +672,7 @@ class ASRModel(BaseEstimator):
         tree: dict | None = None,
         monotone: dict | None = None,
         random_effects: dict | None = None,
+        cooldown_epochs: int = 0,
     ):
         self.task = task
         self.backbone = backbone
@@ -699,6 +715,7 @@ class ASRModel(BaseEstimator):
         self.categorical_embedding_hidden = categorical_embedding_hidden
         self.monotone = monotone
         self.random_effects = random_effects
+        self.cooldown_epochs = cooldown_epochs
         self.set_max_length = set_max_length
         self.cyclical = cyclical
         self.random_state = random_state
@@ -737,6 +754,8 @@ class ASRModel(BaseEstimator):
                 raise AshlarError(f"{name} must be a positive integer or 'auto'.")
         if self.patience < 0:
             raise AshlarError("patience must be non-negative.")
+        if isinstance(self.cooldown_epochs, (str, bool, float)) or int(self.cooldown_epochs) < 0:
+            raise AshlarError("cooldown_epochs must be a non-negative integer.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
         if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
@@ -1201,6 +1220,7 @@ class ASRModel(BaseEstimator):
             batch_size=int(resolved["batch_size"]),
             max_epochs=self._max_epochs(),
             patience=int(self.patience),
+            cooldown_epochs=int(self.cooldown_epochs),
             key=train_key,
             validation=validation,
             opt_state=opt_state,
@@ -2399,9 +2419,13 @@ class ASRModel(BaseEstimator):
             zero = jnp.zeros_like(shift)
             return jax.jvp(jax.grad(loglik), (zero,), (jnp.ones_like(zero),))
 
-        def derivatives(rows, shift):
-            """Each row's first and second derivative of its weighted log likelihood in its offset, at ``shift``."""
-            first, second = np.zeros(len(rows)), np.zeros(len(rows))
+        @jax.jit
+        def chunk_loglik(raw_rows, shift, target_rows):
+            return view._dist_from_raw(raw_rows + shift[:, None, None] * locations).log_prob(target_rows)
+
+        def pieces(rows, shift, fn):
+            """``fn`` on ``rows`` at offsets ``shift``, chunk by chunk, each output as ``(rows,)`` float64."""
+            outputs = None
             for start in range(0, len(rows), chunk):
                 part = rows[start : start + chunk]
                 size = len(part)
@@ -2409,10 +2433,23 @@ class ASRModel(BaseEstimator):
                 # The last piece is padded to the chunk, so one compiled shape serves every piece.
                 index = np.concatenate([part, np.full(padding, part[0])])
                 moved = np.concatenate([shift[start : start + size], np.zeros(padding)])
-                one, two = chunk_derivatives(raw[index], jnp.asarray(moved, dtype=jnp.float32), target[index])
-                first[start : start + size] = np.asarray(one, dtype=np.float64)[:size]
-                second[start : start + size] = np.asarray(two, dtype=np.float64)[:size]
+                result = fn(raw[index], jnp.asarray(moved, dtype=jnp.float32), target[index])
+                result = result if isinstance(result, tuple) else (result,)
+                if outputs is None:
+                    outputs = tuple(np.zeros(len(rows)) for _ in result)
+                for out, value in zip(outputs, result):
+                    out[start : start + size] = np.asarray(value, dtype=np.float64).reshape(-1)[:size]
+            return outputs
+
+        def derivatives(rows, shift):
+            """Each row's first and second derivative of its weighted log likelihood in its offset, at ``shift``."""
+            first, second = pieces(rows, shift, chunk_derivatives)
             return first * row_weights[rows], second * row_weights[rows]
+
+        def log_likelihoods(rows, shift):
+            """Each row's weighted log likelihood at offsets ``shift``."""
+            (values,) = pieces(rows, shift, chunk_loglik)
+            return values * row_weights[rows]
 
         for _ in range(int(sweeps)):
             for position, terms in enumerate(module.slope_columns):
@@ -2445,8 +2482,21 @@ class ASRModel(BaseEstimator):
                 def row_derivatives(offset, rows=rows, others=others):
                     return derivatives(rows, others[rows] + offset)
 
+                def row_loglik(offset, rows=rows, others=others):
+                    return log_likelihoods(rows, others[rows] + offset)
+
+                # From the prior, a group keeps its trained posterior unless the update climbs above it.
+                trained = (current[present], np.square(np.asarray(positive(module.raw_scales[position]), dtype=np.float64)[present]))
                 mean, variance = laplace_update(
-                    row_derivatives, prior_mean, prior_var, covariate[rows], compact[groups[rows]], len(present), steps=steps
+                    row_derivatives,
+                    prior_mean,
+                    prior_var,
+                    covariate[rows],
+                    compact[groups[rows]],
+                    len(present),
+                    steps=steps,
+                    loglik=row_loglik,
+                    fallback=trained if from_prior else None,
                 )
                 updated_means = module.means[position].at[present].set(jnp.asarray(mean, dtype=jnp.float32))
                 updated_scales = module.raw_scales[position].at[present].set(
@@ -3777,6 +3827,7 @@ class ASRModel(BaseEstimator):
             "batch_size": (getattr(self, "resolved_", None) or self._resolved_training())["batch_size"],
             "max_epochs": self.max_epochs,
             "patience": self.patience,
+            "cooldown_epochs": int(self.cooldown_epochs),
             "validation_size": self.validation_size,
             "split": self.split,
             "random_state": int(self.random_state),
@@ -3834,6 +3885,7 @@ class ASRModel(BaseEstimator):
             batch_size=payload["batch_size"],
             max_epochs=payload["max_epochs"],
             patience=payload["patience"],
+            cooldown_epochs=payload.get("cooldown_epochs", 0),
             learning_rate=payload["learning_rate"],
             learning_rate_schedule=payload.get("learning_rate_schedule", "constant"),
             standardize_target=bool(payload.get("standardize_target", False)),
