@@ -519,7 +519,18 @@ def report(module: RandomEffects, spec: dict, encoder, unit: float) -> dict:
     return out
 
 
-def laplace_update(loglik_grads, prior_mean, prior_var, covariate, groups, n_groups: int, steps: int = 25):
+def laplace_update(
+    loglik_grads,
+    prior_mean,
+    prior_var,
+    covariate,
+    groups,
+    n_groups: int,
+    steps: int = 25,
+    *,
+    loglik=None,
+    fallback=None,
+):
     """Gaussian posteriors of each group's offset terms from rows, by Newton steps on the log posterior.
 
     ``loglik_grads(offset)`` returns each row's first and second derivative of
@@ -528,41 +539,80 @@ def laplace_update(loglik_grads, prior_mean, prior_var, covariate, groups, n_gro
     ``groups`` maps rows to ``0..n_groups-1``; ``prior_mean`` and
     ``prior_var`` are ``(n_groups, T)``. Returns the posterior mean and the
     marginal variances, ``(n_groups, T)`` each. A normal likelihood is
-    quadratic in the offset, so one step is exact there.
+    quadratic in the offset, so the steps reach its posterior exactly, in one
+    step when it lies within one prior standard deviation of the start.
+
+    The likelihood need not be log-concave in the offset: a flow's or a
+    mixture's log density curves the wrong way in places. Where it does, it
+    adds no curvature and the step keeps the prior's, and no step moves a
+    term by more than one prior standard deviation. ``loglik(offset)``, each
+    row's log likelihood, makes every step climb: a group whose step lowers
+    its log posterior halves it until it does not, or stays where it is.
+    ``fallback``, a ``(mean, variance)`` pair of ``(n_groups, T)`` posteriors,
+    needs ``loglik``: a group keeps its fallback unless the update ends finite
+    with a log posterior at least as high.
     """
     covariate = np.asarray(covariate, dtype=np.float64)
     groups = np.asarray(groups, dtype=np.int64)
     prior_mean = np.asarray(prior_mean, dtype=np.float64)
-    prior_precision = 1.0 / np.asarray(prior_var, dtype=np.float64)
+    prior_var = np.asarray(prior_var, dtype=np.float64)
+    prior_precision = 1.0 / prior_var
+    radius = np.sqrt(prior_var)
     terms = covariate.shape[1]
+    if fallback is not None and loglik is None:
+        raise ValueError("laplace_update needs loglik to compare the update with its fallback.")
 
     def curvature(second):
-        hessian = np.zeros((n_groups, terms, terms))
-        hessian[:, np.arange(terms), np.arange(terms)] = -prior_precision
-        np.add.at(hessian, groups, second[:, None, None] * covariate[:, :, None] * covariate[:, None, :])
-        # Where the likelihood is not log-concave in the offset, the step keeps the prior's curvature.
-        return _negative_definite(np.where(np.isfinite(hessian), hessian, 0.0))
+        likelihood = np.zeros((n_groups, terms, terms))
+        second = np.where(np.isfinite(second), second, 0.0)
+        np.add.at(likelihood, groups, second[:, None, None] * covariate[:, :, None] * covariate[:, None, :])
+        # Where the likelihood is not log-concave in the offset, it adds no curvature and the prior's remains.
+        values, vectors = np.linalg.eigh(likelihood)
+        likelihood = np.einsum("gij,gj,gkj->gik", vectors, np.minimum(values, 0.0), vectors)
+        return likelihood - prior_precision[:, :, None] * np.eye(terms)[None]
+
+    def offsets(mean):
+        return np.sum(mean[groups] * covariate, axis=1)
+
+    def log_posterior(mean):
+        values = np.asarray(loglik(offsets(mean)), dtype=np.float64)
+        total = np.zeros(n_groups)
+        np.add.at(total, groups, np.where(np.isfinite(values), values, -np.inf))
+        return total - 0.5 * np.sum(np.square(mean - prior_mean) * prior_precision, axis=1)
 
     mean = prior_mean.copy()
+    height = None if loglik is None else log_posterior(mean)
     for _ in range(int(steps)):
-        offset = np.sum(mean[groups] * covariate, axis=1)
-        first, second = (np.asarray(value, dtype=np.float64) for value in loglik_grads(offset))
+        first, second = (np.asarray(value, dtype=np.float64) for value in loglik_grads(offsets(mean)))
         gradient = -(mean - prior_mean) * prior_precision
         np.add.at(gradient, groups, np.where(np.isfinite(first), first, 0.0)[:, None] * covariate)
         step = np.linalg.solve(curvature(second), gradient[..., None])[..., 0]
+        step = np.clip(step, -radius, radius)
+        if height is not None:
+            shrink = np.ones(n_groups)
+            candidate = log_posterior(mean - step)
+            for _ in range(30):
+                lower = ~(candidate >= height)
+                if not lower.any():
+                    break
+                shrink[lower] *= 0.5
+                candidate = np.where(lower, log_posterior(mean - step * shrink[:, None]), candidate)
+            stay = ~(candidate >= height)
+            shrink[stay] = 0.0
+            step = step * shrink[:, None]
+            height = np.where(stay, height, candidate)
         mean = mean - step
         if np.max(np.abs(step)) < 1e-6:
             break
-    _, second = loglik_grads(np.sum(mean[groups] * covariate, axis=1))
+    _, second = loglik_grads(offsets(mean))
     covariance = np.linalg.inv(-curvature(np.asarray(second, dtype=np.float64)))
-    return mean, np.diagonal(covariance, axis1=1, axis2=2).copy()
-
-
-def _negative_definite(hessian):
-    """The Hessian with its eigenvalues capped below at a small negative number, so a Newton step climbs."""
-    values, vectors = np.linalg.eigh(hessian)
-    values = np.minimum(values, -1e-8)
-    return np.einsum("gij,gj,gkj->gik", vectors, values, vectors)
+    variance = np.diagonal(covariance, axis1=1, axis2=2).copy()
+    if fallback is not None:
+        kept_mean, kept_var = (np.asarray(value, dtype=np.float64) for value in fallback)
+        better = np.isfinite(mean).all(axis=1) & np.isfinite(variance).all(axis=1) & (height >= log_posterior(kept_mean))
+        mean = np.where(better[:, None], mean, kept_mean)
+        variance = np.where(better[:, None], variance, kept_var)
+    return mean, variance
 
 
 __all__ = [

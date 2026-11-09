@@ -297,3 +297,87 @@ def test_fit_finishes_a_poisson_group_at_its_posterior_mode():
     rate = np.exp(eta + mean[group])
     gradient = np.bincount(group, weights=counts - rate) - mean / tau**2
     assert np.max(np.abs(gradient) / (1.0 + np.bincount(group, weights=counts))) < 1e-5
+
+
+# One row whose likelihood in the offset b is 0.6 N(-1, 0.1^2) + 0.4 N(1, 0.1^2): convex in b at b = 0 (issue #90).
+_MODES, _MODE_WEIGHTS, _MODE_SD = np.array([-1.0, 1.0]), np.array([0.6, 0.4]), 0.1
+
+
+def _two_modes_log_weights(b):
+    z = (np.asarray(b)[:, None] - _MODES) / _MODE_SD
+    return np.log(_MODE_WEIGHTS) - 0.5 * z**2 - np.log(_MODE_SD * np.sqrt(2.0 * np.pi))
+
+
+def _two_modes(b):
+    log_weight = _two_modes_log_weights(b)
+    share = np.exp(log_weight - log_weight.max(axis=1, keepdims=True))
+    share /= share.sum(axis=1, keepdims=True)
+    slope = -(np.asarray(b)[:, None] - _MODES) / _MODE_SD**2
+    first = (share * slope).sum(axis=1)
+    return first, (share * (slope - first[:, None]) ** 2).sum(axis=1) - 1.0 / _MODE_SD**2
+
+
+def _two_modes_loglik(b):
+    log_weight = _two_modes_log_weights(b)
+    top = log_weight.max(axis=1)
+    return top + np.log(np.exp(log_weight - top[:, None]).sum(axis=1))
+
+
+def _one_group(steps, **kwargs):
+    return laplace_update(_two_modes, np.zeros((1, 1)), np.full((1, 1), 0.25), np.ones((1, 1)), np.zeros(1, dtype=int), 1, steps=steps, **kwargs)
+
+
+def test_laplace_keeps_the_prior_curvature_where_the_likelihood_curves_the_wrong_way():
+    assert _two_modes(np.zeros(1))[1][0] > 1.0 / 0.25  # the log posterior is convex at the start
+    # The first step stays within one prior sd (0.5); before, it moved the offset by about 2e9.
+    first, _ = _one_group(1)
+    assert np.abs(first[0, 0]) <= 0.5 + 1e-12
+    for loglik in (None, _two_modes_loglik):
+        mean, variance = _one_group(25, loglik=loglik)
+        assert np.isclose(mean[0, 0], -0.9615, atol=1e-3)  # the heavier mode, pulled a little towards the prior
+        assert 0.0 < variance[0, 0] < 0.25
+
+
+def test_laplace_steps_climb_the_log_posterior_and_keep_a_better_fallback():
+    def log_posterior(mean):
+        return _two_modes_loglik(mean[:, 0])[0] - 0.5 * mean[0, 0] ** 2 / 0.25
+
+    heights = [log_posterior(_one_group(steps, loglik=_two_modes_loglik)[0]) for steps in range(1, 6)]
+    assert np.all(np.diff(heights) >= -1e-12)
+    # One step ends at -0.5, below a fallback at the mode, so the fallback stays, variance and all.
+    fallback = (np.full((1, 1), -0.96), np.full((1, 1), 0.01))
+    mean, variance = _one_group(1, loglik=_two_modes_loglik, fallback=fallback)
+    assert mean[0, 0] == -0.96 and variance[0, 0] == 0.01
+    # A fallback the update climbs past is replaced.
+    mean, _ = _one_group(25, loglik=_two_modes_loglik, fallback=(np.full((1, 1), 0.9), np.full((1, 1), 0.01)))
+    assert np.isclose(mean[0, 0], -0.9615, atol=1e-3)
+    with pytest.raises(ValueError, match="loglik"):
+        _one_group(1, fallback=fallback)
+
+
+def test_a_row_without_finite_curvature_leaves_the_prior_in_place():
+    groups = np.zeros(3, dtype=int)
+
+    def broken(offset):
+        # Two rows of a unit normal around 1, and a third whose derivatives are not finite.
+        return np.array([1.0 - offset[0], 1.0 - offset[1], np.nan]), np.array([-1.0, -1.0, np.inf])
+
+    mean, variance = laplace_update(broken, np.zeros((1, 1)), np.full((1, 1), 0.25), np.ones((3, 1)), groups, 1)
+    precision = 2.0 + 4.0
+    assert np.isclose(variance[0, 0], 1.0 / precision) and np.isclose(mean[0, 0], 2.0 / precision)
+
+
+@pytest.mark.slow
+def test_a_flow_with_a_random_intercept_keeps_sane_offsets_after_its_refit():
+    # Skewed noise and groups of 5 to 600 rows: on 0.0.5 the refit sent several groups' offsets to about 1e11.
+    rng = np.random.default_rng(0)
+    sizes = np.exp(rng.uniform(np.log(5), np.log(600), 20)).astype(int)
+    group = np.repeat(np.arange(20), sizes)
+    x1, x2 = rng.uniform(0, 1, len(group)), rng.normal(size=len(group))
+    y = np.sin(3 * x1) + 0.5 * x2 + rng.normal(0, 0.3, 20)[group] + rng.gamma(2.0, 0.5, len(group))
+    frame = pd.DataFrame({"g": [f"g{index}" for index in group], "x1": x1, "x2": x2})
+    model = ASRRegressor(task="flow", random_effects={"g": "intercept"}, random_state=0).fit(frame, y)
+    effects = model.random_effects_["g"]
+    tau = float(np.ravel(effects["tau"])[0])
+    assert np.abs(effects["mean"]).max() < 5 * tau and effects["sd"].max() < 5 * tau
+    assert np.min(model.log_prob(frame, y)) > -50
