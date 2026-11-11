@@ -119,6 +119,7 @@ from ashlar.distributions import (
     QuantileLevels,
     head_distribution,
     hurdle_distribution,
+    quantile_crps,
     randomized_pit,
 )
 from ashlar.predict import mean_logits, mean_probabilities, split_normal_parameters
@@ -510,6 +511,16 @@ class ASRModel(BaseEstimator):
         ``history_`` records ``best_epoch`` (counted from 1) and the
         cooldown's starting rate and losses. Without a validation partition
         there is no early stopping, so there is no cooldown either.
+    early_stopping_metric:
+        What picks the checkpoint and stops training. ``None`` or ``loss``
+        (default) is the validation loss. ``crps``, for a distribution task
+        with quantiles (every one but ``quantile``) and one target column,
+        scores the predictive distribution, the member mixture, by its CRPS
+        on the validation partition (read from its quantiles at 64 levels),
+        so the kept checkpoint is the one a CRPS benchmark would pick, while
+        the training loss stays the likelihood. ``history_["val_score"]``
+        records the negative CRPS of each epoch, on the training scale of
+        the target.
     weight_decay:
         AdamW penalty. ``0`` turns it off. The default is ``1e-4``.
     feature_dropout:
@@ -673,6 +684,7 @@ class ASRModel(BaseEstimator):
         monotone: dict | None = None,
         random_effects: dict | None = None,
         cooldown_epochs: int = 0,
+        early_stopping_metric: str | None = None,
     ):
         self.task = task
         self.backbone = backbone
@@ -716,6 +728,7 @@ class ASRModel(BaseEstimator):
         self.monotone = monotone
         self.random_effects = random_effects
         self.cooldown_epochs = cooldown_epochs
+        self.early_stopping_metric = early_stopping_metric
         self.set_max_length = set_max_length
         self.cyclical = cyclical
         self.random_state = random_state
@@ -756,6 +769,10 @@ class ASRModel(BaseEstimator):
             raise AshlarError("patience must be non-negative.")
         if isinstance(self.cooldown_epochs, (str, bool, float)) or int(self.cooldown_epochs) < 0:
             raise AshlarError("cooldown_epochs must be a non-negative integer.")
+        if self.early_stopping_metric not in (None, "loss", "crps"):
+            raise AshlarError("early_stopping_metric must be None, 'loss', or 'crps'.")
+        if self.early_stopping_metric == "crps" and (self.task not in DISTRIBUTION_TASKS or self.task == "quantile"):
+            raise AshlarError("early_stopping_metric='crps' is for a distribution task with quantiles, such as 'mixture'.")
         if self.learning_rate <= 0 or self.weight_decay < 0:
             raise AshlarError("learning_rate must be positive and weight_decay must be non-negative.")
         if self.learning_rate_schedule not in {"constant", "linear", "cosine", "surface"}:
@@ -1221,6 +1238,7 @@ class ASRModel(BaseEstimator):
             max_epochs=self._max_epochs(),
             patience=int(self.patience),
             cooldown_epochs=int(self.cooldown_epochs),
+            validation_score=self._validation_score(validation),
             key=train_key,
             validation=validation,
             opt_state=opt_state,
@@ -1286,6 +1304,43 @@ class ASRModel(BaseEstimator):
         if value == "auto":
             return auto_batch_size(getattr(self, "_n_train", 0))
         return int(value)
+
+    def _validation_score(self, validation):
+        """``early_stopping_metric`` as a score of a core on the whole validation partition, higher is better.
+
+        ``None`` leaves early stopping on the validation loss. ``validation`` is ``_validation_device``'s tuple.
+        """
+        if self.early_stopping_metric in (None, "loss") or validation is None:
+            return None
+        *features, y_val, w_val = validation
+        if self._observing() or np.asarray(y_val).size != np.asarray(w_val).size:
+            raise AshlarError("early_stopping_metric='crps' needs one exactly observed target column.")
+        # The member mixture on the training scale; a z-scored target scales every CRPS alike.
+        target = np.asarray(y_val, dtype=np.float32).reshape(-1)
+        weight = np.asarray(w_val, dtype=np.float64)
+        task = self.task
+        import equinox as eqx
+
+        @eqx.filter_jit
+        def crps_rows(core, value, *chunk):
+            return quantile_crps(Mixture(head_distribution(task, core(*chunk, key=None))), value)
+
+        def score(core):
+            values = np.concatenate(
+                [
+                    np.asarray(
+                        crps_rows(
+                            core,
+                            jnp.asarray(target[start : start + EVAL_CHUNK_ROWS]),
+                            *(array[start : start + EVAL_CHUNK_ROWS] for array in features),
+                        )
+                    )
+                    for start in range(0, len(target), EVAL_CHUNK_ROWS)
+                ]
+            )
+            return -float(np.sum(weight * values) / np.sum(weight))
+
+        return score
 
     def _max_epochs(self) -> int:
         if self.max_epochs == "auto":
@@ -3828,6 +3883,7 @@ class ASRModel(BaseEstimator):
             "max_epochs": self.max_epochs,
             "patience": self.patience,
             "cooldown_epochs": int(self.cooldown_epochs),
+            "early_stopping_metric": self.early_stopping_metric,
             "validation_size": self.validation_size,
             "split": self.split,
             "random_state": int(self.random_state),
@@ -3886,6 +3942,7 @@ class ASRModel(BaseEstimator):
             max_epochs=payload["max_epochs"],
             patience=payload["patience"],
             cooldown_epochs=payload.get("cooldown_epochs", 0),
+            early_stopping_metric=payload.get("early_stopping_metric"),
             learning_rate=payload["learning_rate"],
             learning_rate_schedule=payload.get("learning_rate_schedule", "constant"),
             standardize_target=bool(payload.get("standardize_target", False)),
