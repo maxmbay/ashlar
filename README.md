@@ -12,30 +12,83 @@
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-147a72"></a>
 </p>
 
-Ashlar is a Python library for regression and classification on tabular data. It trains neural networks with JAX, and for regression it predicts a probability distribution for each row instead of a single value. You choose the distribution family to suit the target, for example a negative binomial for counts, a mixture of normals for skewed or multimodal targets, or a hurdle model for targets with many zeros. Labels do not have to be exact. A survival time can be censored, a day's sales can be capped by a stock-out, and a value can be known only as a range or as a total over several rows. A model can also predict several targets at once, with a joint distribution over them.
+Ashlar is a Python library for regression and classification on tabular data. It trains neural networks with JAX, and for regression it predicts a probability distribution for each row instead of a single value.
 
-The estimators follow the scikit-learn API and take NumPy arrays or pandas and Polars data frames. On eight public tables with half a million to two million rows, Ashlar's point predictions are within 0.3% of the best of LightGBM, XGBoost, and CatBoost on three tables, better on two, and worse on three; the largest shortfall is an 11% higher RMSE on taxi tips. On the four regression tables, its predicted distributions were also compared with LightGBMLSS, the best tree-based distributional model on these tables. By CRPS, Ashlar is better on song release years (by 3.5%) and Zurich transport (1.7%), slightly worse on airline delays (0.2%), and much worse on taxi tips (27%).
+The part of Ashlar that is new is the **dressed model**, `ashlar.dressed()`. One call fits five networks and five label readers to a table, pools them, gives the pool a density, and corrects it with one more network. A label reader predicts a row from the labels of the training rows instead of from weights on the columns. What comes back is one distribution per row with an exact density and CDF. On 46 held-out fits of 23 small regression tables, its CRPS (continuous ranked probability score, the error of a predicted distribution; lower is better) was lower than a single network's by more than 1% on 37, within 1% on 7, and higher on 2.
 
-![Sixteen held-out flights from the airline delay table, one ridge each: the predicted distribution of departure delay from ASRRegressor(task="mixture") for that flight, skewed to the right, some with two peaks, each with a narrow spike at zero for leaving exactly on time. Under each ridge, the 80% interval from LightGBMLSS's mixture of three normals for the same flight, and a dot for the actual delay. At the right, both models' predicted probability of a delay of more than an hour.](docs/images/readme/hero-flights.png)
+The rest of the library is a general estimator in which the encoding, the backbone, the output distribution, the label type, and the training schedule are separate choices. It covers counts, censored and interval labels, joint targets, random effects, and tables of up to two million rows. [The rest of Ashlar](#the-rest-of-ashlar) starts there.
 
-The figure shows predicted departure delays for 16 flights from the test set of the airline delay table. The model, `ASRRegressor(task="mixture")`, was trained on 1.6 million US flights from 1987 to 2008, using schedule information only and no weather data. Each curve is one flight's predicted distribution, with the central 80% shaded dark and a narrow spike at zero for leaving exactly on time. Under each curve are the 80% interval predicted by LightGBMLSS's mixture of three normals and a dot for the actual delay.
-
-On 100,000 test flights the two models have almost the same CRPS (continuous ranked probability score, the error of a predicted distribution in minutes; lower is better): 9.17 for Ashlar and 9.14 for LightGBMLSS, which is also slightly ahead on the benchmark's other two splits. When both are calibrated to cover 80% of flights, Ashlar's intervals are 7% wider on average, but their coverage depends less on how risky a flight is. Ranked into fifths by each model's predicted probability of an hour's delay, Ashlar's intervals cover between 79% and 81% of the flights in each fifth, and LightGBMLSS's between 77% and 86%. Ashlar's predicted probability of a delay of more than an hour is within 0.6 percentage points of the observed rate in every group of 1,000 or more flights with similar predictions; LightGBMLSS's is off by up to 8.3 points. On this split, training took 4 minutes for Ashlar on the 12 cores of a laptop and 20 minutes for LightGBMLSS on six threads.
-
-## How a model is specified
-
-An Ashlar model is defined by five choices, shown in the diagram below: how the input columns are encoded, the backbone network, the output head, the type of label, and the training schedule. The head sets what the model predicts, such as a distribution family, class probabilities, or a single value. Four of the choices are keyword arguments to the estimator. The fifth, the label type, is set by what you pass to `fit`: a plain array for exact values, or a label built with `ashlar.observed` for censored, interval, rounded, truncated, noisy, or summed values. The choices are independent of each other, so they can be combined. The highlighted path is one example, an additive backbone with a negative binomial head, fitted to sales that were censored on days a product sold out.
+## The dressed model
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-    <img alt="The five choices that define a model: encode, backbone, head, label, and train, with one combination highlighted." src="docs/images/architecture-light.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/dressed-dark.svg">
+    <img alt="The five steps of a dressed model, top to bottom: five networks and five label readers, a pool weight, smoothing, a corrector network, and a gate. The label readers and the corrector are marked as the parts this model adds." src="docs/images/dressed-light.svg" width="100%">
   </picture>
 </p>
 
-Every configuration is an instance of the same class, `ASRModel`, with different arguments; `ASRRegressor` and `ASRClassifier` are `ASRModel` with the task already set. A model is therefore fully described by its arguments, which makes it easy to save, version, and tune. [docs/models.md](docs/models.md) describes the keyword arguments and [docs/observed.md](docs/observed.md) the label types.
+```python
+import ashlar
 
-Many of these features are available in other packages, spread across several of them. LightGBMLSS and NGBoost fit distributions with gradient-boosted trees, XGBoost and CatBoost fit censored survival times, R's `gamlss` fits additive models for each parameter of a distribution, GPBoost and mixed-model packages fit random effects, and MAPIE adds conformal prediction intervals. In R, brms fits many of the same likelihoods, including censoring, truncation, mixtures, hurdles, and random effects, in Bayesian regression models. Ashlar provides them in one estimator with a neural network backbone, so they can be used together. Some of its features we have not found in other libraries, such as labels that are totals over several rows, and calibrated intervals for a function of several predicted outcomes, like the total cost of a policy's claims.
+model = ashlar.dressed().fit(X, y)
+
+dist = model.predict_dist(X_new)                 # one distribution per row
+dist.log_prob(y_new)                             # exact log density
+dist.cdf(y_new)                                  # exact CDF
+model.predict_quantiles(X_new, [0.1, 0.5, 0.9])
+model.sample(X_new, n=1000)
+```
+
+It is for one numeric target on a table of up to a few thousand rows, when the predicted distribution matters more than the time to fit.
+
+### Two kinds of model
+
+A network with a density head fits a smooth map from the columns to the target. That suits a smooth target. It does not suit a target that is a linear function of the columns, one with a handful of values, or one where a row's nearest neighbours already hold the answer.
+
+A label reader suits those. It has no weights from the columns to the target. For each row it solves a ridge regression on the training rows inside the forward pass, which also gives every training row's leave-one-out residual, and then spreads the row's probability over those residuals by attention. Its prediction is a set of weighted points: the row's ridge prediction plus each of those residuals.
+
+Neither wins on every table, so a dressed model fits both and lets held-out rows decide how much weight each gets.
+
+### What `fit` does
+
+1. **Members.** The rows are cut into five parts. Pair `k` holds out part `k` and fits a network with a density head and a label reader on the other four.
+2. **Pool.** One weight between the networks and the readers, picked by the CRPS of every row under the pair that held it out.
+3. **Smooth.** A reader predicts points, so the pool has no density and no log score. Each point becomes a normal, with a width picked on the held-out rows.
+4. **Correct.** One more network is trained on where each label falls in its own row's held-out pool. It reshapes every row's pool.
+5. **Gate.** One weight between the corrected pool and the smoothed one, picked on held-out rows. If the corrector did not help there, the gate is 0 and the corrector is left out.
+
+Every choice after the first step is made on rows the pairs did not train on. Every piece has a closed-form CDF and density, so the final distribution does too.
+
+### What it adds
+
+Bagging cross-fitted models, weighting two models by a held-out score, kernel smoothing, and correcting a prediction on its own probability scale are established methods. Two parts are this model's own:
+
+- **The label reader.** Retrieval models such as TabR and ModernNCA, and pretrained in-context models such as TabPFN, also read the training labels at prediction time. TabR and ModernNCA return a single value for regression, and TabPFN is pretrained on synthetic tables. The reader returns a distribution, built from a ridge fit and its leave-one-out residuals, and is trained from scratch on the one table.
+- **The corrector's scale.** The corrector is trained on each label's position in the pool of the pair that held that row out. So it learns the pool's errors on rows the pool did not see, and the gate can switch it off.
+
+### How it was tested
+
+The design was chosen on one fold of 23 regression tables: 12 from OpenML's CTR23 suite, 7 from PMLB, and 4 of those with the target binned into 5 to 10 ratings, each with at most 2,400 training rows. It was then scored once on two other folds of each table, 46 fits, against a pass line written down beforehand. The table gives the dressed model's CRPS as a ratio to each comparison's; below 1, the dressed model is better.
+
+| Dressed model against | Geometric mean | Median | Better by >1% | Within 1% | Worse by >1% |
+|---|---|---|---|---|---|
+| One network alone | 0.569 | 0.916 | 37 | 7 | 2 |
+| The five networks, averaged | 0.568 | 0.916 | 37 | 7 | 2 |
+| One network and one reader, pooled | 0.920 | 0.956 | 38 | 6 | 2 |
+| The five pairs pooled, not dressed | 0.955 | 0.974 | 27 | 17 | 2 |
+
+The geometric means in the first two rows are pulled down by three tables where a network alone is far off, so the medians are the better summary. The last two rows have no density, so only the first two can be compared on log score: the dressed model's was above the five averaged networks' on 39 of the 46 fits.
+
+It passed the line set beforehand, on the last row. Two fits were worse than the undressed pool by more than 5%. On `wave_energy`, whose target is a linear function of the columns, one of the two folds came out at 5.5 times the undressed pool's CRPS; the other was 6% better. On a table of 475 rows with a rating target, one fold was 10% worse.
+
+[docs/dressed.md](docs/dressed.md) describes each step, the settings, and every test: these, the three earlier designs that failed, and the check that the library gives the same numbers as the research code the design was worked out in.
+
+### Limits
+
+- One numeric target with exact labels. Censored and interval labels, joint targets, classes, and sample weights are for [the general estimator](#the-rest-of-ashlar).
+- Every test is on at most 2,400 training rows. Nothing larger has been tested.
+- It is the slowest model in Ashlar: five networks, five readers, and a corrector. The median fit on the 23 tables took 26 minutes on a 12-core laptop that was running six fits at once.
+- A target that the columns determine almost exactly can come out worse than the undressed pool, as on the one fold of `wave_energy`. [docs/dressed.md](docs/dressed.md#limits) explains why.
 
 ## Install
 
@@ -58,6 +111,33 @@ python -c "import jax; print(jax.devices())"   # should list a CudaDevice
 No code changes are needed, because JAX uses the GPU when one is available. For other CUDA versions and platforms, see [JAX's install guide](https://docs.jax.dev/en/latest/installation.html).
 
 </details>
+
+## The rest of Ashlar
+
+Besides the dressed model, Ashlar has one general estimator, `ASRModel`, with `ASRRegressor` and `ASRClassifier` as its two forms. For regression you choose the distribution family to suit the target, for example a negative binomial for counts, a mixture of normals for skewed or multimodal targets, or a hurdle model for targets with many zeros. Labels do not have to be exact. A survival time can be censored, a day's sales can be capped by a stock-out, and a value can be known only as a range or as a total over several rows. A model can also predict several targets at once, with a joint distribution over them.
+
+The estimators follow the scikit-learn API and take NumPy arrays or pandas and Polars data frames. On eight public tables with half a million to two million rows, Ashlar's point predictions are within 0.3% of the best of LightGBM, XGBoost, and CatBoost on three tables, better on two, and worse on three; the largest shortfall is an 11% higher RMSE on taxi tips. On the four regression tables, its predicted distributions were also compared with LightGBMLSS, the best tree-based distributional model on these tables. By CRPS, Ashlar is better on song release years (by 3.5%) and Zurich transport (1.7%), slightly worse on airline delays (0.2%), and much worse on taxi tips (27%).
+
+![Sixteen held-out flights from the airline delay table, one ridge each: the predicted distribution of departure delay from ASRRegressor(task="mixture") for that flight, skewed to the right, some with two peaks, each with a narrow spike at zero for leaving exactly on time. Under each ridge, the 80% interval from LightGBMLSS's mixture of three normals for the same flight, and a dot for the actual delay. At the right, both models' predicted probability of a delay of more than an hour.](docs/images/readme/hero-flights.png)
+
+The figure shows predicted departure delays for 16 flights from the test set of the airline delay table. The model, `ASRRegressor(task="mixture")`, was trained on 1.6 million US flights from 1987 to 2008, using schedule information only and no weather data. Each curve is one flight's predicted distribution, with the central 80% shaded dark and a narrow spike at zero for leaving exactly on time. Under each curve are the 80% interval predicted by LightGBMLSS's mixture of three normals and a dot for the actual delay.
+
+On 100,000 test flights the two models have almost the same CRPS (in minutes here; lower is better): 9.17 for Ashlar and 9.14 for LightGBMLSS, which is also slightly ahead on the benchmark's other two splits. When both are calibrated to cover 80% of flights, Ashlar's intervals are 7% wider on average, but their coverage depends less on how risky a flight is. Ranked into fifths by each model's predicted probability of an hour's delay, Ashlar's intervals cover between 79% and 81% of the flights in each fifth, and LightGBMLSS's between 77% and 86%. Ashlar's predicted probability of a delay of more than an hour is within 0.6 percentage points of the observed rate in every group of 1,000 or more flights with similar predictions; LightGBMLSS's is off by up to 8.3 points. On this split, training took 4 minutes for Ashlar on the 12 cores of a laptop and 20 minutes for LightGBMLSS on six threads.
+
+## How a model is specified
+
+An Ashlar model is defined by five choices, shown in the diagram below: how the input columns are encoded, the backbone network, the output head, the type of label, and the training schedule. The head sets what the model predicts, such as a distribution family, class probabilities, or a single value. Four of the choices are keyword arguments to the estimator. The fifth, the label type, is set by what you pass to `fit`: a plain array for exact values, or a label built with `ashlar.observed` for censored, interval, rounded, truncated, noisy, or summed values. The choices are independent of each other, so they can be combined. The highlighted path is one example, an additive backbone with a negative binomial head, fitted to sales that were censored on days a product sold out.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+    <img alt="The five choices that define a model: encode, backbone, head, label, and train, with one combination highlighted." src="docs/images/architecture-light.svg" width="100%">
+  </picture>
+</p>
+
+Every configuration is an instance of the same class, `ASRModel`, with different arguments; `ASRRegressor` and `ASRClassifier` are `ASRModel` with the task already set. A model is therefore fully described by its arguments, which makes it easy to save, version, and tune. [docs/models.md](docs/models.md) describes the keyword arguments and [docs/observed.md](docs/observed.md) the label types.
+
+Many of these features are available in other packages, spread across several of them. LightGBMLSS and NGBoost fit distributions with gradient-boosted trees, XGBoost and CatBoost fit censored survival times, R's `gamlss` fits additive models for each parameter of a distribution, GPBoost and mixed-model packages fit random effects, and MAPIE adds conformal prediction intervals. In R, brms fits many of the same likelihoods, including censoring, truncation, mixtures, hurdles, and random effects, in Bayesian regression models. Ashlar provides them in one estimator with a neural network backbone, so they can be used together. Some of its features we have not found in other libraries, such as labels that are totals over several rows, and calibrated intervals for a function of several predicted outcomes, like the total cost of a policy's claims.
 
 ## Quick start
 
@@ -121,22 +201,6 @@ On hourly bike rentals, with casual and registered riders as the two targets, th
 
 [docs/showcase.md](docs/showcase.md#multivariate-targets) has the bike-rental example in full and a chained model of insurance claims, and [docs/benchmarks.md](docs/benchmarks.md#several-products-that-sell-out-together) has the sell-out simulation.
 
-## Dressed models
-
-On a small table, one network is not always the best reader of the target. `ashlar.dressed()` fits five networks and five label readers, which predict a row from the training labels themselves, then pools them and corrects the pool, all in one call. It returns one distribution with an exact density and CDF.
-
-```python
-import ashlar
-
-model = ashlar.dressed().fit(X, y)
-
-model.predict_quantiles(X_new, [0.1, 0.5, 0.9])
-model.log_prob(X_new, y_new)                  # exact log density
-dist = model.predict_dist(X_new)              # cdf, quantile, sample, mean, crps
-```
-
-It was designed on one fold of 23 regression tables of up to 2,400 training rows and then scored on two other folds of each. On those 46 fits its CRPS was lower than one of its own networks' by more than 1% on 37, within 1% on 7, and higher on 2, by 1.4% at most; the median was 8% lower. Its log score was higher on 43 of the 46. It is the slowest model in Ashlar, eleven fits in one, and it takes one numeric target with exact labels. [docs/dressed.md](docs/dressed.md) describes the steps, every test, and the one kind of target where it can do much worse than the pool it starts from.
-
 ## Benchmarks on eight large tables
 
 ![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
@@ -167,12 +231,12 @@ Each example compares Ashlar with a tool commonly used for the same task: a grad
 
 ## Documentation
 
+- [docs/dressed.md](docs/dressed.md): the dressed model, step by step, with its settings, its limits, and every test.
 - [docs/showcase.md](docs/showcase.md): the full benchmark results and the examples from the gallery, with figures, code, and comparisons.
 - [docs/models.md](docs/models.md): the keyword arguments that define a model, and the research models beyond the defaults.
 - [docs/heads.md](docs/heads.md): each head and the targets it suits, calibrated intervals, and uncertainty across ensemble members.
 - [docs/distributions.md](docs/distributions.md): the distribution object returned by every head, joint heads, constraints, missing inputs, decisions, explanations, and JAX transforms.
 - [docs/observed.md](docs/observed.md): censored, interval, survival, rounded, truncated, noisy, and total labels, and which heads support them.
-- [docs/dressed.md](docs/dressed.md): dressed models, which pool cross-fitted networks and label readers into one distribution with an exact density, and the tests behind them.
 - [docs/additive.md](docs/additive.md): additive models for every parameter of a distribution (a neural GAMLSS), and how to read the fitted terms with `shape_functions`.
 - [docs/effects.md](docs/effects.md): random effects for groups such as stores, patients, or products, including predictions for new groups from a few rows.
 - [docs/tabular.md](docs/tabular.md): defaults, recipes, tasks, embeddings, set-valued columns, and hyperparameter search.
