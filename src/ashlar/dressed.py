@@ -511,6 +511,8 @@ class ASRDressed(BaseEstimator):
         Settings for ``ashlar.tabm_piecewise``, applied to every member's network and to the corrector, on top of
         ``max_epochs=1000`` and ``cooldown_epochs=3``. ``task``, ``random_state`` and ``early_stopping_metric``
         are set by the model.
+    reader:
+        Settings for each member's ``ashlar.label_reader.LabelReader``, such as ``max_steps``.
     reader_rows:
         The most training rows a member's reader reads at once (default 4096). A larger part is sampled down to
         this many, because a reader's cost grows with the square of its rows. Parts above this size are untested.
@@ -524,11 +526,12 @@ class ASRDressed(BaseEstimator):
     networks' best epochs).
     """
 
-    def __init__(self, members: int = 5, few_values: int = 20, network: dict | None = None, reader_rows: int = 4096,
-                 random_state: int = 0):
+    def __init__(self, members: int = 5, few_values: int = 20, network: dict | None = None, reader: dict | None = None,
+                 reader_rows: int = 4096, random_state: int = 0):
         self.members = members
         self.few_values = few_values
         self.network = network
+        self.reader = reader
         self.reader_rows = reader_rows
         self.random_state = random_state
 
@@ -639,7 +642,7 @@ class ASRDressed(BaseEstimator):
             cap = int(self.reader_rows)
             read = part if len(part) <= cap else np.sort(rng.choice(part, cap, replace=False))
             check = held if len(held) <= cap else np.sort(rng.choice(held, cap, replace=False))
-            reader = LabelReader(random_state=member_seed).fit(x[read], y[read], validation=(x[check], y[check]))
+            reader = LabelReader(random_state=member_seed, **(self.reader or {})).fit(x[read], y[read], validation=(x[check], y[check]))
             self.members_.append((model, reader, held))
             curve = np.zeros(len(POOL_WEIGHTS))
             for rows in self._blocks(held):
@@ -824,7 +827,9 @@ class ASRDressed(BaseEstimator):
 
 
 def dressed(**settings) -> ASRDressed:
-    """A dressed model: ``ASRDressed`` with ``members``, ``few_values``, ``reader_rows`` and ``random_state`` taken
-    from ``settings`` and every other setting passed to its networks (``ashlar.tabm_piecewise``)."""
-    own = {name: settings.pop(name) for name in ("members", "few_values", "reader_rows", "random_state") if name in settings}
+    """A dressed model: ``ASRDressed`` with ``members``, ``few_values``, ``reader``, ``reader_rows`` and
+    ``random_state`` taken from ``settings`` and every other setting passed to its networks
+    (``ashlar.tabm_piecewise``), as in ``ashlar.dressed(learning_rate=1e-3)``."""
+    names = ("members", "few_values", "reader", "reader_rows", "random_state")
+    own = {name: settings.pop(name) for name in names if name in settings}
     return ASRDressed(network=settings or None, **own)
