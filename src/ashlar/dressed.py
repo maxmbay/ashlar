@@ -47,7 +47,7 @@ LEVELS = np.concatenate([[0.001, 0.0025], np.linspace(0.005, 0.995, 199), [0.997
 LEVEL_MASS = np.diff(np.concatenate([[0.0], LEVELS]))
 LEVEL_MASS[-1] += 1.0 - LEVELS[-1]
 FACTORS = (1.0, 0.5, 0.25, 0.125, 2.0)  # bandwidth factors; the first wins a tie
-FLOOR = 0.01  # the wide normal's share of a smoothed reader
+FLOOR = 0.01  # the wide normal's share of a smoothed reader, at most
 Z_GRID = np.linspace(-7.0, 7.0, 113)  # the stopping rows' pools are read at these normal scores
 CRPS_ROWS = 120  # held-out rows per member in the CRPS factor's search
 PIECE = 5_000_000  # array cells per piece when a smoothed reader is evaluated
@@ -124,11 +124,22 @@ def _normal_score(F, S):
     return np.where(F < 0.5, ndtri(np.clip(F, 1e-300, 1.0)), -ndtri(np.clip(S, 1e-300, 1.0)))
 
 
+def _floor_share(y, centre, spread, held_out_crps, cost):
+    """The wide normal's share of a smoothed reader: ``FLOOR``, or less where that would cost more than ``cost``
+    times the raw pool's held-out CRPS. A share ``e`` beside a sharp pool costs ``e^2`` times the wide normal's
+    own CRPS on the labels."""
+    if cost is None:
+        return FLOOR
+    score = (y - centre) / spread
+    wide = spread * (score * (2 * ndtr(score) - 1) + 2 * np.exp(-0.5 * score**2) / np.sqrt(2 * np.pi) - 1 / np.sqrt(np.pi))
+    return float(min(FLOOR, np.sqrt(float(cost) * held_out_crps / wide.mean())))
+
+
 class _Smoothed:
-    """Rows' reader distributions as densities: ``sum_j p_j N(a_j, h^2)`` at weight ``1 - FLOOR`` plus ``FLOOR`` of
+    """Rows' reader distributions as densities: ``sum_j p_j N(a_j, h^2)`` at weight ``1 - floor`` plus ``floor`` of
     ``N(centre, spread^2)``. ``h`` is Silverman's rule on the row's weighted atoms, times ``factor``."""
 
-    def __init__(self, atoms, masses, centre, spread, factor):
+    def __init__(self, atoms, masses, centre, spread, factor, floor=FLOOR):
         atoms, masses = np.asarray(atoms, np.float64), np.asarray(masses, np.float64)
         masses = np.where(masses >= 1e-12, masses, 0.0)
         width = int((masses > 0).sum(axis=1).max())
@@ -145,7 +156,7 @@ class _Smoothed:
         scale = np.where(iqr > 0, np.minimum(sd, iqr / 1.349), sd)
         h = np.maximum(0.9 * scale * (1.0 / (p**2).sum(axis=1)) ** -0.2, 1e-5 * spread)
         self.h = np.maximum(h * factor, 1e-5 * spread)
-        self.a, self.p, self.centre, self.spread = a, p, centre, spread
+        self.a, self.p, self.centre, self.spread, self.floor = a, p, centre, spread, float(floor)
         self.lo = np.minimum(ordered[:, 0] - 40 * self.h, centre - 40 * spread)
         self.hi = np.maximum(ordered[:, -1] + 40 * self.h, centre + 40 * spread)
 
@@ -160,9 +171,9 @@ class _Smoothed:
             F[piece] = (p * ndtr(x)).sum(-1)
             S[piece] = (p * ndtr(-x)).sum(-1)
             f[piece] = (p * np.exp(-0.5 * x * x)).sum(-1) / (np.sqrt(2 * np.pi) * self.h[r, None])
-        b = (y - self.centre) / self.spread
-        return ((1 - FLOOR) * F + FLOOR * ndtr(b), (1 - FLOOR) * S + FLOOR * ndtr(-b),
-                (1 - FLOOR) * f + FLOOR * np.exp(-0.5 * b * b) / (np.sqrt(2 * np.pi) * self.spread))
+        b, floor = (y - self.centre) / self.spread, self.floor
+        return ((1 - floor) * F + floor * ndtr(b), (1 - floor) * S + floor * ndtr(-b),
+                (1 - floor) * f + floor * np.exp(-0.5 * b * b) / (np.sqrt(2 * np.pi) * self.spread))
 
 
 class _Pool:
@@ -516,23 +527,29 @@ class ASRDressed(BaseEstimator):
     reader_rows:
         The most training rows a member's reader reads at once (default 4096). A larger part is sampled down to
         this many, because a reader's cost grows with the square of its rows. Parts above this size are untested.
+    floor_cost:
+        ``None`` (default) gives every smoothed reader 1% of the wide normal. A share, such as ``0.01``, lowers the
+        wide normal's weight until its cost in CRPS is at most that share of the raw pool's held-out CRPS. The
+        wide normal costs about 0.00006 of the labels' spread, which is nothing on most tables and several times
+        the whole CRPS on a target the columns determine almost exactly.
     random_state:
         Seeds the split, the members and the corrector.
 
     Fitted attributes: ``values_`` (the target's values, or ``None`` for a density), ``pool_weight_`` (the
-    network's weight against the reader), ``bandwidth_factor_`` and ``fallback_factor_`` (the smoothing factors
+    network's weight against the reader), ``floor_`` (the wide normal's share), ``bandwidth_factor_`` and ``fallback_factor_`` (the smoothing factors
     by log score and by CRPS), ``gate_`` (the corrected pools' weight), ``members_`` (each member's network,
     reader and held-out rows), ``corrector_``, and ``history_`` (the searched curves, the readers' steps and the
     networks' best epochs).
     """
 
     def __init__(self, members: int = 5, few_values: int = 20, network: dict | None = None, reader: dict | None = None,
-                 reader_rows: int = 4096, random_state: int = 0):
+                 reader_rows: int = 4096, floor_cost: float | None = None, random_state: int = 0):
         self.members = members
         self.few_values = few_values
         self.network = network
         self.reader = reader
         self.reader_rows = reader_rows
+        self.floor_cost = floor_cost
         self.random_state = random_state
 
     # ----------------------------------------------------------------------------------------------------- fitting
@@ -598,7 +615,7 @@ class ASRDressed(BaseEstimator):
         return q, np.broadcast_to(LEVEL_MASS, q.shape)
 
     def _smooth(self, network, reader, factor, weight=None):
-        return _Pool(network, _Smoothed(*reader, self.centre_, self.spread_, factor),
+        return _Pool(network, _Smoothed(*reader, self.centre_, self.spread_, factor, self.floor_),
                      self.pool_weight_ if weight is None else weight, self.values_)
 
     def _pool_crps(self, pool, raw, y):
@@ -652,6 +669,7 @@ class ASRDressed(BaseEstimator):
         sizes = np.asarray([len(held) for _, _, held in self.members_], dtype=np.float64)
         oof = (sizes[:, None] * np.stack(curves)).sum(axis=0) / sizes.sum()
         self.pool_weight_ = float(POOL_WEIGHTS[int(np.argmin(oof))])
+        self.floor_ = _floor_share(y, self.centre_, self.spread_, float(oof.min()), self.floor_cost)
         self.history_ = {"weight_curve": oof.tolist(), "reader_steps": [int(reader.steps_) for _, reader, _ in self.members_],
                          "best_epochs": [int(model.history_.get("best_epoch", -1)) for model, _, _ in self.members_]}
         self._pick_factors(X, x, y)
@@ -827,9 +845,9 @@ class ASRDressed(BaseEstimator):
 
 
 def dressed(**settings) -> ASRDressed:
-    """A dressed model: ``ASRDressed`` with ``members``, ``few_values``, ``reader``, ``reader_rows`` and
-    ``random_state`` taken from ``settings`` and every other setting passed to its networks
+    """A dressed model: ``ASRDressed`` with ``members``, ``few_values``, ``reader``, ``reader_rows``, ``floor_cost``
+    and ``random_state`` taken from ``settings`` and every other setting passed to its networks
     (``ashlar.tabm_piecewise``), as in ``ashlar.dressed(learning_rate=1e-3)``."""
-    names = ("members", "few_values", "reader", "reader_rows", "random_state")
+    names = ("members", "few_values", "reader", "reader_rows", "floor_cost", "random_state")
     own = {name: settings.pop(name) for name in names if name in settings}
     return ASRDressed(network=settings or None, **own)

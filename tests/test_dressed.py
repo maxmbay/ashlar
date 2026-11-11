@@ -11,7 +11,7 @@ import pytest
 
 import ashlar
 from ashlar import ASRDressed, observed
-from ashlar.dressed import LEVELS, _Columns, atoms_crps
+from ashlar.dressed import FLOOR, LEVELS, _Columns, _floor_share, atoms_crps
 from ashlar.errors import AshlarError
 from micro import TABM_NET
 
@@ -33,10 +33,10 @@ def density():
     return model, X.iloc[200:], y[200:]
 
 
-def _forced(model, gate, weight):
-    """The fitted model with another gate and pool weight, to reach both sides of the gate."""
+def _forced(model, gate, weight, floor=FLOOR):
+    """The fitted model with another gate, pool weight and wide-normal share, to reach both sides of the gate."""
     other = copy.copy(model)
-    other.gate_, other.pool_weight_ = gate, weight
+    other.gate_, other.pool_weight_, other.floor_ = gate, weight, floor
     return other
 
 
@@ -46,6 +46,15 @@ def test_atoms_crps_matches_the_definition():
     first = (masses * np.abs(atoms - y[:, None])).sum(axis=1)
     spread = (masses[:, :, None] * masses[:, None, :] * np.abs(atoms[:, :, None] - atoms[:, None, :])).sum(axis=(1, 2))
     assert np.allclose(atoms_crps(atoms, masses, y), first - 0.5 * spread)
+
+
+def test_the_wide_normal_keeps_its_share_unless_it_would_cost_too_much():
+    y = np.random.default_rng(0).normal(size=4000)
+    assert _floor_share(y, 0.0, 1.0, 0.2, None) == FLOOR
+    assert _floor_share(y, 0.0, 1.0, 0.2, 0.01) == FLOOR  # an ordinary table: 1% costs far less than 1% of its CRPS
+    sharp = _floor_share(y, 0.0, 1.0, 1e-5, 0.01)  # a target the columns nearly determine
+    wide = 1.0 / np.sqrt(np.pi)  # a standard normal's CRPS on its own draws
+    assert np.isclose(sharp, np.sqrt(0.01 * 1e-5 / wide), rtol=0.05) and sharp < FLOOR
 
 
 def test_columns_reads_numbers_as_they_are_and_other_columns_by_code():
@@ -84,10 +93,10 @@ def test_a_dressed_density_fits_and_predicts_one_distribution(density):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(("gate", "weight"), [(0.0, 0.5), (0.6, 0.5), (1.0, 1.0), (1.0, 0.0)])
-def test_the_dressed_density_is_exact_on_both_sides_of_the_gate(density, gate, weight):
+@pytest.mark.parametrize(("gate", "weight", "floor"), [(0.0, 0.5, FLOOR), (0.6, 0.5, FLOOR), (1.0, 1.0, FLOOR), (1.0, 0.0, 1e-4)])
+def test_the_dressed_density_is_exact_on_both_sides_of_the_gate(density, gate, weight, floor):
     model, X, y = density
-    dist = _forced(model, gate, weight).predict_dist(X.iloc[:4])
+    dist = _forced(model, gate, weight, floor).predict_dist(X.iloc[:4])
     q = dist.quantile(LEVELS)
     assert np.all(np.diff(q, axis=0) >= 0)
     assert np.abs(dist.cdf(q) - LEVELS[:, None]).max() < 5e-6
