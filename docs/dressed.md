@@ -95,6 +95,8 @@ The design was chosen on 23 regression tables: 12 from OpenML's CTR23 suite, 7 f
 
 CRPS is lower-is-better. A ratio below 1 means the dressed model is better.
 
+![23 regression tables, one row each, sorted from the largest gain to the smallest. For each of two held-out folds, a filled dot shows the dressed model's CRPS divided by one network's and a ring shows the same for the five pairs pooled without dressing. The dressed model is at 0.4 or below on four tables, between 0.5 and 0.95 on most of the rest, and within 2% of 1 on the last five. The ring is to the right of the dot on most tables, and at 1.24 on one fold of fps_benchmark.](images/readme/dressed.png)
+
 | Dressed model against | Folds 1 and 2, 46 fits: geometric mean | Median | Better by >1% | Within 1% | Worse by >1% |
 |---|---|---|---|---|---|
 | One member's network alone | 0.569 | 0.916 | 37 | 7 | 2 |

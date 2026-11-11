@@ -22,6 +22,7 @@ NAMES = {"557_analcatdata_apnea1": "apnea1", "560_bodyfat": "bodyfat", "690_visu
          "auction_verification_rated5": "auction_verification, 5 ratings", "grid_stability_rated10": "grid_stability, 10 ratings",
          "geographical_origin_of_music": "origin_of_music", "naval_propulsion_plant": "naval_propulsion"}
 EDGE = 0.4  # ratios below this are drawn at the left edge with their value written out
+RIGHT = 1.28  # the right end of the axis; the largest ratio is the undressed pool on fps_benchmark, 1.24
 
 
 def compute():
@@ -35,17 +36,17 @@ def draw():
     tables = sorted({r["table"] for r in rows}, key=lambda t: np.mean([np.log(r["dressed"] / r["network"]) for r in rows if r["table"] == t]))
     ratio = np.asarray([r["dressed"] / r["network"] for r in rows])
     better, worse = int((ratio < 0.99).sum()), int((ratio > 1.01).sum())
-    fig = k.card("A dressed model against one network alone, on 46 fits it was not designed on.",
+    fig = k.card("A dressed model against one network alone, on 46 held-out fits",
                  "CRPS of ashlar.dressed() divided by the CRPS of one of its own networks, on folds 1 and 2 of 23 "
                  "regression tables (at most 2,400 training rows). Left of the line the dressed model is better.",
                  height=10.9, footer=4)
     ax = k.panel(fig, lpad=3.3, tail=0.75, head=0.2)
     ax.set_xscale("log")
-    ax.set_xlim(EDGE * 0.93, 1.09)
+    ax.set_xlim(EDGE * 0.93, RIGHT)
     ax.set_ylim(len(tables) - 0.4, -0.6)
     k.style(ax, frame="b", grid="x")
     ax.axvline(1.0, color=k.INK, lw=1.1, zorder=2)
-    ticks = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    ticks = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2]
     ax.set_xticks(ticks)
     ax.set_xticklabels([f"{t:g}" for t in ticks], fontproperties=k.F.tick, color=k.MUTED)
     ax.set_xticks([], minor=True)
@@ -54,7 +55,7 @@ def draw():
         mine = sorted((r for r in rows if r["table"] == table), key=lambda r: r["fold"])
         k.rich(ax, -0.015, y, [(NAMES.get(table, table), k.INK, k.F.label), (f"  {mine[0]['rows']:,} rows", k.MUTED, k.F.small)],
                transform=ax.get_yaxis_transform(), ha="right", va="center")
-        ax.plot([EDGE * 0.93, 1.09], [y, y], color=k.GRID, lw=0.8, zorder=1)
+        ax.plot([EDGE * 0.93, RIGHT], [y, y], color=k.GRID, lw=0.8, zorder=1)
         off = []
         for shift, r in zip((-0.16, 0.16), mine, strict=True):
             pooled, dressed = r["bagged"] / r["network"], r["dressed"] / r["network"]
@@ -65,7 +66,8 @@ def draw():
         if off:
             k.value(ax, EDGE * 1.035, y, " and ".join(off), color=k.TEAL, size=10.5)
     k.axis_names(ax, x="CRPS relative to one network alone (log scale)")
-    k.legend_row(fig, [("dot", k.TEAL, "the dressed model"), ("dot", k.SLATE, "the same five members pooled, not dressed (no density)")], line=3)
+    legend = k.legend_row(fig, [("dot", k.TEAL, "the dressed model"), ("dot", k.SLATE, "the same five members pooled, not dressed (no density)")], line=3)
+    legend.legend_handles[1].set(markerfacecolor=k.CARD, markeredgecolor=k.SLATE, markeredgewidth=1.6)  # the ring drawn above
     k.footnote(fig, f"Each table has two dots of each kind, fold 1 above fold 2. The design was fixed on fold 0 before these folds were read. "
                     f"The dressed model is better than one network by more than 1% on {better} of the {len(rows)} fits and worse by more than 1% on "
                     f"{worse} (by 1.4% at most). On wave_energy, a linear target, the undressed pool is sharper still: see docs/dressed.md, Limits.", line=0)

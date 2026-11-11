@@ -70,6 +70,10 @@ Bagging cross-fitted models, weighting two models by a held-out score, kernel sm
 
 The design was chosen on one fold of 23 regression tables: 12 from OpenML's CTR23 suite, 7 from PMLB, and 4 of those with the target binned into 5 to 10 ratings, each with at most 2,400 training rows. It was then scored once on two other folds of each table, 46 fits, against a pass line written down beforehand. The table gives the dressed model's CRPS as a ratio to each comparison's; below 1, the dressed model is better.
 
+![23 regression tables, one row each, sorted from the largest gain to the smallest. For each of two held-out folds, a filled dot shows the dressed model's CRPS divided by one network's and a ring shows the same for the five pairs pooled without dressing. The dressed model is at 0.4 or below on four tables, between 0.5 and 0.95 on most of the rest, and within 2% of 1 on the last five. The ring is to the right of the dot on most tables, and at 1.24 on one fold of fps_benchmark.](docs/images/readme/dressed.png)
+
+The figure shows each of the 46 fits: the dressed model, and the same five pairs pooled without dressing, each relative to one network alone. The table sums them up.
+
 | Dressed model against | Geometric mean | Median | Better by >1% | Within 1% | Worse by >1% |
 |---|---|---|---|---|---|
 | One network alone | 0.569 | 0.916 | 37 | 7 | 2 |
