@@ -108,4 +108,13 @@ Without the first of these the geometric mean of the last row is 0.919.
 
 On fold 0, which the design had seen, the same ratio was 0.913, better by more than 1% on 13 tables and worse on 1.
 
+The numbers above come from the research code the design was worked out in. `ASRDressed` was then run on fold 0 of all 23 tables, with the same splits and seeds, to check that the library gives the same model:
+
+| `ASRDressed` against the research code, fold 0, 23 fits | Median | Geometric mean | Largest gap |
+|---|---|---|---|
+| CRPS of the dressed model | 1.000 | 1.000 | 4.4% |
+| CRPS of the five members pooled, not dressed | 1.000 | 1.000 | 2.1% |
+
+On its own fits the library's dressed model was at 0.913 of its undressed pool, better by more than 1% on 13 tables and worse on 1, and its mean log score was above the five averaged networks' on 22 of the 23, by 0.69 nats on average.
+
 Three earlier designs failed on fold 0 and were dropped: a network fitted on top of the reader's prediction alone (worse than the pool on 15 of 23 tables), smoothing with no corrector (2% worse than the undressed pool, worse on 7), and the corrector with no gate (7% better on average but worse on the four smallest tables, where it stops within five epochs).
