@@ -15,6 +15,7 @@ Forecast heads are the ``head`` argument of the two forecasters: ``mse``
 from ashlar._compat import renamed
 from ashlar._version import __version__
 from ashlar.additive import ASRAdditive, ASRDiagonalNeighborhood, ASRGatedAdditive
+from ashlar.dressed import ASRDressed, dressed
 from ashlar.errors import AshlarError, ShapeError, WeightError
 from ashlar.estimator import ASRClassifier, ASRModel, ASROrdinalClassifier, ASROutcomeTree, ASRRegressor
 from ashlar.forecast import ASRForecaster, ASRHistoryForecaster
@@ -45,6 +46,7 @@ __all__ = [
     "ASRBartPriorEnsemble",
     "ASRClassifier",
     "ASRDiagonalNeighborhood",
+    "ASRDressed",
     "ASRForecaster",
     "ASRGatedAdditive",
     "ASRGradientSparseNet",
@@ -72,6 +74,7 @@ __all__ = [
     "TREE_RECIPE",
     "WeightError",
     "__version__",
+    "dressed",
     "residual_mlp",
     "tabm",
     "tabm_piecewise",
