@@ -26,6 +26,13 @@ Neither wins on every table, so the two are pooled: a weight `w` on the network 
 
 ## What `fit` does
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/dressed-dark.svg">
+    <img alt="The five steps of a dressed model, top to bottom: five networks and five label readers, a pool weight, smoothing, a corrector network, and a gate. The label readers and the corrector are marked as the parts this model adds." src="images/dressed-light.svg" width="100%">
+  </picture>
+</p>
+
 1. **Members.** The training rows are cut into five parts. Member `k` holds out part `k` and fits a network (`tabm_piecewise` with a `flow` head, stopped on the held-out CRPS, then annealed for three epochs) and a label reader on the other four parts.
 2. **Pool weight.** One weight `w` from a grid of 21, by the CRPS of every training row under the member that held it out.
 3. **Smoothing.** Each of a reader's points becomes a normal. Its width is Silverman's bandwidth on the row's points, times a factor from a grid of five. 1% of a wide normal at the training labels' mean and spread is added. One factor is picked by the held-out log score and a second by the held-out CRPS. A member's pool now has a density.
