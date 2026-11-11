@@ -2,6 +2,18 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Added
+
+- **Dressed models.** `ashlar.dressed()` (the class is `ASRDressed`) fits five cross-fitted `tabm_piecewise` networks and five label readers to one numeric target and returns them as one distribution with an exact `cdf` and `log_prob`.
+  - Each member holds out a fifth of the rows. One pool weight for the networks against the readers is picked on the held-out rows; the readers' point masses are widened into normals; one more network, the corrector, is fitted to the labels' normal scores under the held-out pools; and a gate weighs the corrected pools against the smoothed ones. `predict_dist` returns a `DressedDistribution` with `cdf`, `log_prob`, `quantile`, `sample`, `mean`, and `crps`.
+  - A target with at most 20 distinct values gets ordinal networks and a probability for each value.
+  - On two held-out folds of 23 regression tables (46 fits, at most 2,400 training rows), its CRPS was lower than one of its own networks' by more than 1% on 37, within 1% on 7, and higher on 2; against the same five members pooled without dressing, which have no density, the geometric mean was 0.955, better by more than 1% on 27 and worse on 2. One of those two was 5.5 times worse, on a target that is a linear function of the columns.
+  - Censored and interval labels, joint targets, classes, and sample weights raise an error. `floor_cost` is an optional guard for near-deterministic targets, off by default. [docs/dressed.md](docs/dressed.md) has the steps, the limits, and every test.
+- **`ashlar.label_reader.LabelReader`**, the reader a dressed model pools with its networks. It predicts a row from the training labels at prediction time: a ridge regression solved inside the forward pass, then attention over the training rows' leave-one-out residuals.
+- **`early_stopping_metric="crps"`.** A distribution head with quantiles can keep the checkpoint with the best validation CRPS of its member mixture, read from 64 quantile levels, instead of the best validation loss. The training loss stays the likelihood, and `history_["val_score"]` records each epoch's score. The default is unchanged.
+
 ## 0.0.6 — 2026-11-09
 
 ### Added

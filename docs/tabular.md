@@ -40,6 +40,8 @@ model = tabm_piecewise(task="classification").fit(X, y)
 model = tabm_piecewise(task="mixture").fit(X, y)         # a distribution
 ```
 
+`ashlar.dressed()` fits five `tabm_piecewise` networks and five label readers and returns them as one distribution; it is for small tables where the predicted distribution matters more than the time to fit. [docs/dressed.md](dressed.md) is its guide.
+
 `tabm_piecewise()` is the most accurate recipe in the ablations: a TabM batch ensemble of 32 members, two blocks of width 256, on piecewise embeddings of quantile-normalized columns, with a constant learning rate. It costs 5 to 10 times the default on a CPU. `tabm()` keeps the paper's architecture without numeric embeddings.
 
 ## Tasks

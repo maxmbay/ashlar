@@ -121,6 +121,22 @@ On hourly bike rentals, with casual and registered riders as the two targets, th
 
 [docs/showcase.md](docs/showcase.md#multivariate-targets) has the bike-rental example in full and a chained model of insurance claims, and [docs/benchmarks.md](docs/benchmarks.md#several-products-that-sell-out-together) has the sell-out simulation.
 
+## Dressed models
+
+On a small table, one network is not always the best reader of the target. `ashlar.dressed()` fits five networks and five label readers, which predict a row from the training labels themselves, then pools them and corrects the pool, all in one call. It returns one distribution with an exact density and CDF.
+
+```python
+import ashlar
+
+model = ashlar.dressed().fit(X, y)
+
+model.predict_quantiles(X_new, [0.1, 0.5, 0.9])
+model.log_prob(X_new, y_new)                  # exact log density
+dist = model.predict_dist(X_new)              # cdf, quantile, sample, mean, crps
+```
+
+It was designed on one fold of 23 regression tables of up to 2,400 training rows and then scored on two other folds of each. On those 46 fits its CRPS was lower than one of its own networks' by more than 1% on 37, within 1% on 7, and higher on 2, by 1.4% at most; the median was 8% lower. Its log score was higher on 43 of the 46. It is the slowest model in Ashlar, eleven fits in one, and it takes one numeric target with exact labels. [docs/dressed.md](docs/dressed.md) describes the steps, every test, and the one kind of target where it can do much worse than the pool it starts from.
+
 ## Benchmarks on eight large tables
 
 ![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
@@ -156,6 +172,7 @@ Each example compares Ashlar with a tool commonly used for the same task: a grad
 - [docs/heads.md](docs/heads.md): each head and the targets it suits, calibrated intervals, and uncertainty across ensemble members.
 - [docs/distributions.md](docs/distributions.md): the distribution object returned by every head, joint heads, constraints, missing inputs, decisions, explanations, and JAX transforms.
 - [docs/observed.md](docs/observed.md): censored, interval, survival, rounded, truncated, noisy, and total labels, and which heads support them.
+- [docs/dressed.md](docs/dressed.md): dressed models, which pool cross-fitted networks and label readers into one distribution with an exact density, and the tests behind them.
 - [docs/additive.md](docs/additive.md): additive models for every parameter of a distribution (a neural GAMLSS), and how to read the fitted terms with `shape_functions`.
 - [docs/effects.md](docs/effects.md): random effects for groups such as stores, patients, or products, including predictions for new groups from a few rows.
 - [docs/tabular.md](docs/tabular.md): defaults, recipes, tasks, embeddings, set-valued columns, and hyperparameter search.

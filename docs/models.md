@@ -42,6 +42,10 @@ Every other column is categorical and gets a learned vector, 8 wide by default. 
 
 Recipes are plain dicts. `DEFAULT_RECIPE`, `TABM_PAPER`, `TABM_PIECEWISE`, `CLASSIFIER_RECIPE`, `ORDINAL_RECIPE`, and `TREE_RECIPE` can be copied, edited, and splatted into a constructor, so a configuration you like is data you can version.
 
+## Dressed models
+
+`ashlar.dressed()` returns an `ASRDressed`: five cross-fitted `tabm_piecewise` networks and five label readers, pooled, smoothed, and corrected into one distribution with an exact density. It is one estimator with its own `fit`, `predict_dist`, `predict_quantiles`, `log_prob`, and `sample`, for one numeric target. Its distribution is computed in NumPy on top of the networks' distributions, so unlike the models below it does not compose with `jax.grad`. [docs/dressed.md](dressed.md) is the guide.
+
 ## Research models
 
 Beyond the four slots, these are whole model families with the same `fit` and `predict` surface. They are experimental research code: benchmarked in [docs/benchmarks.md](benchmarks.md), and not the path most tables need. Each has its own `fit(X, y, task)` for a point or class probabilities, most read numeric columns only, and none is connected to the heads, `predict_dist`, observed labels, or `calibrate`. Their API may change or go. For an additive model of a whole distribution, use `backbone="additive"` instead of `ASRAdditive` ([docs/additive.md](additive.md)).
