@@ -28,10 +28,10 @@ shapes.importance("dispersion")   # which columns move the spread, largest first
 
 The figure is [`examples/benchmark_additive.py figure`](../examples/benchmark_additive.py): the model above on hourly bike rentals, trained on 64% of the hours and calibrated on 16%. Each curve is one term's part of each training row's log mean or dispersion, against its column.
 
-- **The hour depends on the day.** On working days rentals peak at 8 am and again at 5 to 6 pm; on weekends and holidays they rise to one broad plateau from late morning to evening. Only the pair can draw two shapes; without it the hour has one, and its likelihood is 0.33 nats worse per hour.
-- **Rentals rise with the temperature, then fall in the hottest hours.** The model splits the effect between the temperature and the felt temperature, which move together, so read the two together.
-- **Humidity moves the spread more than the mean.** The mean barely changes until the air is humid, and then falls, while the dispersion rises on humid hours: rain makes rentals less predictable as well as fewer. The dispersion's shape is noisier than the mean's, as the spread is harder to learn than the level.
-- **Quantiles come from the whole model.** The last panel holds a 5 pm working-day hour fixed and moves the temperature: the median rises from about 380 rentals on the coldest days to about 870, and falls on the hottest. That is "how the 90% quantile of demand depends on temperature" with a coverage guarantee: on the held-out hours, the calibrated 80% interval holds 81.5% of rentals.
+- The hour depends on the day. On working days rentals peak at 8 am and again at 5 to 6 pm; on weekends and holidays they rise to one broad plateau from late morning to evening. Only the pair can draw two shapes; without it the hour has one, and its likelihood is 0.33 nats worse per hour.
+- Rentals rise with the temperature, then fall in the hottest hours. The model splits the effect between the temperature and the felt temperature, which move together, so read the two together.
+- Humidity moves the spread more than the mean. The mean barely changes until the air is humid, and then falls, while the dispersion rises on humid hours: rain makes rentals less predictable as well as fewer. The dispersion's shape is noisier than the mean's, as the spread is harder to learn than the level.
+- Quantiles come from the whole model. The last panel holds a 5 pm working-day hour fixed and moves the temperature: the median rises from about 380 rentals on the coldest days to about 870, and falls on the hottest. That is "how the 90% quantile of demand depends on temperature" with a coverage guarantee: on the held-out hours, the calibrated 80% interval holds 81.5% of rentals.
 
 ## Reading the terms
 
@@ -45,7 +45,7 @@ The figure is [`examples/benchmark_additive.py figure`](../examples/benchmark_ad
 
 To draw one column's shape, sort the rows by that column and plot `term(column, output)` against it. A pair's term is a function of both columns. Its part that depends on only one of them is not moved into that column's own term, so read a column's term together with its pairs: in the figure, the hour on a working day is the hour's term plus the pair's plus the working day's.
 
-A monotone feature (`monotone={"price": -1}`) is a term of its own, the rising or falling piecewise-linear shape the constraint adds, and no network reads it, so it cannot be in a pair. A grouping column of `random_effects` adds its offsets on the location as the term `column (random effect)`; its spread is not a term, since it widens the distribution rather than moving an output.
+A monotone feature (`monotone={"price": -1}`) is a term of its own, the rising or falling piecewise-linear shape the constraint adds, and no network reads it, so it cannot be in a pair. A grouping column of `random_effects` adds its offsets on the location as the term `column (random effect)`; its spread is not a term, since it widens the distribution and moves no output.
 
 ## Options
 
@@ -67,14 +67,14 @@ The additive backbone refuses what would mix its terms: a `bottleneck`, `soft_st
 
 On hourly bike rentals and abalone rings, three splits each, the additive Ashlar models were scored against R's `gamlss` with penalized splines and against Ashlar's default residual network with the same head. [docs/benchmarks.md](benchmarks.md#additive-models-against-rs-gamlss) has the tables.
 
-- **On bike rentals, the additive negative binomial matches `gamlss`'s `NBI`.** CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the hour × working day pair. Each fit took 8 to 10 seconds on every core of a laptop. `gamlss`, on one thread, took about 2 minutes without the pair and 4 to 6 with it; one split's fit with the pair ran 45 minutes and stopped without converging.
-- **On abalone, the head matters.** The additive `mixture` beats `gamlss`'s Box-Cox Cole-Green, CRPS 1.085 against 1.096. `gamlss`'s normal beats the additive `gaussian`, 1.115 against 1.156.
-- **What the readable shapes cost.** The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the additive model with the pair. On abalone, with a mixture head, they cost 0.011 nats.
+- On bike rentals, the additive negative binomial matches `gamlss`'s `NBI`. CRPS is 42.25 against 42.15, and 23.46 against 23.40 with the hour × working day pair. Each fit took 8 to 10 seconds on every core of a laptop. `gamlss`, on one thread, took about 2 minutes without the pair and 4 to 6 with it; one split's fit with the pair ran 45 minutes and stopped without converging.
+- On abalone, the result depends on the head. The additive `mixture` beats `gamlss`'s Box-Cox Cole-Green, CRPS 1.085 against 1.096. `gamlss`'s normal beats the additive `gaussian`, 1.115 against 1.156.
+- The readable shapes cost accuracy. The residual network learns every interaction and scores 16.48 on bike rentals, 30% below the additive model with the pair. On abalone, with a mixture head, they cost 0.011 nats.
 
 ## Limits
 
 - An additive model learns only the interactions you name. That is the point: each shape is readable because it does not depend on the other columns. The residual network is the measure of what that costs; in the benchmark above, compare the additive rows with it.
-- Weight decay and early stopping smooth the shapes, not a penalty chosen by a criterion as in `gamlss`. Where a column has few rows, its shape can wiggle, and members show it.
+- Weight decay and early stopping smooth the shapes; no penalty is chosen by a criterion, as in `gamlss`. Where a column has few rows, its shape can wiggle, and members show it.
 - The terms are on the head's raw outputs. A quantile, the mean, or an interval is a nonlinear function of several outputs, so it is not additive; read it from `predict_quantiles` or `predict_dist`, as the last panel of the figure does, or attribute it to the columns with `explain`.
 
 The research models in [docs/models.md](models.md#research-models), `ASRAdditive` and `ASRGatedAdditive` among them, are experimental: they fit a point or class probabilities with their own `fit(X, y, task)`, and are not connected to the heads, `predict_dist`, observed labels, or `calibrate`. For an additive model of a distribution, use `backbone="additive"`.

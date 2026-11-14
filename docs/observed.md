@@ -1,8 +1,8 @@
 # Labels that say what was observed
 
-A plain `y` says every value was seen exactly. Many tables know less. A day that sold out recorded the stock, not the demand. An income survey recorded a bracket, a lab a reading below its detection limit, a churn table customers who are still active. A price was rounded to the dollar, a sensor reading carries known noise, a table holds only the rows whose value fell inside a range, or only a weekly total was kept for seven daily rows.
+A plain `y` says every value was seen exactly. Many tables know less. A day that sold out recorded the stock, and the demand was at least that high. An income survey recorded a bracket, a lab a reading below its detection limit, a churn table customers who are still active. A price was rounded to the dollar, a sensor reading carries known noise, a table holds only the rows whose value fell inside a range, or only a weekly total was kept for seven daily rows.
 
-Fitting such a `y` as if it were exact teaches the model the recording instead of the value. Pass a label from `ashlar.observed` as `y` instead, and the head trains on the probability it gives to what was actually seen: an exact value scores its density, a range the probability of the range, a sold-out day the probability that demand reached the stock. This is the coarse-data likelihood of [Heitjan and Rubin (1991)](https://doi.org/10.1214/aos/1176348396), applied to every head that has a CDF.
+Fitting such a `y` as if it were exact teaches the model what was recorded, which differs from the value. Pass a label from `ashlar.observed` as `y` instead, and the head trains on the probability it gives to what was actually seen: an exact value scores its density, a range the probability of the range, a sold-out day the probability that demand reached the stock. This is the coarse-data likelihood of [Heitjan and Rubin (1991)](https://doi.org/10.1214/aos/1176348396), applied to every head that has a CDF.
 
 ```python
 from ashlar import ASRRegressor, observed
@@ -15,7 +15,7 @@ model.log_prob(X_test, y_test)                 # log-likelihood of each observat
 model.calibrate(X_holdout, y_holdout)          # works on censored rows too
 ```
 
-`predict_dist` still describes the value itself, so its quantiles, draws, and intervals are for demand, not for what the shelf allowed. A label is a NumPy structured array with one record per row, so `train_test_split`, `KFold`, and fancy indexing split it like any other `y`.
+`predict_dist` still describes the value itself, so its quantiles, draws, and intervals are for demand, whatever the shelf allowed. A label is a NumPy structured array with one record per row, so `train_test_split`, `KFold`, and fancy indexing split it like any other `y`.
 
 ## Demand when shelves sell out
 
@@ -132,7 +132,7 @@ model.predict_exceedance(X_new, np.log(30.0))       # P(not converted by day 30)
 model.predict_quantiles(X_new, [0.5])               # inf where more than half never convert
 ```
 
-A censored row scores `P(never) + P(happens) P(T > t)` and an event `P(happens)` times the density. The cure share starts at 12% and its weight small, so a table with no cure learns a share near zero. A draw is `inf` where it never happens. Cure heads take exact, censored, interval, and truncated times, not noisy labels or totals. The `gaussian` head is the clearest recipe, a log-normal time and a cure share: a `mixture` can put a component far out instead, which comes close on the likelihood inside the follow-up but tells you nothing about who never converts.
+A censored row scores `P(never) + P(happens) P(T > t)` and an event `P(happens)` times the density. The cure share starts at 12% and its weight small, so a table with no cure learns a share near zero. A draw is `inf` where it never happens. Cure heads take exact, censored, interval, and truncated times only; noisy labels and totals are not supported. The `gaussian` head is the clearest recipe, a log-normal time and a cure share: a `mixture` can put a component far out instead, which comes close on the likelihood inside the follow-up but tells you nothing about who never converts.
 
 From [`examples/benchmark_observed_more.py`](../examples/benchmark_observed_more.py), on 6,000 simulated rows of which 40% never have the event, the share changing with the features, three seeds:
 
@@ -172,7 +172,7 @@ model = ASRClassifier().fit(X, y)
 model.predict_proba(X_new)                         # columns in model.classes_ order
 ```
 
-An ordinal label may be a range, `observed.interval(2, 4)` for a score known to lie from 2 to 4, which works with both of `ASROrdinalClassifier`'s heads. The classes are every class a label names. `class_weight`, `expectation_weight`, and `histogram_variance` need each row's one class, so they are refused with sets, and a model search trial scores by the likelihood, not by accuracy.
+An ordinal label may be a range, `observed.interval(2, 4)` for a score known to lie from 2 to 4, which works with both of `ASROrdinalClassifier`'s heads. The classes are every class a label names. `class_weight`, `expectation_weight`, and `histogram_variance` need each row's one class, so they are refused with sets, and a model search trial scores by the likelihood where it usually scores by accuracy.
 
 ## Daily values from weekly totals
 
@@ -199,11 +199,11 @@ The Poisson head learns from the totals almost all that the days would have taug
 
 What totals can teach is limited by what varies between groups. If every week holds one Monday, one Tuesday, and so on, every weekly sum contains the same weekday pattern, so the sums cannot tell a busy Monday from a busy Tuesday. The head learns the effects of features that change from week to week, and nothing about a pattern that repeats inside every group. The spread is harder to place than the mean, since a sum's variance blends its rows' variances.
 
-Real meter data show both sides. On the daily load of eight electricity clients over three years, a fit to each calendar week's total does not just miss the weekday pattern, it makes one up: every split of a week between its days fits the total equally well, and the one it settles on puts each weekday's load, as a share of the client's mean day, off by 12%. These clients' weekdays differ little, so a fit to each total spread evenly, which learns every weekday the same, is off by only 2.6%, and its daily means are closer. Readings taken at irregular intervals of 2 to 12 days start on any weekday, so they do pin the pattern down: fitted to them with `observed.total`, the head learns the days nearly as well as from the days themselves, with a CRPS of 19.0 MWh against 18.0 and weekday shares off by 2.9% against 2.0%. The same readings spread evenly get the daily means a little closer, a CRPS of 18.4 MWh, but learn a spread far too narrow: their 80% interval holds 47% of the held-out days, and their NLL is 6.28 against 4.90 with `observed.total`. [docs/benchmarks.md](benchmarks.md#daily-loads-from-meter-readings) has the table.
+Real meter data show both sides. On the daily load of eight electricity clients over three years, a fit to each calendar week's total misses the weekday pattern and makes one up: every split of a week between its days fits the total equally well, and the one it settles on puts each weekday's load, as a share of the client's mean day, off by 12%. These clients' weekdays differ little, so a fit to each total spread evenly, which learns every weekday the same, is off by only 2.6%, and its daily means are closer. Readings taken at irregular intervals of 2 to 12 days start on any weekday, so they do pin the pattern down: fitted to them with `observed.total`, the head learns the days nearly as well as from the days themselves, with a CRPS of 19.0 MWh against 18.0 and weekday shares off by 2.9% against 2.0%. The same readings spread evenly get the daily means a little closer, a CRPS of 18.4 MWh, but learn a spread far too narrow: their 80% interval holds 47% of the held-out days, and their NLL is 6.28 against 4.90 with `observed.total`. [docs/benchmarks.md](benchmarks.md#daily-loads-from-meter-readings) has the table.
 
 Heads whose sum has no closed form take totals too: the `mixture`, `flow`, `histogram`, and `student_t` heads, the `negative_binomial`, and a zero-inflated `poisson`. Each row's distribution is put on a grid of 512 bins centred on its mean, 2,048 whole-number bins for a count, the rows of a group are convolved by FFT, and the total's probability is read off the result, so any head with a CDF can learn from sums. A total of up to six rows matches the exact sum of normals to 10⁻³ nats, and a total of one count row is its own mass. A group with a single row uses that row's own likelihood. Truncation divides out as for a single row; noise on a grid total is refused. On 600 simulated weeks of seven negative binomial days, fitted to weekly totals only, the daily means came out with a correlation of 0.98 with the truth.
 
-`fit` keeps each group whole: in one minibatch, with at least two of the largest groups per batch, and on one side of an internal validation split (a temporal split puts a cut group on the side of its first row; a grouped split must already keep each total inside one of its groups). A group's weight is the mean of its rows' weights. Each label records the number of rows its total covers, so a split that cuts a group, such as a shuffled `KFold`, raises instead of scoring part of a sum against the whole total; split with `GroupKFold` on the group ids.
+`fit` keeps each group whole: in one minibatch, with at least two of the largest groups per batch, and on one side of an internal validation split (a temporal split puts a cut group on the side of its first row; a grouped split must already keep each total inside one of its groups). A group's weight is the mean of its rows' weights. Each label records the number of rows its total covers, so a split that cuts a group, such as a shuffled `KFold`, raises, because it would score part of a sum against the whole total; split with `GroupKFold` on the group ids.
 
 ## Several products that sell out together
 
@@ -247,6 +247,6 @@ The figure is seed 0, with the joint mixture. On promotion days, when a rush is 
 
 ## Limits
 
-- **The censoring must not depend on the value given the features.** A planner who stocks more on days they expect to be busy is fine, if the model sees what the planner saw. If the stock was set from information the features lack, and that information also predicts demand, the censored fit is biased too.
-- **Starting values and the target scale** come from each observation's representative value (the midpoint of a finite interval, the finite end of a one-sided one), which only sets where training starts.
-- **Truncation hides the values outside the range.** Dividing by `P(lower <= Y <= upper)` makes the fit inside the range right, but what the head says outside it comes from the shape the head assumes, not from data: a Poisson extends a zero-truncated count to zero by its own formula, and a histogram or mixture has nothing to go on out there.
+- The censoring must not depend on the value given the features. A planner who stocks more on days they expect to be busy is fine, if the model sees what the planner saw. If the stock was set from information the features lack, and that information also predicts demand, the censored fit is biased too.
+- Starting values and the target scale come from each observation's representative value (the midpoint of a finite interval, the finite end of a one-sided one), which only sets where training starts.
+- Truncation hides the values outside the range. Dividing by `P(lower <= Y <= upper)` makes the fit inside the range right, but what the head says outside it comes from the shape the head assumes, with no data behind it: a Poisson extends a zero-truncated count to zero by its own formula, and a histogram or mixture has nothing to go on out there.

@@ -43,7 +43,7 @@ random_effects={
 }
 ```
 
-The store's offset adds to its type's, and its vector to its type's vector, so a store with few rows is pulled towards stores of its type, and the type towards every store. A new store of a known type starts from its type rather than from the average store. A nested column with an embedding needs its class to have one too, since its vector adds to the class's, and nesting can chain (store within city within region).
+The store's offset adds to its type's, and its vector to its type's vector, so a store with few rows is pulled towards stores of its type, and the type towards every store. A new store of a known type starts from its type. A nested column with an embedding needs its class to have one too, since its vector adds to the class's, and nesting can chain (store within city within region).
 
 ## New groups from a few rows
 
@@ -72,17 +72,17 @@ With `backbone="additive"`, `shape_functions` gives the offsets as one more term
 
 - A grouping column cannot be a set feature or a monotone feature, and a slope cannot be on a monotone feature, which a group's slope could turn around.
 - `random_effects` needs a built-in head without a cure fraction and `share_training_batches=True`. On `task="chain"` every column with a location gets an offset of its own ([chained outcomes](distributions.md#outcomes-of-different-kinds-chained)); `with_context` does not yet update them.
-- The offsets move the location only. A store whose sales are more variable than others', not just higher, gets that from the embedding, which the network can read into the spread, not from an offset.
+- The offsets move the location only. A store whose sales are more variable than others' gets that from the embedding, which the network can read into the spread, since an offset only raises or lowers its sales.
 - The variational posteriors are independent normals per group and term, so the posterior correlation between a group's intercept and its slope is not kept.
 
 ## Against the alternatives
 
 [docs/benchmarks.md](benchmarks.md#entity-effects) runs the protocol of issue #41 on Rossmann's 1,115 stores and FreshRetailNet's 898, three splits each. In each split, a fifth of the stores are held out whole and the others train on 1 to 300 of their rows. On Rossmann:
 
-- **Stores with few rows gain the most.** On stores with 1 to 5 training rows, offsets plus embeddings score a CRPS of 0.096 in log sales. The ordinary embedding scores 0.120, GPBoost 0.125, and a statsmodels mixed model 0.131.
-- **A new store gets an honest interval.** The ordinary embedding's 80% interval holds 36% of an unseen store's rows. Pooling's holds 75% to 78%.
-- **Five rows of a new store halve its CRPS.** `with_context` takes it from 0.189 to 0.091.
-- **The embedding earns its place.** Offsets plus embeddings beat offsets alone in every bucket, by 23% on stores with 101 to 300 rows. Nesting in the store's type added nothing on either table.
-- **Finishing the posteriors after training helps small stores.** Stores with 1 to 5 rows went from 0.106 to 0.096. Their raw 80% interval went from 75% to 72% of rows, because the posteriors are now as narrow as the model says. Calibrate when coverage matters.
+- Stores with few rows gain the most. On stores with 1 to 5 training rows, offsets plus embeddings score a CRPS of 0.096 in log sales. The ordinary embedding scores 0.120, GPBoost 0.125, and a statsmodels mixed model 0.131.
+- A new store gets an honest interval. The ordinary embedding's 80% interval holds 36% of an unseen store's rows. Pooling's holds 75% to 78%.
+- Five rows of a new store halve its CRPS. `with_context` takes it from 0.189 to 0.091.
+- The embedding helps: offsets plus embeddings beat offsets alone in every bucket, by 23% on stores with 101 to 300 rows. Nesting in the store's type added nothing on either table.
+- Finishing the posteriors after training helps small stores. Stores with 1 to 5 rows went from 0.106 to 0.096. Their raw 80% interval went from 75% to 72% of rows, because the posteriors are now as narrow as the model says. Calibrate when you need the coverage to hold.
 
 The issue's amortized variant was also tested: reading a store's effect from its other rows in context, the neural-process view of a mixed model, through the set encoder. Each row carried up to 32 of its store's rows as tokens of their binned outcomes. It lost to the exact update on CRPS in every column on both tables, and on FreshRetailNet even to leaving the store out, so it is not part of the library.
