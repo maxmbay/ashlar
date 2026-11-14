@@ -33,11 +33,11 @@ Neither wins on every table, so the two are pooled: a weight `w` on the network 
   </picture>
 </p>
 
-1. **Members.** The training rows are cut into five parts. Member `k` holds out part `k` and fits a network (`tabm_piecewise` with a `flow` head, stopped on the held-out CRPS, then annealed for three epochs) and a label reader on the other four parts.
-2. **Pool weight.** One weight `w` from a grid of 21, by the CRPS of every training row under the member that held it out.
-3. **Smoothing.** Each of a reader's points becomes a normal. Its width is Silverman's bandwidth on the row's points, times a factor from a grid of five. 1% of a wide normal at the training labels' mean and spread is added. One factor is picked by the held-out log score and a second by the held-out CRPS. A member's pool now has a density.
-4. **Corrector.** One more network is fitted to where each training label falls in its own row's pool: the label's normal score under the pool of the member that held the row out. It trains on the held-out rows of the first four members and stops on the fifth's. A member's corrected CDF at `y` is the corrector's CDF at the normal score of `y` under that member's pool.
-5. **Gate.** One weight from the same grid of 21, for the corrected pools against the pools smoothed at the CRPS factor, by the CRPS of the fifth member's held-out rows. If the corrector did not help on those rows, the gate is 0 and the prediction is the smoothed pools alone.
+1. The training rows are cut into five parts. Member `k` holds out part `k` and fits a network (`tabm_piecewise` with a `flow` head, stopped on the held-out CRPS, then annealed for three epochs) and a label reader on the other four parts.
+2. One pool weight `w` is picked from a grid of 21 by the CRPS of every training row under the member that held it out.
+3. Smoothing turns each of a reader's points into a normal. Its width is Silverman's bandwidth on the row's points, times a factor from a grid of five. 1% of a wide normal at the training labels' mean and spread is added. One factor is picked by the held-out log score and a second by the held-out CRPS. A member's pool now has a density.
+4. One more network, the corrector, is fitted to where each training label falls in its own row's pool: the label's normal score under the pool of the member that held the row out. It trains on the held-out rows of the first four members and stops on the fifth's. A member's corrected CDF at `y` is the corrector's CDF at the normal score of `y` under that member's pool.
+5. A gate weight is picked from the same grid of 21, for the corrected pools against the pools smoothed at the CRPS factor, by the CRPS of the fifth member's held-out rows. If the corrector did not help on those rows, the gate is 0 and the prediction is the smoothed pools alone.
 
 The prediction is the gate times the average of the five corrected pools, plus the rest times the average of the five smoothed pools. Every piece has a closed-form CDF and density, so the whole does too.
 
@@ -84,11 +84,11 @@ After a fit, `pool_weight_`, `bandwidth_factor_`, `fallback_factor_`, and `gate_
 
 ## Limits
 
-- **One numeric target, exactly observed.** Censored and interval labels, joint targets, classes, and sample weights raise an error.
-- **Small and mid-size tables.** Every test below is on at most 2,400 training rows. A reader's cost grows with the square of its rows, so a member's reader reads at most `reader_rows` of them; nothing above that size has been tested.
-- **A target the columns determine almost exactly.** The 1% wide normal costs about 0.00006 of the labels' spread in CRPS. That is nothing on most tables. On a target whose CRPS is already below about a thousandth of its spread, it is a multiple of the whole score, and the corrector has to win it back. On one such table in the tests below it did on two folds and did not on the third. `floor_cost=0.01` lowers the wide normal's share until it costs at most 1% of the pool's held-out CRPS; it is off by default until it has passed a test of its own.
-- **Time.** Five networks, five readers, and a corrector. On the 46 held-out fits below, a fit took a median of 16 minutes, from 2 minutes to 2.3 hours (the longest on 2,400-row tables), on a 12-core laptop that was running several fits at once; the times are the `seconds` field of [`examples/readme/artifacts/dressed/devset.json`](../examples/readme/artifacts/dressed/devset.json).
-- **Fewer methods than the general estimator.** `ASRDressed` is a scikit-learn regressor with `fit`, `predict`, `predict_dist`, `predict_quantiles`, `log_prob`, `sample`, and `score`, and it pickles. It has no `calibrate`, `predict_interval`, `predict_exceedance`, or `save` yet; [docs/estimator.md](estimator.md#the-dressed-estimator) says what to use instead.
+- It takes one numeric target, exactly observed. Censored and interval labels, joint targets, classes, and sample weights raise an error.
+- It has been tested on small and mid-size tables only. Every test below is on at most 2,400 training rows. A reader's cost grows with the square of its rows, so a member's reader reads at most `reader_rows` of them; nothing above that size has been tested.
+- A target that the columns determine almost exactly is a weak spot. The 1% wide normal costs about 0.00006 of the labels' spread in CRPS. That is nothing on most tables. On a target whose CRPS is already below about a thousandth of its spread, it is a multiple of the whole score, and the corrector has to win it back. On one such table in the tests below it did on two folds and did not on the third. `floor_cost=0.01` lowers the wide normal's share until it costs at most 1% of the pool's held-out CRPS; it is off by default until it has passed a test of its own.
+- It is slow: five networks, five readers, and a corrector. On the 46 held-out fits below, a fit took a median of 16 minutes, from 2 minutes to 2.3 hours (the longest on 2,400-row tables), on a 12-core laptop that was running several fits at once; the times are the `seconds` field of [`examples/readme/artifacts/dressed/devset.json`](../examples/readme/artifacts/dressed/devset.json).
+- It has fewer methods than the general estimator. `ASRDressed` is a scikit-learn regressor with `fit`, `predict`, `predict_dist`, `predict_quantiles`, `log_prob`, `sample`, and `score`, and it pickles. It has no `calibrate`, `predict_interval`, `predict_exceedance`, or `save` yet; [docs/estimator.md](estimator.md#the-dressed-estimator) says what to use instead.
 
 ## How it was tested
 
