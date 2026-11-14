@@ -57,7 +57,7 @@ dist.quantile(jnp.array([0.1, 0.5, 0.9])[:, None])   # (3, rows)
 | `histogram` | `Histogram` | closed form |
 | `student_t` | `StudentT` | bisection on the CDF |
 | `poisson`, `negative_binomial` | `Poisson`, `NegativeBinomial`, with the structural zero | the smallest whole number whose CDF reaches the level |
-| `quantile` | `QuantileLevels` | only its three trained levels; no density, CDF, or draws |
+| `quantile` | `QuantileLevels` | only its three trained levels, asked for together as `[0.1, 0.5, 0.9]`; no density, CDF, or draws |
 | `hurdle` | `Hurdle`: a probability of exactly zero and a `LogNormal` or `Gamma` amount | 0 up to the zero share, the severity's quantile above it |
 | `multivariate_gaussian` | `LowRankMultivariateNormal` over the target columns | per column, through `marginals()` |
 | `multivariate_mixture` | `Mixture` of five `LowRankMultivariateNormal`s over the target columns | per column, bisection on each marginal mixture's CDF |

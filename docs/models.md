@@ -63,4 +63,4 @@ Beyond the four slots, these are whole model families with the same `fit` and `p
 | `ASRVariationalPairwise` | A variational logistic head on soft bins and every pairwise bin product. |
 | `ASRGradientSparseNet` | A classifier with an L1 penalty on the input gradient. |
 
-Every model in this file is a JAX computation built on Equinox, so it composes with `jax.grad`, `jax.vmap`, and `jax.jit`. [`examples/jax_composition.py`](../examples/jax_composition.py) differentiates a fitted model with respect to its input.
+Every model in this file except the dressed model is a JAX computation built on Equinox, so it composes with `jax.grad`, `jax.vmap`, and `jax.jit`. [`examples/jax_composition.py`](../examples/jax_composition.py) differentiates a fitted model with respect to its input.

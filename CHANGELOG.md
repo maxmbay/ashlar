@@ -15,6 +15,10 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 - **`ashlar.label_reader.LabelReader`**, the reader a dressed model pools with its networks. It predicts a row from the training labels at prediction time: a ridge regression solved inside the forward pass, then attention over the training rows' leave-one-out residuals.
 - **`early_stopping_metric="crps"`.** A distribution head with quantiles can keep the checkpoint with the best validation CRPS of its member mixture, read from 64 quantile levels, instead of the best validation loss. The training loss stays the likelihood, and `history_["val_score"]` records each epoch's score. The default is unchanged.
 
+### Changed
+
+- The README opens with the dressed model and five properties (drop-in, natively distributional, a log probability from every forward pass, modular, built on JAX), adds a table of the calls that change for users of XGBoost, LightGBM, NGBoost, and scikit-learn, and corrects its first sentence: `ASRRegressor()` predicts a point, and a distribution head or the dressed model predicts a distribution. New pages: [docs/README.md](docs/README.md), an index, and [docs/estimator.md](docs/estimator.md), on what the estimators take and return, the scikit-learn tools that work, and saving. Corrected in the docs: how the label reader's ridge regression runs (once per forward pass, not per row), the dressed model's fit times (now recorded with its results), `jax.grad` and the dressed model in `docs/models.md`, the quantile head's levels, count heads' `log_prob` between whole numbers, the histogram head's edges, and LightGBM's order costs at 19:1. CI now checks the links on every docs page.
+
 ## 0.0.6 — 2026-11-09
 
 ### Added
