@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.special import logsumexp, ndtr, ndtri
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, RegressorMixin
 
 from ashlar import observed
 from ashlar.errors import AshlarError
@@ -505,7 +505,7 @@ class _ValuePiece:
         return self.values[np.minimum(index, len(self.values) - 1)]
 
 
-class ASRDressed(BaseEstimator):
+class ASRDressed(RegressorMixin, BaseEstimator):
     """Cross-fitted networks and label readers, pooled, smoothed and corrected into one distribution.
 
     See the module docstring for the five steps. ``fit(X, y)`` takes a table and one numeric target column;

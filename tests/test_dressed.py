@@ -137,6 +137,14 @@ def test_a_target_with_few_values_gets_a_probability_for_each_value():
     assert ASRDressed(members=3, few_values=0).few_values == 0
 
 
+def test_scikit_learn_reads_a_dressed_model_as_a_regressor():
+    from sklearn.base import clone, is_regressor
+
+    model = ashlar.dressed(learning_rate=1e-3)
+    assert is_regressor(model) and is_regressor(clone(model))
+    assert clone(model).get_params()["network"] == {"learning_rate": 1e-3}
+
+
 def test_dressed_refuses_what_it_does_not_support():
     X, y = _table(n=120)
     model = ASRDressed(members=3, network=NETWORK, reader=READER)
