@@ -54,7 +54,7 @@ model.predict_exceedance(X_new, threshold)     # P(y > threshold) per row, recal
 
 A density head stores the probability integral transform of each held-out row and widens or narrows its nominal level until the interval covers what it should (distributional conformal prediction). The same table recalibrates a probability: `predict_exceedance` replaces the model's own `P(y ≤ threshold)` with the share of held-out rows whose transform was at most that much, so an overconfident model's small probabilities move up and its large ones down. The map is the same for every row, so it corrects a model that is wrong the same way everywhere, and cannot correct one that is too narrow on some rows and too wide on others. The quantile head moves its 0.1 and 0.9 levels out by the conformal margin (conformalized quantile regression) and gives only its 80% interval. The calibration saves with the model, `calibrated=False` reads the raw head, and `fit` clears it. A few hundred held-out rows is enough for an 80% or 90% interval.
 
-One calibration of every row holds its coverage over those rows on average, and within each kind of row it may not: an interval can hold 95% of quiet rows and 50% of loud ones and still average 80%. `calibrate` can calibrate groups of rows on their own (Mondrian conformal prediction):
+One calibration of every row holds its coverage over those rows on average. Within each kind of row it may not: an interval can hold 95% of quiet rows and 50% of loud ones and still average 80%. `calibrate` can calibrate groups of rows on their own (Mondrian conformal prediction):
 
 ```python
 model.calibrate(X_holdout, y_holdout, groups="store")       # a column of X, read again from X_new

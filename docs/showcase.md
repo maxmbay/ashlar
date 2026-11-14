@@ -277,7 +277,7 @@ totals = np.expm1(model.sample(frame.X, n=400)).sum(axis=-1)  # 400 totals per r
 
 Every configuration is an instance of one class, `ASRModel`, so a model is described completely by its arguments. `backbone=` also accepts your own Equinox module, and `task="custom"` your own head and objective. [docs/models.md](models.md) describes the keyword arguments, and [docs/observed.md](observed.md) the label types.
 
-**Distribution objects.** `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` for every head, with `log_prob`, `sample`, and `mean`, and, for a single target, exact `cdf` and `quantile`. The object is a JAX pytree, so it works with `jax.jit`, `jax.vmap`, and `jax.grad`. After the rows are encoded once, you can take the gradient of any function of the distribution with respect to the raw inputs, through imputation, scaling, and the network:
+Distribution objects: `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` for every head, with `log_prob`, `sample`, and `mean`, and, for a single target, exact `cdf` and `quantile`. The object is a JAX pytree, so it works with `jax.jit`, `jax.vmap`, and `jax.grad`. After the rows are encoded once, you can take the gradient of any function of the distribution with respect to the raw inputs, through imputation, scaling, and the network:
 
 ```python
 import jax
@@ -290,6 +290,6 @@ def p_late(numeric):                  # P(delay > 60 min), summed over the rows
 jax.grad(p_late)(batch.numeric_raw)   # gradient of P(late) for each row and input
 ```
 
-**Saving and loading.** `model.save("models/delay")` writes a directory of JSON and Equinox weight files, without pickle, and `ASRModel.load("models/delay")` loads it as the class it was saved as, with identical predictions. A custom head or backbone is recorded by its module path and imported when the model is loaded, so only load models from sources you trust.
+Saving and loading: `model.save("models/delay")` writes a directory of JSON and Equinox weight files, without pickle, and `ASRModel.load("models/delay")` loads it as the class it was saved as, with identical predictions. A custom head or backbone is recorded by its module path and imported when the model is loaded, so only load models from sources you trust.
 
-**Other features**, described in the guides but not shown on this page: TabM, transformer, and set backbones; hyperparameter search; ordinal and nested-outcome classifiers; uncertainty across ensemble members; and the single-series forecasters `ASRForecaster` and `ASRHistoryForecaster`.
+Other features, described in the guides but not shown on this page: TabM, transformer, and set backbones; hyperparameter search; ordinal and nested-outcome classifiers; uncertainty across ensemble members; and the single-series forecasters `ASRForecaster` and `ASRHistoryForecaster`.

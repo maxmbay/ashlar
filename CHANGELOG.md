@@ -135,7 +135,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ### Changed
 
-Upgrading from 0.0.2: quantiles, intervals, calibration, and member uncertainty will differ slightly because they are now computed exactly, where they were read from draws, and code that checks the type of `predict_dist` on a `normal` model, or indexes its `(rows, 1)` moments, needs updating.
+Upgrading from 0.0.2: quantiles, intervals, calibration, and member uncertainty will differ slightly because they are now computed exactly instead of read from draws, and code that checks the type of `predict_dist` on a `normal` model, or indexes its `(rows, 1)` moments, needs updating.
 
 - `sample`, `log_prob`, `predict_quantiles`, `predict_interval`, and `calibrate` now read `predict_dist`, so they agree by construction.
 - `predict_quantiles` and `predict_interval` are now exact, where they were read from 1,000 draws: closed form for the gaussian, flow, and histogram heads, and bisection on the CDF of the member mixture otherwise. They no longer depend on `n_samples` or `seed`, which are kept for custom distributions without a quantile.
