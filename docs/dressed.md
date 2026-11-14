@@ -20,7 +20,7 @@ It is for one numeric target on a table of up to a few thousand rows, when the p
 
 A network with a density head fits a smooth map from the columns to the target. That is the wrong tool for some targets: one that is a linear function of the columns, one with a handful of values, one where a row's nearest neighbours already hold the answer.
 
-A label reader (`ashlar.label_reader.LabelReader`) is the other tool. It has no weights from the columns to the target. For a row it fits a ridge regression on the training rows inside the forward pass, then spreads the row's probability over the training rows' leave-one-out residuals by attention. Its prediction is a set of points taken from the training labels.
+A label reader (`ashlar.label_reader.LabelReader`) is the other tool. It has no weights from the columns to the target. Inside its forward pass it solves one ridge regression of the training labels on the columns, which gives each row a trend and every training row a leave-one-out residual, then spreads each row's probability over those residuals by attention. Its prediction is a set of points taken from the training labels.
 
 Neither wins on every table, so the two are pooled: a weight `w` on the network and `1 - w` on the reader. But the reader predicts point masses. A pool with point masses has no density, so no log score, and a draw from it can only repeat a training label. Dressing gives that pool a density and then corrects it.
 
@@ -87,7 +87,8 @@ After a fit, `pool_weight_`, `bandwidth_factor_`, `fallback_factor_`, and `gate_
 - **One numeric target, exactly observed.** Censored and interval labels, joint targets, classes, and sample weights raise an error.
 - **Small and mid-size tables.** Every test below is on at most 2,400 training rows. A reader's cost grows with the square of its rows, so a member's reader reads at most `reader_rows` of them; nothing above that size has been tested.
 - **A target the columns determine almost exactly.** The 1% wide normal costs about 0.00006 of the labels' spread in CRPS. That is nothing on most tables. On a target whose CRPS is already below about a thousandth of its spread, it is a multiple of the whole score, and the corrector has to win it back. On one such table in the tests below it did on two folds and did not on the third. `floor_cost=0.01` lowers the wide normal's share until it costs at most 1% of the pool's held-out CRPS; it is off by default until it has passed a test of its own.
-- **Time.** Five networks, five readers, and a corrector.
+- **Time.** Five networks, five readers, and a corrector. On the 46 held-out fits below, a fit took a median of 16 minutes, from 2 minutes to 2.3 hours (the longest on 2,400-row tables), on a 12-core laptop that was running several fits at once; the times are the `seconds` field of [`examples/readme/artifacts/dressed/devset.json`](../examples/readme/artifacts/dressed/devset.json).
+- **Fewer methods than the general estimator.** `ASRDressed` is a scikit-learn regressor with `fit`, `predict`, `predict_dist`, `predict_quantiles`, `log_prob`, `sample`, and `score`, and it pickles. It has no `calibrate`, `predict_interval`, `predict_exceedance`, or `save` yet; [docs/estimator.md](estimator.md#the-dressed-estimator) says what to use instead.
 
 ## How it was tested
 

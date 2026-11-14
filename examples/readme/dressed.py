@@ -2,7 +2,8 @@
 
 ``compute`` copies the scores of the 46 held-out fits (folds 1 and 2 of 23 tables) from the dev-set results
 (``ASHLAR_DRESSED_RESULTS``, a JSON-lines file with one record per table and fold); ``draw`` plots, per table, the
-dressed model's CRPS and the undressed pool's, each relative to one network alone. docs/dressed.md has the test.
+dressed model's CRPS and the undressed pool's, each relative to one network alone. docs/dressed.md has the test
+and the fit times (``seconds``, the whole fit of one dressed model).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ RIGHT = 1.28  # the right end of the axis; the largest ratio is the undressed po
 
 def compute():
     rows = [json.loads(line) for line in RESULTS.read_text().splitlines()]
-    keep = ("table", "fold", "kind", "rows", "network", "bagged", "dressed", "log_dressed", "log_bagged_network", "gate")
+    keep = ("table", "fold", "kind", "rows", "network", "bagged", "dressed", "log_dressed", "log_bagged_network", "gate", "seconds")
     k.save_json("dressed", "devset", [{name: r[name] for name in keep} for r in rows if r["fold"] in (1, 2)])
 
 

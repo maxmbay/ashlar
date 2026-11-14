@@ -233,7 +233,7 @@ interval = sampled.predict_interval(X_missing, coverage=0.8)
 
 ![Left: on hourly bike rentals, the cost of LightGBM's orders relative to Ashlar's at eight cost ratios. LightGBM is refitted for each ratio, while Ashlar uses one model for all of them. LightGBM's cost is about the same at 1:1 and 23% to 28% higher at 19:1. Right: circles showing the mean absolute attribution of each feature for the mean, the width of the 80% interval, and P(rentals > 500), from Ashlar's explain and from SHAP on LightGBM models. Working day accounts for 17% of the attribution of the width and 11% of that of the mean.](images/readme/act.png)
 
-On hourly bike rentals, we compared `predict_order` with LightGBM quantile regression refitted for each of eight cost ratios. On held-out hours, LightGBM's orders cost about the same as Ashlar's at a 1:1 ratio, and more at higher ratios, up to 23% more at 19:1.
+On hourly bike rentals, we compared `predict_order` with LightGBM quantile regression refitted for each of eight cost ratios. On held-out hours, LightGBM's orders cost about the same as Ashlar's at a 1:1 ratio, and more at higher ratios: at 19:1, 23% more with 400 trees and 28% more with early stopping.
 
 On the same data, whether the day is a working day accounts for 17% of the attribution of the 80% interval's width, but only 11% of the attribution of the mean. To get the same attributions with SHAP on LightGBM, you need two quantile models for the width, which gave crossing quantiles on 0.35% of hours, and a separate classifier for each threshold of a tail probability.
 
