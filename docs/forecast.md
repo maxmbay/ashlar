@@ -90,7 +90,7 @@ model.fit(lags, pickups)
 
 ![Hourly taxi demand over a held-out day, with the 80% band around the median forecast.](images/forecast-fan.png)
 
-Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit rather than one model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours. [`examples/readme_figures.py`](../examples/readme_figures.py) writes the figure (`python examples/readme_figures.py fan`).
+Hourly NYC taxi pickups, July 2014 to January 2015. Each row is one hour, and reads the 24 hours of the previous day, the same hour a week earlier, and the calendar. A sixth of the days were held out whole, so each is forecast 1 to 24 hours ahead from midnight, by one fit, with no model per step. Over the 34 held-out days the median forecast is off by 2,678 pickups on average, against 3,806 for the same hour a week earlier, and the 80% interval holds 73% of held-out hours. [`examples/readme_figures.py`](../examples/readme_figures.py) writes the figure (`python examples/readme_figures.py fan`).
 
 ## Many series, covariates, and paths
 
