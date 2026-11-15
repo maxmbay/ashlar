@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 648" width="936" height="648" role="img" aria-label="The five steps of a dressed model, top to bottom">
+<rect width="936" height="648" rx="10" fill="#fbfaf7"/>
+<path d="M37.0 141.0H517.5M474.5 141.0V442.0" fill="none" stroke="#147a72" stroke-width="2" stroke-opacity="0.55" stroke-linecap="round"/>
+<text x="34.0" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">MEMBERS</text>
+<text x="105.3" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">members=5</text>
+<rect x="34.0" y="56.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 57.0H122.7" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="79.8" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">network 1</text>
+<rect x="132.7" y="56.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M135.7 57.0H221.4" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="178.5" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">network 2</text>
+<rect x="231.4" y="56.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M234.4 57.0H320.1" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="277.2" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">network 3</text>
+<rect x="330.1" y="56.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M333.1 57.0H418.8" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="375.9" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">network 4</text>
+<rect x="428.8" y="56.0" width="91.7" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M431.8 57.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="474.6" y="77.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">network 5</text>
+<rect x="34.0" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M37.0 99.0H122.7" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="79.8" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 1</text>
+<rect x="132.7" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M135.7 99.0H221.4" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="178.5" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 2</text>
+<rect x="231.4" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M234.4 99.0H320.1" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="277.2" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 3</text>
+<rect x="330.1" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M333.1 99.0H418.8" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="375.9" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 4</text>
+<rect x="428.8" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M431.8 99.0H517.5" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="474.6" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 5</text>
+<text x="550.5" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Five pairs of a network and a label reader. Each</text>
+<text x="550.5" y="61.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pair trains on four fifths of the rows and holds</text>
+<text x="550.5" y="77.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">out the rest. A reader predicts from the training</text>
+<text x="550.5" y="93.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">rows' labels, not from weights on the columns.</text>
+<text x="34.0" y="173.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">POOL</text>
+<text x="81.6" y="173.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">pool_weight_</text>
+<rect x="34.0" y="184.0" width="486.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 185.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="277.2" y="205.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">w × networks + (1 − w) × readers</text>
+<text x="550.5" y="173.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One weight w for the table, picked by the CRPS of</text>
+<text x="550.5" y="189.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">each row under the pair that held it out.</text>
+<text x="34.0" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">SMOOTH</text>
+<text x="97.4" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">bandwidth_factor_, fallback_factor_</text>
+<rect x="34.0" y="270.0" width="327.3" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 271.0H358.3" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="197.6" y="291.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">a normal on each reader point</text>
+<rect x="368.3" y="270.0" width="152.2" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M371.3 271.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="444.4" y="291.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">+ 1% wide normal</text>
+<text x="550.5" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">A reader predicts points, so the pool has no</text>
+<text x="550.5" y="275.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">density yet. Each point becomes a normal, with the</text>
+<text x="550.5" y="291.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">width picked on the held-out rows.</text>
+<text x="34.0" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">CORRECT</text>
+<text x="105.3" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">corrector_</text>
+<rect x="34.0" y="356.0" width="486.5" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
+<path d="M37.0 357.0H517.5" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
+<text x="277.2" y="377.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">corrector network, on the held-out pool's scale</text>
+<text x="550.5" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One more network learns where each label falls in</text>
+<text x="550.5" y="361.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">its own held-out pool, and reshapes every row's</text>
+<text x="550.5" y="377.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pool to match.</text>
+<text x="34.0" y="431.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">GATE</text>
+<text x="81.6" y="431.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">gate_</text>
+<rect x="34.0" y="442.0" width="486.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 443.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="277.2" y="463.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">g × corrected + (1 − g) × smoothed</text>
+<text x="550.5" y="431.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One weight g, picked on held-out rows. Where the</text>
+<text x="550.5" y="447.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">corrector did not help, g is 0 and the prediction</text>
+<text x="550.5" y="463.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">is the smoothed pool.</text>
+<path d="M34.0 494.0H902.0" stroke="#e9e4dc" stroke-width="1"/>
+<text x="34.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">model</text>
+<text x="72.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52"> = </text>
+<text x="94.8" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">ashlar.dressed</text>
+<text x="201.2" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">().</text>
+<text x="224.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">fit</text>
+<text x="246.8" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(X, y)</text>
+<text x="34.0" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">dist</text>
+<text x="64.4" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52"> = </text>
+<text x="87.2" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">model.predict_dist</text>
+<text x="224.0" y="548.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(X_new)</text>
+<text x="34.0" y="570.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">dist.log_prob</text>
+<text x="132.8" y="570.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(y_new)</text>
+<text x="186.0" y="570.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">              # exact log density</text>
+<text x="34.0" y="592.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">dist.cdf</text>
+<text x="94.8" y="592.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">(y_new)</text>
+<text x="148.0" y="592.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">                   # exact CDF</text>
+<text x="34.0" y="614.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">dist.quantile</text>
+<text x="132.8" y="614.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">([0.1, 0.5, 0.9])</text>
+<text x="550.5" y="526.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Teal marks what this model adds: the label readers,</text>
+<text x="550.5" y="543.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">and a corrector that works on the scale of the</text>
+<text x="550.5" y="560.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pairs' held-out pool. Each choice after the members</text>
+<text x="550.5" y="577.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">is made on rows the pairs did not train on.</text>
+</svg>

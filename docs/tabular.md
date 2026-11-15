@@ -14,7 +14,7 @@ One numeric column, a few epochs, then `predict` on a grid. The line is the fit.
 
 `fit(X, y)` with no other arguments does the following.
 
-Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. `numeric_clip` sets the clip's size, and `numeric_clip=None` turns it off, along with the stop at the edge of the training range in the quantile maps, so a value past the range keeps moving the model instead of reading as the edge. That helps where a trend continues past the data and hurts where it bends or stops; [docs/benchmarks.md](benchmarks.md#spread-past-the-training-range) has both. An integer column stays numeric unless you name it as a category.
+Numeric columns are filled with the training-row median, centered on that median, and divided by the interquartile range, then passed through a smooth clip at ±3. `numeric_scaling="standard"` uses the mean and the standard deviation instead. `numeric_clip` sets the clip's size, and `numeric_clip=None` turns it off, along with the stop at the edge of the training range in the quantile maps, so a value past the range keeps moving the model and does not read as the edge. That helps where a trend continues past the data and hurts where it bends or stops; [docs/benchmarks.md](benchmarks.md#spread-past-the-training-range) has both. An integer column stays numeric unless you name it as a category.
 
 Regression labels are z-scored on the training rows. `predict` maps them back. `standardize_target=False` leaves `y` alone. Classification and ordinal labels stay on their original scale.
 
@@ -39,6 +39,8 @@ model = tabm_piecewise().fit(X, y)                       # regression
 model = tabm_piecewise(task="classification").fit(X, y)
 model = tabm_piecewise(task="mixture").fit(X, y)         # a distribution
 ```
+
+`ashlar.dressed()` fits five `tabm_piecewise` networks and five label readers and returns them as one distribution; it is for small tables where the quality of the predicted distribution is worth the time to fit. [docs/dressed.md](dressed.md) is its guide.
 
 `tabm_piecewise()` is the most accurate recipe in the ablations: a TabM batch ensemble of 32 members, two blocks of width 256, on piecewise embeddings of quantile-normalized columns, with a constant learning rate. It costs 5 to 10 times the default on a CPU. `tabm()` keeps the paper's architecture without numeric embeddings.
 
@@ -86,7 +88,7 @@ model.sample(X_new, n=1000)                 # draws by rows
 model.log_prob(X_new, y_new)                # log density of each observed value
 ```
 
-`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (fixed bins over ±4 standard deviations, 16 by default and `head_kwargs={"bins": 48}` for more), `quantile` (pinball loss at 0.1, 0.5, and 0.9), or `student_t` (learned degrees of freedom, above 2). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels. `predict` is the location for student_t.
+`task` takes `gaussian`, `mixture` (five normals), `flow` (a monotone rational-quadratic spline), `histogram` (fixed bins over ±4 standard deviations, 16 by default and `head_kwargs={"bins": 48}` for more), `quantile` (pinball loss at 0.1, 0.5, and 0.9), or `student_t` (learned degrees of freedom, above 2). The target is z-scored on the training rows and every method answers on the original scale. With a TabM backbone the predictive distribution is the equal-weight mixture of the members. `predict` is the mean for gaussian, mixture, and histogram, and the median for flow and quantile. The quantile head has no density and no draws, and answers only its three levels, asked for together as `[0.1, 0.5, 0.9]`. `predict` is the location for student_t.
 
 `poisson` and `negative_binomial` model a count on its raw scale, without z-scoring, and reject a target that is not non-negative whole numbers; `head_kwargs={"zero_inflated": True}` adds a structural-zero probability. Their draws and quantiles are whole numbers and `log_prob` is a log mass.
 
@@ -122,13 +124,13 @@ zones = model.core_.categorical_embeddings.tables[names.index("pickup_zone")]   
 
 That table is a model of NYC taxi trip duration from the pickup and drop-off zones, 191 and 203 levels, plus the hour, the weekday, and the borough. There is no distance column. The model was never told where a zone is, yet the first principal component of the learned vectors tracks how long trips from that zone run (correlation 0.73), and both airports land far from everything else.
 
-On accuracy alone the embeddings are no magic. With 5,000 training rows spread over about 200 zones on each side, a learned vector per zone has little data behind it, and one-hot with a longer schedule does better: log-duration RMSE 0.580 against 0.681, with LightGBM's native categorical splits best at 0.520 ([docs/benchmarks.md](benchmarks.md#learned-embeddings) has the table). What the embeddings add is a representation: 8 numbers per zone instead of a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen.
+On accuracy alone the embeddings are no magic. With 5,000 training rows spread over about 200 zones on each side, a learned vector per zone has little data behind it, and one-hot with a longer schedule does better: log-duration RMSE 0.580 against 0.681, with LightGBM's native categorical splits best at 0.520 ([docs/benchmarks.md](benchmarks.md#learned-embeddings) has the table). What the embeddings add is a representation: 8 numbers per zone against a 200-column one-hot block, a geometry you can inspect, cluster, or hand to another model, and a defined vector for a zone the model has never seen.
 
-In an outcome tree, the branch probabilities are a function of those vectors together with the rest of the row, not of either alone:
+In an outcome tree, the branch probabilities are a function of those vectors together with the rest of the row:
 
 ![Learned pickup-zone vectors beside P(tip) as a function of fare, for four zones.](images/outcome-embeddings.png)
 
-An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone does not shift one curve up or down, it changes the response to the fare.
+An outcome tree over taxi tips, with the leaves `no_tip`, `under_two`, and `two_or_more`. Each pickup zone becomes an 8-dimensional vector, and the vectors arrange themselves by how often trips from that zone are tipped. The right panel sweeps the fare with every other column fixed: P(tip) climbs 0.30 across the sweep from Central Harlem North and 0.29 from Manhattan Valley, but only 0.09 from Battery Park City, which starts high and stays there. The zone changes the response to the fare itself.
 
 A set column is a cell that holds a list of labels. Pass `set_features=["tags"]`. The model mean-pools a learned token embedding. Lists longer than `set_max_length` (default 8) are truncated to the longest list in the training rows, capped by that maximum. An empty list becomes a zero vector.
 

@@ -212,7 +212,7 @@ After one calibration for all hours, Ashlar's coverage is outside 75% to 85% in 
 
 ![Coverage of the 80% interval when 0% to 50% of the numeric cells are missing at test time, on California housing and bike rentals. With with_uncertain_inputs(32), coverage stays at 81% to 83%; with the missing cells filled with the median, it falls to 41% and 48%; for LightGBM given NaN, it falls to 67% and 36%; and LightGBM trained with the same share of missing cells stays at 80%. On the right, the predicted distribution for one California row becomes wider as its income, latitude, and longitude are removed.](images/readme/intervals-missing.png)
 
-`with_uncertain_inputs` handles cells that are missing at test time. It draws each missing numeric cell from its distribution given the row's observed cells, using a Gaussian copula fitted on the training data, and combines the predictions for 32 such draws, instead of filling the cell with the training median. With 30% of the cells missing in the California housing data, its 80% intervals contain 83% of test values, compared with 50.5% when the missing cells are filled with the median, and 68% for LightGBM given NaN. LightGBM trained and calibrated with the same share of missing cells also reaches 80% and gives narrower intervals ($141k against $178k), but it has to know that share in advance and needs a separate fit for each share.
+`with_uncertain_inputs` handles cells that are missing at test time. It draws each missing numeric cell from its distribution given the row's observed cells, using a Gaussian copula fitted on the training data, and combines the predictions for 32 such draws. Without it, a missing cell is filled with the training median. With 30% of the cells missing in the California housing data, its 80% intervals contain 83% of test values, compared with 50.5% when the missing cells are filled with the median, and 68% for LightGBM given NaN. LightGBM trained and calibrated with the same share of missing cells also reaches 80% and gives narrower intervals ($141k against $178k), but it has to know that share in advance and needs a separate fit for each share.
 
 ```python
 from ashlar import ASRRegressor
@@ -233,7 +233,7 @@ interval = sampled.predict_interval(X_missing, coverage=0.8)
 
 ![Left: on hourly bike rentals, the cost of LightGBM's orders relative to Ashlar's at eight cost ratios. LightGBM is refitted for each ratio, while Ashlar uses one model for all of them. LightGBM's cost is about the same at 1:1 and 23% to 28% higher at 19:1. Right: circles showing the mean absolute attribution of each feature for the mean, the width of the 80% interval, and P(rentals > 500), from Ashlar's explain and from SHAP on LightGBM models. Working day accounts for 17% of the attribution of the width and 11% of that of the mean.](images/readme/act.png)
 
-On hourly bike rentals, we compared `predict_order` with LightGBM quantile regression refitted for each of eight cost ratios. On held-out hours, LightGBM's orders cost about the same as Ashlar's at a 1:1 ratio, and more at higher ratios, up to 23% more at 19:1.
+On hourly bike rentals, we compared `predict_order` with LightGBM quantile regression refitted for each of eight cost ratios. On held-out hours, LightGBM's orders cost about the same as Ashlar's at a 1:1 ratio, and more at higher ratios: at 19:1, 23% more with 400 trees and 28% more with early stopping.
 
 On the same data, whether the day is a working day accounts for 17% of the attribution of the 80% interval's width, but only 11% of the attribution of the mean. To get the same attributions with SHAP on LightGBM, you need two quantile models for the width, which gave crossing quantiles on 0.35% of hours, and a separate classifier for each threshold of a tail probability.
 
@@ -277,7 +277,7 @@ totals = np.expm1(model.sample(frame.X, n=400)).sum(axis=-1)  # 400 totals per r
 
 Every configuration is an instance of one class, `ASRModel`, so a model is described completely by its arguments. `backbone=` also accepts your own Equinox module, and `task="custom"` your own head and objective. [docs/models.md](models.md) describes the keyword arguments, and [docs/observed.md](observed.md) the label types.
 
-**Distribution objects.** `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` for every head, with `log_prob`, `sample`, and `mean`, and, for a single target, exact `cdf` and `quantile`. The object is a JAX pytree, so it works with `jax.jit`, `jax.vmap`, and `jax.grad`. After the rows are encoded once, you can take the gradient of any function of the distribution with respect to the raw inputs, through imputation, scaling, and the network:
+Distribution objects: `model.predict_dist(X)` returns an `ashlar.distributions.Distribution` for every head, with `log_prob`, `sample`, and `mean`, and, for a single target, exact `cdf` and `quantile`. The object is a JAX pytree, so it works with `jax.jit`, `jax.vmap`, and `jax.grad`. After the rows are encoded once, you can take the gradient of any function of the distribution with respect to the raw inputs, through imputation, scaling, and the network:
 
 ```python
 import jax
@@ -290,6 +290,6 @@ def p_late(numeric):                  # P(delay > 60 min), summed over the rows
 jax.grad(p_late)(batch.numeric_raw)   # gradient of P(late) for each row and input
 ```
 
-**Saving and loading.** `model.save("models/delay")` writes a directory of JSON and Equinox weight files, without pickle, and `ASRModel.load("models/delay")` loads it as the class it was saved as, with identical predictions. A custom head or backbone is recorded by its module path and imported when the model is loaded, so only load models from sources you trust.
+Saving and loading: `model.save("models/delay")` writes a directory of JSON and Equinox weight files, without pickle, and `ASRModel.load("models/delay")` loads it as the class it was saved as, with identical predictions. A custom head or backbone is recorded by its module path and imported when the model is loaded, so only load models from sources you trust.
 
-**Other features**, described in the guides but not shown on this page: TabM, transformer, and set backbones; hyperparameter search; ordinal and nested-outcome classifiers; uncertainty across ensemble members; and the single-series forecasters `ASRForecaster` and `ASRHistoryForecaster`.
+Other features, described in the guides but not shown on this page: TabM, transformer, and set backbones; hyperparameter search; ordinal and nested-outcome classifiers; uncertainty across ensemble members; and the single-series forecasters `ASRForecaster` and `ASRHistoryForecaster`.

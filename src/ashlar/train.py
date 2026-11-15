@@ -262,8 +262,14 @@ def fit_loop(
     gradient_clip: float | None = None,
     units=None,
     cooldown_epochs: int = 0,
+    validation_score=None,
 ):
     """Train ``core`` and return the best validation checkpoint when validation exists.
+
+    ``validation_score(core)`` (higher is better) picks the checkpoint and
+    drives early stopping instead of the validation loss, for a score read
+    from the whole validation partition, such as the CRPS of the predictive
+    distribution. It overrides ``score_fn``.
 
     The optimizer is AdamW. ``learning_rate_schedule='linear'`` only replaces
     the scalar rate with a linear decay to zero. ``surface`` warms up at
@@ -361,6 +367,7 @@ def fit_loop(
             key=key,
             validation=validation,
             score_fn=score_fn,
+            validation_score=validation_score,
             units=units,
             cooldown=_cooldown_plan(cooldown_epochs, lambda state: _rate_at(rate, state), weight_decay, gradient_clip),
         )
@@ -468,12 +475,12 @@ def fit_loop(
         if val_loss != val_loss:
             raise WeightError("validation loss is not finite.")
         history["val_loss"].append(val_loss)
-        if score_fn is None:
+        if score_fn is None and validation_score is None:
             improved = best_val is None or val_loss < best_val
             if improved:
                 best_val = val_loss
         else:
-            metric = float(score_fn(core, *validation))
+            metric = float(validation_score(core)) if validation_score is not None else float(score_fn(core, *validation))
             if metric != metric:
                 raise WeightError("validation score is not finite.")
             history.setdefault("val_score", []).append(metric)
@@ -597,6 +604,7 @@ def _fit_scanned(
     score_fn,
     units=None,
     cooldown=None,
+    validation_score=None,
 ):
     """Shared-minibatch training with one compiled scan per epoch.
 
@@ -722,12 +730,15 @@ def _fit_scanned(
             continue
         val_loss = validation_loss(core)
         history["val_loss"].append(val_loss)
-        if score_fn is None:
+        if score_fn is None and validation_score is None:
             improved = best_val is None or val_loss < best_val
             if improved:
                 best_val = val_loss
         else:
-            metric = chunked_weighted(lambda *chunk: score_fn(core, *chunk), validation, validation[-1])
+            if validation_score is not None:
+                metric = float(validation_score(core))
+            else:
+                metric = chunked_weighted(lambda *chunk: score_fn(core, *chunk), validation, validation[-1])
             if metric != metric:
                 raise WeightError("validation score is not finite.")
             history.setdefault("val_score", []).append(metric)

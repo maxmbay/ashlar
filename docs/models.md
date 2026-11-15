@@ -1,6 +1,6 @@
 # Model slots: encode, backbone, head, train
 
-[Ashlar](../README.md) builds a model from keyword arguments rather than from a class per architecture. `ASRModel` is the generic estimator; `ASRRegressor`, `ASRClassifier`, `ASROrdinalClassifier`, and `ASROutcomeTree` are the same estimator with a task and its recipe filled into the signature, the way `LGBMRegressor` is `LGBMModel` with `objective="regression"`.
+[Ashlar](../README.md) builds a model from keyword arguments, with no class per architecture. `ASRModel` is the generic estimator; `ASRRegressor`, `ASRClassifier`, `ASROrdinalClassifier`, and `ASROutcomeTree` are the same estimator with a task and its recipe filled into the signature, the way `LGBMRegressor` is `LGBMModel` with `objective="regression"`.
 
 ![Five courses of model choices: encode, backbone, head, label, and train, with one path lit.](images/architecture-light.svg)
 
@@ -19,7 +19,7 @@ The four slots are independent. A head does not know which backbone produced its
 
 Numeric columns are imputed, scaled, and then embedded: `num_embeddings` takes `"piecewise"` (the default), `"piecewise_relu"`, `"periodic"`, `"linear_relu"`, or `None` for the scaled number itself. `num_embedding_dim` and `num_embedding_bins` set the width and the bin count.
 
-Every other column is categorical and gets a learned vector, 8 wide by default. `categorical_embeddings=[]` restores one-hot, and a list of names embeds those and one-hots the rest. `cyclical={"hour": 24}` turns a column into a sine and cosine of its period. `set_features` names columns that hold a variable-length set rather than one value. [docs/tabular.md](tabular.md#defaults) has the detail.
+Every other column is categorical and gets a learned vector, 8 wide by default. `categorical_embeddings=[]` restores one-hot, and a list of names embeds those and one-hots the rest. `cyclical={"hour": 24}` turns a column into a sine and cosine of its period. `set_features` names columns that hold a variable-length set in each cell. [docs/tabular.md](tabular.md#defaults) has the detail.
 
 ## Backbone
 
@@ -27,7 +27,7 @@ Every other column is categorical and gets a learned vector, 8 wide by default. 
 |---|---|
 | `"residual_mlp"` | The default: three residual blocks of width 256, dropout 0.1, SiLU. |
 | `"tabm"` | A batch ensemble: k members that share most weights and train together. `tabm()` and `tabm_piecewise()` are the paper-shaped and accuracy recipes. |
-| `"transformer"` | A feature transformer: attention over the columns rather than over a sequence. |
+| `"transformer"` | A feature transformer: attention over the columns. |
 | `"set"` | An encoder for set-valued columns. |
 | `"additive"` | One small network per column, and one per pair of columns you name. The head is linear in them, so every output of the distribution, a location, a scale, a zero probability, is a sum of one shape per column: a neural GAMLSS. `shape_functions(X)` reads the shapes. [docs/additive.md](additive.md) has the detail. |
 | your Equinox module | Any module with the same call signature. `backbone_kwargs` is passed to it. |
@@ -42,6 +42,10 @@ Every other column is categorical and gets a learned vector, 8 wide by default. 
 
 Recipes are plain dicts. `DEFAULT_RECIPE`, `TABM_PAPER`, `TABM_PIECEWISE`, `CLASSIFIER_RECIPE`, `ORDINAL_RECIPE`, and `TREE_RECIPE` can be copied, edited, and splatted into a constructor, so a configuration you like is data you can version.
 
+## Dressed models
+
+`ashlar.dressed()` returns an `ASRDressed`: five cross-fitted `tabm_piecewise` networks and five label readers, pooled, smoothed, and corrected into one distribution with an exact density. It is one estimator with its own `fit`, `predict_dist`, `predict_quantiles`, `log_prob`, and `sample`, for one numeric target. Its distribution is computed in NumPy on top of the networks' distributions, so unlike the models below it does not compose with `jax.grad`. [docs/dressed.md](dressed.md) is the guide.
+
 ## Research models
 
 Beyond the four slots, these are whole model families with the same `fit` and `predict` surface. They are experimental research code: benchmarked in [docs/benchmarks.md](benchmarks.md), and not the path most tables need. Each has its own `fit(X, y, task)` for a point or class probabilities, most read numeric columns only, and none is connected to the heads, `predict_dist`, observed labels, or `calibrate`. Their API may change or go. For an additive model of a whole distribution, use `backbone="additive"` instead of `ASRAdditive` ([docs/additive.md](additive.md)).
@@ -55,8 +59,8 @@ Beyond the four slots, these are whole model families with the same `fit` and `p
 | `ASRLinearLeafBooster` | Boosted depth-1 trees whose leaves are ridge linear models. |
 | `ASRLearnedNeighborhood` | Embeds the row, then predicts from a softmax over training neighbors. |
 | `ASRDiagonalNeighborhood` | Nadaraya–Watson, or a class vote, in a learned diagonal metric. |
-| `ASRBartPriorEnsemble` | Soft depth-2 trees with a BART-shaped penalty, summed rather than grown greedily. |
+| `ASRBartPriorEnsemble` | Soft depth-2 trees with a BART-shaped penalty, summed; none is grown greedily. |
 | `ASRVariationalPairwise` | A variational logistic head on soft bins and every pairwise bin product. |
 | `ASRGradientSparseNet` | A classifier with an L1 penalty on the input gradient. |
 
-Every model in this file is a JAX computation built on Equinox, so it composes with `jax.grad`, `jax.vmap`, and `jax.jit`. [`examples/jax_composition.py`](../examples/jax_composition.py) differentiates a fitted model with respect to its input.
+Every model in this file except the dressed model is a JAX computation built on Equinox, so it composes with `jax.grad`, `jax.vmap`, and `jax.jit`. [`examples/jax_composition.py`](../examples/jax_composition.py) differentiates a fitted model with respect to its input.

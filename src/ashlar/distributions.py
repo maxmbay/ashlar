@@ -1559,6 +1559,25 @@ def randomized_pit(dist: Distribution, value, key):
     return lower + jax.random.uniform(key, jnp.shape(upper), dtype=upper.dtype) * (upper - lower)
 
 
+# Quantile levels ``quantile_crps`` integrates over by default.
+CRPS_LEVELS = 64
+
+
+def quantile_crps(dist: Distribution, value, levels: int = CRPS_LEVELS):
+    """CRPS of ``dist`` at ``value``, one per row of ``batch_shape``, read from its quantiles.
+
+    CRPS is twice the pinball loss integrated over every level, ``2 * int_0^1 rho_a(value - F^-1(a)) da``. The
+    midpoint rule over ``levels`` levels reads it from ``dist.quantile``, so it scores any one-column distribution
+    with a quantile, a member mixture or a count included (for a normal, 64 levels are within half a percent).
+    """
+    alphas = (jnp.arange(levels, dtype=jnp.float32) + 0.5) / levels
+    shape = (levels,) + (1,) * len(dist.batch_shape)
+    quantiles = dist.quantile(alphas.reshape(shape))
+    gap = jnp.asarray(value, dtype=quantiles.dtype)[None] - quantiles
+    alphas = alphas.reshape(shape).astype(quantiles.dtype)
+    return 2.0 * jnp.mean(jnp.maximum(alphas * gap, (alphas - 1.0) * gap), axis=0)
+
+
 # Where the quantile spline's slope may change, in logistic scores on each side of the median: the levels
 # 0.5, 0.75, 0.91, and 0.977, a normal's median and 0.67, 1.34, and 2 standard deviations.
 SPLINE_BREAKS = (0.0, 1.1, 2.3, 3.75)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ashlar-tabular"
 dynamic = ["version"]
-description = "Narrow JAX/Equinox tabular models with explicit weights and ensemble semantics."
+description = "Predictive distributions for tabular data in JAX: the dressed model, which pools networks and label readers into one exact density, and a general distributional estimator."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
