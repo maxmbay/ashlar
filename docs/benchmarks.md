@@ -1,6 +1,6 @@
 # Benchmarks
 
-[Ashlar](../README.md) beside LightGBM, XGBoost, CatBoost, and other neural packages. The large-table numbers come from [`examples/benchmark_large.py`](../examples/benchmark_large.py), the small-table numbers from [`examples/benchmark_readme.py`](../examples/benchmark_readme.py), and the ablations from [`examples/ablation_gbm_parity.py`](../examples/ablation_gbm_parity.py). A section named for a figure says how that figure, in the README or in [the showcase](showcase.md), was made.
+[Ashlar](../README.md) beside LightGBM, XGBoost, CatBoost, and other neural packages. The large-table numbers come from [`examples/benchmark_large.py`](../examples/benchmark_large.py), the small-table numbers from [`examples/benchmark_readme.py`](../examples/benchmark_readme.py), and the ablations from [`examples/ablation_gbm_parity.py`](../examples/ablation_gbm_parity.py). A section named for a figure says how that figure, in the README, in [the showcase](showcase.md), or on another docs page, was made.
 
 ```bash
 pip install -e ".[dataframes]" xgboost lightgbm catboost openml pyarrow pytabkit
@@ -178,9 +178,9 @@ Each table has three random splits. A row with 1 in the Splits column ran on see
 | XGBoost | 3 | 0.8441 ± 0.0001 | 0.7546 ± 0.00085 | 0.3857 ± 0.00041 | 38 |
 | CatBoost | 3 | 0.8435 ± 4.5e-05 | 0.7496 ± 0.00048 | 0.3883 ± 0.00023 | 139 |
 
-### The README's airline figure
+### The showcase's airline figures
 
-The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
+The showcase's [figure of 16 flights](showcase.md#benchmarks-on-eight-large-tables) and the one-flight card on [the estimator page](estimator.md#what-the-methods-return) come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
 
 | Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
 |---|---:|---:|---:|---:|---:|

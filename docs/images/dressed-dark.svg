@@ -33,10 +33,10 @@
 <rect x="428.8" y="98.0" width="91.7" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
 <path d="M431.8 99.0H517.5" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
 <text x="474.6" y="119.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">reader 5</text>
-<text x="550.5" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Five pairs of a network and a label reader. Each</text>
-<text x="550.5" y="61.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pair trains on four fifths of the rows and holds</text>
-<text x="550.5" y="77.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">out the rest. A reader predicts from the training</text>
-<text x="550.5" y="93.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">rows' labels, not from weights on the columns.</text>
+<text x="550.5" y="45.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Five cross-fitted pairs of a network and a label</text>
+<text x="550.5" y="61.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">reader. Each pair trains on four fifths of the</text>
+<text x="550.5" y="77.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">rows and holds out the rest. A reader predicts</text>
+<text x="550.5" y="93.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">a row from other rows' labels.</text>
 <text x="34.0" y="173.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">POOL</text>
 <text x="81.6" y="173.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">pool_weight_</text>
 <rect x="34.0" y="184.0" width="486.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
@@ -57,9 +57,9 @@
 <text x="550.5" y="291.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">width picked on the held-out rows.</text>
 <text x="34.0" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.3" fill="#1b1a17">CORRECT</text>
 <text x="105.3" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5f5a52">corrector_</text>
-<rect x="34.0" y="356.0" width="486.5" height="34.0" rx="3" fill="#147a72" stroke="#147a72" stroke-width="1"/>
-<path d="M37.0 357.0H517.5" stroke="#ffffff" stroke-opacity="0.45" stroke-width="1.4"/>
-<text x="277.2" y="377.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="500" fill="#ffffff">corrector network, on the held-out pool's scale</text>
+<rect x="34.0" y="356.0" width="486.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
+<path d="M37.0 357.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
+<text x="277.2" y="377.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">corrector network, on the held-out pool's scale</text>
 <text x="550.5" y="345.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One more network learns where each label falls in</text>
 <text x="550.5" y="361.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">its own held-out pool, and reshapes every row's</text>
 <text x="550.5" y="377.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pool to match.</text>
@@ -68,9 +68,9 @@
 <rect x="34.0" y="442.0" width="486.5" height="34.0" rx="3" fill="#f3efe8" stroke="#e9e4dc" stroke-width="1"/>
 <path d="M37.0 443.0H517.5" stroke="#ffffff" stroke-opacity="0.90" stroke-width="1.4"/>
 <text x="277.2" y="463.2" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="400" fill="#5f5a52">g × corrected + (1 − g) × smoothed</text>
-<text x="550.5" y="431.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One weight g, picked on held-out rows. Where the</text>
-<text x="550.5" y="447.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">corrector did not help, g is 0 and the prediction</text>
-<text x="550.5" y="463.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">is the smoothed pool.</text>
+<text x="550.5" y="431.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">One weight g, picked by the CRPS of the fifth</text>
+<text x="550.5" y="447.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pair's held-out rows. At g = 0 the prediction</text>
+<text x="550.5" y="463.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">is the smoothed pool alone.</text>
 <path d="M34.0 494.0H902.0" stroke="#e9e4dc" stroke-width="1"/>
 <text x="34.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">model</text>
 <text x="72.0" y="526.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52"> = </text>
@@ -90,8 +90,9 @@
 <text x="148.0" y="592.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">                   # exact CDF</text>
 <text x="34.0" y="614.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#1b1a17">dist.quantile</text>
 <text x="132.8" y="614.0" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#5f5a52">([0.1, 0.5, 0.9])</text>
-<text x="550.5" y="526.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Teal marks what this model adds: the label readers,</text>
-<text x="550.5" y="543.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">and a corrector that works on the scale of the</text>
-<text x="550.5" y="560.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">pairs' held-out pool. Each choice after the members</text>
-<text x="550.5" y="577.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">is made on rows the pairs did not train on.</text>
+<text x="550.5" y="526.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">Teal marks the label readers, the part this</text>
+<text x="550.5" y="543.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">model adds. The rest builds on cross-fitting,</text>
+<text x="550.5" y="560.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">linear pools, kernel dressing and condensité's</text>
+<text x="550.5" y="577.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">PIT boosting. Each choice after the members is</text>
+<text x="550.5" y="594.0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5f5a52">made on rows the pairs held out.</text>
 </svg>

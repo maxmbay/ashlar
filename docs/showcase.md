@@ -53,6 +53,10 @@ In the first table, Ashlar is `ASRRegressor()` or `ASRClassifier()` with no argu
 
 </details>
 
+![Sixteen held-out flights from the airline delay table, one ridge each: the predicted distribution of departure delay from ASRRegressor(task="mixture") for that flight, skewed to the right, some with two peaks, each with a narrow spike at zero for leaving exactly on time. Under each ridge, the 80% interval from LightGBMLSS's mixture of three normals for the same flight, and a dot for the actual delay. At the right, both models' predicted probability of a delay of more than an hour.](images/readme/hero-flights.png)
+
+Each curve is one test flight's predicted departure delay from `ASRRegressor(task="mixture")`, trained on 1.6 million US flights from 1987 to 2008 with schedule information only, no weather; under it are LightGBMLSS's 80% interval and the actual delay. On 100,000 test flights the two models have almost the same CRPS, in minutes: 9.17 for Ashlar and 9.14 for LightGBMLSS, which is also slightly ahead on the benchmark's other two splits. Calibrated to cover 80% of flights, Ashlar's intervals are 7% wider on average, and they cover between 79% and 81% of the flights in each fifth of predicted risk of an hour's delay, against 77% to 86% for LightGBMLSS. [docs/benchmarks.md](benchmarks.md#the-showcases-airline-figures) says how the figure was made.
+
 On five smaller tables, the default model matches the trees on two (Ames and abalone, within the variation across splits) and is worse than LightGBM on three. The `tabm_piecewise()` recipe closes the gap on California housing and diamonds, but not on adult. [docs/benchmarks.md](benchmarks.md#point-accuracy) has the results.
 
 ## Distribution heads

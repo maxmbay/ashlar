@@ -1,30 +1,42 @@
 """Dressing: several cross-fitted networks and label readers, pooled, smoothed and corrected into one distribution.
 
 A network with a density head fits a smooth map from the columns to the target. A label reader
-(``ashlar.label_reader``) predicts a row from the training labels themselves. Neither wins on every table, and a
-reader predicts point masses, so a pool of the two has no density. ``ASRDressed`` puts them together in one fit and
-still returns one distribution with an exact CDF and an exact log density:
+(``ashlar.label_reader``) predicts a row from the labels of the training rows it reads. Neither wins on every table,
+and a reader predicts point masses, so a pool of the two has no density. ``ASRDressed`` puts them together in one
+fit and still returns one distribution with an exact CDF and an exact log density:
 
 1. Members. The training rows are cut into ``members`` parts. Member ``k`` holds out part ``k`` and fits a network
-   and a reader on the other parts, both stopped on part ``k``. A target with at most ``few_values`` distinct
-   values gets an ordinal network over those values; any other target a ``flow`` network stopped on CRPS.
+   and a reader on the other parts, both stopped on part ``k``. The reader trains on at most ``reader_rows`` of
+   those rows and is stopped on at most as many of part ``k``. A target with at most ``few_values`` distinct values
+   gets an ordinal network over those values, stopped on log loss, and a held-out row whose value the other parts
+   lack moves into training. Any other target gets a ``flow`` network stopped on CRPS.
 2. Pool weight. One weight ``w`` for the network against the reader, from a grid of 21, by the CRPS of every
-   training row under the member that held it out.
-3. Smoothing. Each reader's points become normals, with Silverman's bandwidth on the row's points times a factor
-   from a grid of five, plus 1% of a wide normal at the training labels' mean and spread. One factor is picked by
-   the held-out log score and one by the held-out CRPS. A member's pool, ``w`` times its network plus ``1 - w``
-   times its smoothed reader, now has a density.
-4. Corrector. One more network learns where a label falls inside its own row's pool: it is fitted to the label's
-   normal score under the pool of the member that held the row out, on the held-out rows of every member but the
-   last, and stopped on the last member's. A member's corrected CDF at ``y`` is the corrector's CDF at the normal
-   score of ``y`` under that member's pool.
-5. Gate. One weight, from the same grid, for the corrected pools against the pools smoothed at the CRPS factor, by
-   the CRPS of the last member's held-out rows. A corrector that did not help on those rows gets weight 0.
+   held-out row under the member that held it out. The pool scored is the unsmoothed one, with the network read as
+   atoms at ``LEVELS``; a tie goes to the smaller weight.
+3. Smoothing. Each reader's points become normals, with Silverman's rule on the row's weighted points (Kish's
+   effective sample size ``1 / sum(p^2)`` as the count) times a factor from a grid of five. Each smoothed reader
+   gives 1% of its mass to a wide normal at the training labels' mean and spread, so ``0.01 * (1 - w)`` of the
+   pool. One factor is picked by the log score of every held-out row and one by the CRPS of ``CRPS_ROWS`` held-out
+   rows per member. A member's pool, ``w`` times its network plus ``1 - w`` times its smoothed reader, now has a
+   density.
+4. Corrector. One more network, reading the columns only, learns where a label falls inside its own row's pool. It
+   is fitted by likelihood to the label's normal score under the pool, smoothed at the log-score factor, of the
+   member that held the row out, on the held-out rows of every member but the last. It keeps the epoch with the
+   lowest CRPS, in ``y``, of the corrected pools on the last member's held-out rows. A member's corrected CDF at
+   ``y`` is the corrector's CDF at the normal score of ``y`` under that member's pool.
+5. Gate. One weight, from the same grid, for the corrected pools against the pools smoothed at the CRPS factor:
+   the one with the lowest CRPS on the last member's held-out rows, the rows that stopped the corrector, with a tie
+   going to the smaller weight. The CRPS of a mixture can be below that of both its parts, so the gate can be
+   positive where the corrected pools alone score worse.
 
 The prediction is the gate times the equal mixture of the members' corrected pools, plus the rest times the equal
-mixture of their smoothed pools. Bagging members is standard, and correcting a prediction on its own probability
-scale is the idea behind probability calibration and behind composing models on that scale; the reader, and the
-held-out bagged pool as the scale, are what this module adds.
+mixture of their smoothed pools. At prediction each reader reads its held-out rows as well as its training rows;
+every number above was picked with readers that read their training rows only.
+
+The members are cross-fitted, the pool is a linear pool whose weight is picked on held-out rows (stacking), the
+smoothing is kernel dressing, and the corrector and gate follow the PIT boosting step of the condensite package,
+here on normal scores, with one network and a weight picked by CRPS. What this module adds is the label reader and
+its pairing with a network in the pool. ``docs/dressed.md`` has the references.
 
 The fit is eleven networks' worth of training (five networks, five readers, one corrector), so it is the slowest
 model in Ashlar. One target column, exactly observed; no sample weights.
@@ -126,8 +138,9 @@ def _normal_score(F, S):
 
 def _floor_share(y, centre, spread, held_out_crps, cost):
     """The wide normal's share of a smoothed reader: ``FLOOR``, or less where that would cost more than ``cost``
-    times the raw pool's held-out CRPS. A share ``e`` beside a sharp pool costs ``e^2`` times the wide normal's
-    own CRPS on the labels."""
+    times the raw pool's held-out CRPS. A share ``e`` mixed into a pool that is a point mass at the label costs
+    ``e^2`` times the wide normal's own CRPS there. The share of the pool is ``e * (1 - w)``; the rule leaves that
+    factor out, so it errs low."""
     if cost is None:
         return FLOOR
     score = (y - centre) / spread
@@ -137,7 +150,8 @@ def _floor_share(y, centre, spread, held_out_crps, cost):
 
 class _Smoothed:
     """Rows' reader distributions as densities: ``sum_j p_j N(a_j, h^2)`` at weight ``1 - floor`` plus ``floor`` of
-    ``N(centre, spread^2)``. ``h`` is Silverman's rule on the row's weighted atoms, times ``factor``."""
+    ``N(centre, spread^2)``. ``h`` is Silverman's rule on the row's weighted atoms, with Kish's effective sample size
+    ``1 / sum_j p_j^2`` as the count, times ``factor``."""
 
     def __init__(self, atoms, masses, centre, spread, factor, floor=FLOOR):
         atoms, masses = np.asarray(atoms, np.float64), np.asarray(masses, np.float64)
@@ -421,7 +435,9 @@ class DressedDistribution:
 
     def crps(self, value):
         """Each row's CRPS at ``value`` (rows,): exact for a target with few values, otherwise that of the
-        quantiles at 203 levels, which is how a quantile benchmark reads a density."""
+        quantiles at 203 levels read as atoms, each carrying the mass from the level below (the last also the mass
+        above it). ScoringBench reads the same quantiles as a CDF linear between them, with the outer 0.1% on each
+        side at the outermost quantiles; for a normal the two readings differ by under 0.01%."""
         value = np.asarray(value, dtype=np.float64).reshape(-1)
         if self.values is not None:
             proba = self.probabilities()
@@ -517,7 +533,8 @@ class ASRDressed(RegressorMixin, BaseEstimator):
         How many cross-fitted members (default 5). Each holds out one part of the training rows.
     few_values:
         A target with at most this many distinct values (default 20) is treated as a set of values: its networks
-        are ordinal, and the prediction is a probability for each value. ``0`` always fits a density.
+        are ordinal and stopped on held-out log loss, and the prediction is a probability for each value. ``0``
+        always fits a density.
     network:
         Settings for ``ashlar.tabm_piecewise``, applied to every member's network and to the corrector, on top of
         ``max_epochs=1000`` and ``cooldown_epochs=3``. ``task``, ``random_state`` and ``early_stopping_metric``
@@ -525,15 +542,18 @@ class ASRDressed(RegressorMixin, BaseEstimator):
     reader:
         Settings for each member's ``ashlar.label_reader.LabelReader``, such as ``max_steps``.
     reader_rows:
-        The most training rows a member's reader reads at once (default 4096). A larger part is sampled down to
-        this many, because a reader's cost grows with the square of its rows. Parts above this size are untested.
+        The most training rows a member's reader trains on (default 4096), and separately the most held-out rows it
+        is stopped on. A larger set is sampled down to this many, because a reader's cost grows with the square of
+        its rows. At prediction a reader reads both sets, so up to twice this many rows. Parts above this size are
+        untested.
     floor_cost:
-        ``None`` (default) gives every smoothed reader 1% of the wide normal. A share, such as ``0.01``, lowers the
-        wide normal's weight until its cost in CRPS is at most that share of the raw pool's held-out CRPS. The
-        wide normal costs about 0.00006 of the labels' spread, which is nothing on most tables and several times
-        the whole CRPS on a target the columns determine almost exactly.
+        ``None`` (default) gives every smoothed reader 1% of the wide normal, ``0.01 * (1 - w)`` of the pool. A
+        share, such as ``0.01``, lowers the wide normal's weight until its cost in CRPS is at most that share of the
+        raw pool's held-out CRPS, the cost taken as for a pool that is a point mass at the label (``_floor_share``).
+        For normally spread labels that cost is at most about 0.00006 of their spread: nothing on most tables, and
+        more than the whole CRPS where the pool's CRPS is below that.
     random_state:
-        Seeds the split, the members and the corrector.
+        Seeds the split, the members, the rows sampled for the readers and for the CRPS factor, and the corrector.
 
     Fitted attributes: ``values_`` (the target's values, or ``None`` for a density), ``pool_weight_`` (the
     network's weight against the reader), ``floor_`` (the wide normal's share), ``bandwidth_factor_`` and ``fallback_factor_`` (the smoothing factors
@@ -681,7 +701,8 @@ class ASRDressed(RegressorMixin, BaseEstimator):
         return [index[start : start + size] for start in range(0, len(index), size)]
 
     def _pick_factors(self, X, x, y):
-        """The bandwidth factor by held-out log score, and the fallback's by held-out CRPS."""
+        """The bandwidth factor by the log score of every held-out row, and the fallback's by the CRPS of
+        ``CRPS_ROWS`` held-out rows per member, read at ``LEVELS``."""
         seed = int(self.random_state)
         scores, crps = np.zeros(len(FACTORS)), np.zeros(len(FACTORS))
         searched = FACTORS if self.pool_weight_ < 1.0 else FACTORS[:1]  # any factor does when the reader has no weight
@@ -763,7 +784,9 @@ class ASRDressed(RegressorMixin, BaseEstimator):
         corrector.stop_on = None
         self.corrector_ = corrector
         # The gate: the corrected pool against the pool at the CRPS factor, on the last member's held-out rows
-        # under that member's own pool; the first lowest score is the smaller gate.
+        # under that member's own pool, the rows that stopped the corrector; the first lowest score is the smaller
+        # gate. A mixture's CRPS can be below that of both its parts, so the gate can be positive where the
+        # corrected pool alone scores worse.
         corrected, at = [], 0
         for (rows, pool), base in zip(stop["pools"], stop["base"] or [None] * len(stop["pools"]), strict=True):
             if values is None:
@@ -792,6 +815,7 @@ class ASRDressed(RegressorMixin, BaseEstimator):
 
     def _piece(self, X, x):
         count, values, gate = len(self.members_), self.values_, self.gate_
+        # Each reader reads its held-out rows as well as its training rows here ("all"); fit's searches read "train".
         parts = [self._parts(k, X, x, "all") for k in range(count)]
         same = self.fallback_factor_ == self.bandwidth_factor_
         pools = [self._smooth(network, atoms, self.bandwidth_factor_) for network, atoms in parts] if gate > 0.0 or same else None
