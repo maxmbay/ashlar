@@ -1,6 +1,6 @@
 """A dressed model against one network, on dev tables it was not designed on.
 
-``compute`` copies the scores of the 46 held-out fits (folds 1 and 2 of 23 tables) from the dev-set results
+``compute`` copies the scores of the 46 fits on folds 1 and 2 of 23 tables from the dev-set results
 (``ASHLAR_DRESSED_RESULTS``, a JSON-lines file with one record per table and fold); ``draw`` plots, per table, the
 dressed model's CRPS and the undressed pool's, each relative to one network alone. docs/dressed.md has the test
 and the fit times (``seconds``, the whole fit of one dressed model).
@@ -37,7 +37,7 @@ def draw():
     tables = sorted({r["table"] for r in rows}, key=lambda t: np.mean([np.log(r["dressed"] / r["network"]) for r in rows if r["table"] == t]))
     ratio = np.asarray([r["dressed"] / r["network"] for r in rows])
     better, worse = int((ratio < 0.99).sum()), int((ratio > 1.01).sum())
-    fig = k.card("A dressed model against one network alone, on 46 held-out fits",
+    fig = k.card("A dressed model against one network alone, on 46 fits from folds 1 and 2",
                  "CRPS of ashlar.dressed() divided by the CRPS of one of its own networks, on folds 1 and 2 of 23 "
                  "regression tables (at most 2,400 training rows). Left of the line the dressed model is better.",
                  height=10.9, footer=4)
@@ -69,7 +69,7 @@ def draw():
     k.axis_names(ax, x="CRPS relative to one network alone (log scale)")
     legend = k.legend_row(fig, [("dot", k.TEAL, "the dressed model"), ("dot", k.SLATE, "the same five members pooled, not dressed (no density)")], line=3)
     legend.legend_handles[1].set(markerfacecolor=k.CARD, markeredgecolor=k.SLATE, markeredgewidth=1.6)  # the ring drawn above
-    k.footnote(fig, f"Each table has two dots of each kind, fold 1 above fold 2. The design was fixed on fold 0 before these folds were read. "
+    k.footnote(fig, f"Each table has two dots of each kind, fold 1 above fold 2. The design was fixed on fold 0 before these results were read. "
                     f"The dressed model is better than one network by more than 1% on {better} of the {len(rows)} fits and worse by more than 1% on "
                     f"{worse} (by 1.4% at most). On wave_energy, a linear target, the undressed pool is sharper still: see docs/dressed.md, Limits.", line=0)
     k.save(fig, "dressed")
