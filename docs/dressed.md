@@ -128,3 +128,43 @@ The numbers above come from the research code the design was worked out in. `ASR
 On its own fits the library's dressed model was at 0.913 of its undressed pool, better by more than 1% on 13 tables and worse on 1, and its mean log score was above the five averaged networks' on 22 of the 23, by 0.69 nats on average.
 
 Three earlier designs failed on fold 0 and were dropped: a network fitted on top of the reader's prediction alone (worse than the pool on 15 of 23 tables), smoothing with no corrector (2% worse than the undressed pool, worse on 7), and the corrector with no gate (7% better on average but worse on the four smallest tables, where it stops within five epochs).
+
+## On ScoringBench
+
+[ScoringBench](https://github.com/jonaslandsgesell/ScoringBench) ranks probabilistic regression models by CRPS on 99 tables from OpenML. Each table is split five ways, with at most 2,400 training and 600 test rows, the same caps as the tests above, and none of the 23 tables above is among the 99. We ran `ashlar.dressed()` with its default settings on ScoringBench's own code, tables, and folds, and ranked it with the 20 published models that are trained from scratch and not tuned, listed here by their ScoringBench names.
+
+A mean rank is a model's rank on each table, averaged over the 99 tables; 1 is best.
+
+| Model | Mean rank |
+|---|---|
+| Dressed model (our run) | 1.33 |
+| `condensite_pitbst_v0_1_1` | 4.73 |
+| `pytabkit_realmlp_td` | 5.80 |
+| `tabm_d` | 5.89 |
+| `catboost_quantile` | 7.07 |
+| `xgb_vector` | 9.62 |
+| `ngboost_gaussian` | 10.07 |
+| `flexcode_randomforest` | 10.71 |
+| `crepes_catboost_difficulty` | 10.83 |
+| `forest_diffusion_flow` | 11.53 |
+| `cde_MDN` | 11.54 |
+| `xgblss_Gaussian` | 12.24 |
+| `xgb_vector_quantile` | 12.78 |
+| `crepes_xgb_difficulty` | 12.90 |
+| `cde_NF` | 12.95 |
+| `flexcode_xgboost` | 13.23 |
+| `crepes_catboost_difficulty_mondrian` | 13.65 |
+| `nflows_rqs` | 15.11 |
+| `crepes_xgb_difficulty_mondrian` | 15.58 |
+| `surjectors_maf` | 16.66 |
+| `pymc_bart` | 16.81 |
+
+ScoringBench tests the ranks with a Friedman test and then a Nemenyi test. With 21 models on 99 tables, two mean ranks that differ by more than 3.15 differ at the 5% level. The dressed model is ahead of each of the other 20 by more than that.
+
+It had the lowest CRPS of the 21 on 82 of the 99 tables. It was second on 10: 1201_BNG_breastTumor, 344_mv, 564_fried, abalone, Brazilian_houses, kin8nm, puma32H, sensory, Student_Performance, and visualizing_soil. It was third on Another-Dataset-on-used-Fiat-500-(1538-rows), MIP-2016-regression, and QSAR-TID-10980, fourth on Goodreads-Computer-Books and PRODUCTIVITY, sixth on 1000-Cameras-Dataset, and seventh on nyc-taxi-green-dec-2016.
+
+Against the same five members pooled without dressing, from the same fits, its CRPS was lower by more than 1% on 20 tables and within 1% on the other 79. The geometric mean ratio was 0.987.
+
+The rank is provisional. It comes from our run, ranked against ScoringBench's published results of November 7, 2026. ScoringBench's maintainer reruns a model before adding it to the leaderboard, and the dressed model is not there yet. ScoringBench has since changed some of its scoring code; rescoring the undressed pool's saved predictions with the new code gave the same CRPS on each of the 480 folds rescored. It has also dropped one table, Brazilian_houses, for target leakage. On the other 98, the dressed model's mean rank is 1.33 and condensité's 4.69, and the margin at the 5% level is 3.16.
+
+ScoringBench also lists tuned models and models pretrained on other data. They are not part of this comparison.
