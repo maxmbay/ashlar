@@ -2,6 +2,23 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Changed
+
+- The README has about a third of the words it had. The table of calls for people coming from another library is now in [docs/estimator.md](docs/estimator.md#coming-from-another-library), the table of what the general estimator covers and the note on how a model is specified are in [docs/models.md](docs/models.md), the install notes are in [docs/README.md](docs/README.md#install), and the airline figures are in [docs/showcase.md](docs/showcase.md) and docs/estimator.md.
+- [docs/dressed.md](docs/dressed.md#on-scoringbench) has a table of what each part adds on ScoringBench, from one network to the dressed model. It says which parts were worked out on ScoringBench and which on the 23 development tables, that 12 of the 99 tables take the few-values path, and that a fit took a median of 32 minutes per fold.
+
+### Fixed
+
+- The dressed model's guide ([docs/dressed.md](docs/dressed.md)), docstrings and diagram now say what the code does and what the test records show. No code changed.
+  - A label reader's points are a row's trend plus the context rows' leave-one-out residuals, so a draw is not limited to training labels. At prediction each reader also reads the part that stopped it, up to twice `reader_rows` rows.
+  - The pool weight is picked on the unsmoothed pool, and the CRPS factor on at most 120 held-out rows per member. The bandwidth is Silverman's rule with Kish's effective sample size. The corrector reads the columns only and is stopped on the CRPS of the corrected pools. The gate is the grid weight with the lowest held-out CRPS and can be positive where the corrected pools alone score worse.
+  - A target with at most 20 values gets ordinal networks stopped on held-out log loss, and a held-out row whose value the other parts lack moves into training.
+  - The wide normal is `0.01 * (1 - w)` of the pool, and its cost exceeds the whole CRPS only where that CRPS is below about 0.00006 of the labels' spread; the guide said a thousandth. `DressedDistribution.crps` reads 203 quantiles as point masses, where ScoringBench reads them as a CDF that is linear between them.
+  - The members are cross-fitted, not bagged. The guide credits what the recipe builds on, with links: cross-fitting, the linear pool and stacking, kernel dressing, and condensité's PIT boosting, which the corrector and the gate follow. What the model adds is the label reader and its pairing with a network, and the diagram marks only the readers.
+  - In the tests: folds 1 and 2 of the development tables had been used for earlier models before the dressed model existed; the medians are 0.910, 0.914, 0.955 and 0.974, and 0.16 nats for the log score (the guide gave the upper middle values); the corrector without a gate was worse on four tables of 380 to 852 training rows, not the four smallest; and the pass line also required the dressed model to be at least 1% below the smoothed pools.
+
 ## 0.0.7 — 2026-11-15
 
 ### Added
