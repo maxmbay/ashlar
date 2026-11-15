@@ -2,7 +2,7 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
-## Unreleased
+## 0.0.7 — 2026-11-15
 
 ### Added
 
