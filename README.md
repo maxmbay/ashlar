@@ -48,7 +48,7 @@ Each row is one Ashlar model, ranked alone among the same 20 untuned models.
 | Five cross-fitted pairs pooled | 1.38 | 3.32 | 0.978 |
 | The dressed model | 1.33 | 3.39 | 0.987 |
 
-Lead is the distance to the next model, condensité in every row; above 3.15 it is significant at the 5% level (Nemenyi test). The label reader is the largest step: it lowers a network's CRPS, the error of its predicted distributions, by 9.7% on the geometric mean. The first two rows are earlier runs of research code, so the table is not a controlled ablation; [the guide](docs/dressed.md#on-scoringbench) has all 21 mean ranks.
+Lead is the distance to the next model, condensité in every row; above 3.15 it is significant at the 5% level (Nemenyi test). The label reader is the largest step: it lowers a network's CRPS, the error of its predicted distributions, by 9.7% on the geometric mean. The first two rows come from the same fits, and so do the last two, so each of those steps changes one part; between them the code moved from research code to the library. [The guide](docs/dressed.md#on-scoringbench) has all 21 mean ranks.
 
 ## The general estimator
 
