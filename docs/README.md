@@ -41,7 +41,7 @@ No code changes are needed, because JAX uses the GPU when one is available. For 
 
 ## Evidence
 
-- [showcase.md](showcase.md): the large-table benchmarks with their figures, and the examples from the README's gallery, with code, results, and the cases where another tool does better.
+- [showcase.md](showcase.md): what one model can express, from a first example that changes one choice per line, with a backbone of your own, to the nine examples of the README's gallery, each with its code, its figure, and its results.
 - [benchmarks.md](benchmarks.md): every benchmark result, per table and metric, with the baselines, how each was run, and the cases where the baselines do better, including [a comparison with other neural packages](benchmarks.md#beside-other-neural-packages).
 - [`examples/`](../examples/): runnable scripts, including the benchmarks, and [`examples/readme/`](../examples/readme/), which redraws the figures in the README and these pages from saved results.
 - [CHANGELOG.md](../CHANGELOG.md): what changed in each release.

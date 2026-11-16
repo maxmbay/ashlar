@@ -83,6 +83,29 @@ model.calibrate(X_holdout, y_holdout)         # split-conformal, on rows the mod
 model.predict_interval(X_new, coverage=0.8)   # (rows, 2): holds 80% of new rows like the held-out ones
 ```
 
+## Where to start
+
+Find your data or problem in the first column and start from the call beside it; `model` is a regressor fitted with a distribution head, and every name imports from `ashlar` (`horizon_frame` from `ashlar.horizon`).
+
+| Your data or problem | Start with | Guide |
+|---|---|---|
+| A few hundred to a few thousand training rows, one numeric target with exact labels, at most thousands of rows to predict, and a predicted distribution worth a slow fit | `ashlar.dressed().fit(X, y)`. Slow to fit and to predict; no test has more than 2,400 training rows. | [dressed](docs/dressed.md) |
+| A distribution per row with more rows than that, to train on or to predict: a skewed target, several peaks, a cap, fixed amounts | `ASRRegressor(task="mixture").fit(X, y)`. It has trained on two million rows in 2 to 5 minutes on 12 cores at its default budget ([benchmarks](docs/benchmarks.md#large-tables)). | [heads](docs/heads.md) |
+| A number or a class per row, as from XGBoost or LightGBM | `ASRRegressor().fit(X, y)` or `ASRClassifier().fit(X, y)`; `tabm_piecewise().fit(X, y)` is a stronger, slower network | [tabular](docs/tabular.md) |
+| Counts | `ASRRegressor(task="negative_binomial").fit(X, y)` | [heads](docs/heads.md) |
+| Often exactly zero, otherwise a positive amount | `ASRRegressor(task="hurdle").fit(X, y)` | [heads](docs/heads.md) |
+| Ordered classes | `ASROrdinalClassifier().fit(X, y)` | [tabular](docs/tabular.md#tasks) |
+| Labels not seen exactly: survival times, sold-out days, ranges, rounded values, totals over several rows | `ASRRegressor(task="mixture").fit(X, observed.censored(y, sold_out))`, or a label from `observed.survival`, `interval`, `rounded`, or `total` | [observed](docs/observed.md) |
+| Several targets predicted jointly | `ASRRegressor(task="multivariate_gaussian").fit(X, Y)`, or `task="chain"` for targets of different kinds | [distributions](docs/distributions.md#several-targets-at-once) |
+| Many groups, such as stores or patients, with few rows for most | `ASRRegressor(task="gaussian", random_effects={"store": "intercept"}).fit(X, y)` | [effects](docs/effects.md) |
+| Terms you can plot and read, one per column | `ASRRegressor(task="gaussian", backbone="additive").fit(X, y)`, then `model.shape_functions(X)` | [additive](docs/additive.md) |
+| Intervals with a coverage guarantee | `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` | [heads](docs/heads.md#calibrated-intervals) |
+| A decision under a cost, such as how much to order | `model.predict_order(X_new, under=9, over=1)` | [distributions](docs/distributions.md#deciding-from-the-distribution) |
+| Many time series with covariates (work in progress) | `horizon_frame(sales, target="units", lookback=28, horizon=12, series="store", time="day")`, then a joint head on `frame.X` and `frame.Y` | [forecast](docs/forecast.md#many-series-covariates-and-paths) |
+| Your own backbone or head | `ASRRegressor(backbone=Trunk).fit(X, y)` with your Equinox class `Trunk`; `task="custom"` for a head | [models](docs/models.md#backbone), [showcase](docs/showcase.md#one-table-one-choice-at-a-time) |
+
+[docs/models.md](docs/models.md#what-the-general-estimator-covers) has the fuller table of what the general estimator covers.
+
 ## Properties
 
 - `ASRRegressor` and `ASRClassifier` drop in where `XGBRegressor` and `LGBMClassifier` are used, on pandas or Polars frames with string columns and missing values as they are ([the calls that change](docs/estimator.md#coming-from-another-library)).
@@ -93,7 +116,7 @@ model.predict_interval(X_new, coverage=0.8)   # (rows, 2): holds 80% of new rows
 
 ## How the dressed model works
 
-`ashlar.dressed()` is for one numeric target with exact labels, when the predicted distribution is worth a slow fit: a median of 32 minutes per fold on ScoringBench, with six fits sharing a 12-core laptop CPU.
+`ashlar.dressed()` is for one numeric target with exact labels, when the predicted distribution is worth a slow fit: a median of 32 minutes per fold on ScoringBench, with six fits sharing a 12-core laptop CPU. It suits a few hundred to a few thousand training rows and at most thousands of rows to predict, because reading a row's full distribution takes tenths of a second on a laptop CPU.
 
 <p align="center">
   <picture>
@@ -117,7 +140,7 @@ No test has more than 2,400 training rows. A target that the columns determine a
   </picture>
 </p>
 
-Each tile opens an example in [docs/showcase.md](docs/showcase.md), with the code and the cases where another tool does better. [docs/models.md](docs/models.md#what-the-general-estimator-covers) has the full list.
+Each tile opens an example in [docs/showcase.md](docs/showcase.md) with its code, and [docs/benchmarks.md](docs/benchmarks.md) has every result. [docs/models.md](docs/models.md#what-the-general-estimator-covers) has the full list.
 
 <table>
   <tr>
