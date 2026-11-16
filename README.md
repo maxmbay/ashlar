@@ -137,12 +137,6 @@ Each tile opens an example in [docs/showcase.md](docs/showcase.md), with the cod
   </tr>
 </table>
 
-## Benchmarks on eight large tables
-
-![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
-
-With no tuning on either side, Ashlar is within 0.3% of the best of LightGBM, XGBoost, and CatBoost on point predictions on three tables, better on two, and worse on three, by up to 11%. By CRPS against LightGBMLSS's mixture, its `mixture` head is better on two of the four regression tables and worse on two, by up to 27%. LightGBM trains in 4 seconds to 2 minutes on six threads, and Ashlar in 2 to 5 minutes on 12 cores ([every number](docs/benchmarks.md)).
-
 ## Documentation
 
 [docs/README.md](docs/README.md) is the index, and [CHANGELOG.md](CHANGELOG.md) lists each release.
