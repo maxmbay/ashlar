@@ -83,6 +83,29 @@ model.calibrate(X_holdout, y_holdout)         # split-conformal, on rows the mod
 model.predict_interval(X_new, coverage=0.8)   # (rows, 2): holds 80% of new rows like the held-out ones
 ```
 
+## Where to start
+
+Find your data or problem in the first column and start from the call beside it; `model` is a regressor fitted with a distribution head, and every name imports from `ashlar` (`horizon_frame` from `ashlar.horizon`).
+
+| Your data or problem | Start with | Guide |
+|---|---|---|
+| A few hundred to a few thousand training rows, one numeric target with exact labels, at most thousands of rows to predict, and a predicted distribution worth a slow fit | `ashlar.dressed().fit(X, y)`. Slow to fit and to predict; no test has more than 2,400 training rows. | [dressed](docs/dressed.md) |
+| A distribution per row with more rows than that, to train on or to predict: a skewed target, several peaks, a cap, fixed amounts | `ASRRegressor(task="mixture").fit(X, y)`. It has trained on two million rows in 2 to 5 minutes on 12 cores at its default budget ([benchmarks](docs/benchmarks.md#large-tables)). | [heads](docs/heads.md) |
+| A number or a class per row, as from XGBoost or LightGBM | `ASRRegressor().fit(X, y)` or `ASRClassifier().fit(X, y)`; `tabm_piecewise().fit(X, y)` is a stronger, slower network | [tabular](docs/tabular.md) |
+| Counts | `ASRRegressor(task="negative_binomial").fit(X, y)` | [heads](docs/heads.md) |
+| Often exactly zero, otherwise a positive amount | `ASRRegressor(task="hurdle").fit(X, y)` | [heads](docs/heads.md) |
+| Ordered classes | `ASROrdinalClassifier().fit(X, y)` | [tabular](docs/tabular.md#tasks) |
+| Labels not seen exactly: survival times, sold-out days, ranges, rounded values, totals over several rows | `ASRRegressor(task="mixture").fit(X, observed.censored(y, sold_out))`, or a label from `observed.survival`, `interval`, `rounded`, or `total` | [observed](docs/observed.md) |
+| Several targets predicted jointly | `ASRRegressor(task="multivariate_gaussian").fit(X, Y)`, or `task="chain"` for targets of different kinds | [distributions](docs/distributions.md#several-targets-at-once) |
+| Many groups, such as stores or patients, with few rows for most | `ASRRegressor(task="gaussian", random_effects={"store": "intercept"}).fit(X, y)` | [effects](docs/effects.md) |
+| Terms you can plot and read, one per column | `ASRRegressor(task="gaussian", backbone="additive").fit(X, y)`, then `model.shape_functions(X)` | [additive](docs/additive.md) |
+| Intervals with a coverage guarantee | `model.calibrate(X_holdout, y_holdout)`, then `model.predict_interval(X_new, coverage=0.8)` | [heads](docs/heads.md#calibrated-intervals) |
+| A decision under a cost, such as how much to order | `model.predict_order(X_new, under=9, over=1)` | [distributions](docs/distributions.md#deciding-from-the-distribution) |
+| Many time series with covariates (work in progress) | `horizon_frame(sales, target="units", lookback=28, horizon=12, series="store", time="day")`, then a joint head on `frame.X` and `frame.Y` | [forecast](docs/forecast.md#many-series-covariates-and-paths) |
+| Your own backbone or head | `ASRRegressor(backbone=Trunk).fit(X, y)` with your Equinox class `Trunk`; `task="custom"` for a head | [models](docs/models.md#backbone), [showcase](docs/showcase.md#one-table-one-choice-at-a-time) |
+
+[docs/models.md](docs/models.md#what-the-general-estimator-covers) has the fuller table of what the general estimator covers.
+
 ## Properties
 
 - `ASRRegressor` and `ASRClassifier` drop in where `XGBRegressor` and `LGBMClassifier` are used, on pandas or Polars frames with string columns and missing values as they are ([the calls that change](docs/estimator.md#coming-from-another-library)).
@@ -93,7 +116,7 @@ model.predict_interval(X_new, coverage=0.8)   # (rows, 2): holds 80% of new rows
 
 ## How the dressed model works
 
-`ashlar.dressed()` is for one numeric target with exact labels, when the predicted distribution is worth a slow fit: a median of 32 minutes per fold on ScoringBench, with six fits sharing a 12-core laptop CPU.
+`ashlar.dressed()` is for one numeric target with exact labels, when the predicted distribution is worth a slow fit: a median of 32 minutes per fold on ScoringBench, with six fits sharing a 12-core laptop CPU. It suits a few hundred to a few thousand training rows and at most thousands of rows to predict, because reading a row's full distribution takes tenths of a second on a laptop CPU.
 
 <p align="center">
   <picture>
@@ -117,7 +140,7 @@ No test has more than 2,400 training rows. A target that the columns determine a
   </picture>
 </p>
 
-Each tile opens an example in [docs/showcase.md](docs/showcase.md), with the code and the cases where another tool does better. [docs/models.md](docs/models.md#what-the-general-estimator-covers) has the full list.
+Each tile opens an example in [docs/showcase.md](docs/showcase.md) with its code, and [docs/benchmarks.md](docs/benchmarks.md) has every result. [docs/models.md](docs/models.md#what-the-general-estimator-covers) has the full list.
 
 <table>
   <tr>
@@ -136,12 +159,6 @@ Each tile opens an example in [docs/showcase.md](docs/showcase.md), with the cod
     <td align="center" valign="top" width="33%"><a href="docs/showcase.md#forecasting-work-in-progress"><img src="docs/images/readme/thumbs/forecast.png" alt="Forecasting (work in progress)"></a><br><a href="docs/showcase.md#forecasting-work-in-progress"><b>Forecasting (in progress)</b></a><br><sub>CRPS of 12-day sales totals: 2,623, DeepAR 3,881</sub></td>
   </tr>
 </table>
-
-## Benchmarks on eight large tables
-
-![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](docs/images/readme/scoreboard.png)
-
-With no tuning on either side, Ashlar is within 0.3% of the best of LightGBM, XGBoost, and CatBoost on point predictions on three tables, better on two, and worse on three, by up to 11%. By CRPS against LightGBMLSS's mixture, its `mixture` head is better on two of the four regression tables and worse on two, by up to 27%. LightGBM trains in 4 seconds to 2 minutes on six threads, and Ashlar in 2 to 5 minutes on 12 cores ([every number](docs/benchmarks.md)).
 
 ## Documentation
 

@@ -1,0 +1,24 @@
+table,source,openml_id,base_table,ratings
+auction_verification,OpenML-CTR23,44958,,
+cars,OpenML-CTR23,44994,,
+forest_fires,OpenML-CTR23,44962,,
+fps_benchmark,OpenML-CTR23,44992,,
+geographical_origin_of_music,OpenML-CTR23,44965,,
+grid_stability,OpenML-CTR23,44973,,
+health_insurance,OpenML-CTR23,44993,,
+naval_propulsion_plant,OpenML-CTR23,44969,,
+sarcos,OpenML-CTR23,44976,,
+solar_flare,OpenML-CTR23,44966,,
+video_transcoding,OpenML-CTR23,44974,,
+wave_energy,OpenML-CTR23,44975,,
+1595_poker,PMLB,,,
+519_vinnie,PMLB,,,
+557_analcatdata_apnea1,PMLB,,,
+560_bodyfat,PMLB,,,
+666_rmftsa_ladata,PMLB,,,
+690_visualizing_galaxy,PMLB,,,
+nikuradse_1,PMLB,,,
+557_analcatdata_apnea1_rated6,binned copy,,557_analcatdata_apnea1,6
+auction_verification_rated5,binned copy,,auction_verification,5
+cars_rated7,binned copy,,cars,7
+grid_stability_rated10,binned copy,,grid_stability,10

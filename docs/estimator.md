@@ -64,7 +64,7 @@ Every fit on a CPU compiles once per epoch and then trains, so a grid of many sm
 
 What is different:
 
-- A fit takes minutes on a CPU where a tree model often takes seconds: 2 to 5 minutes on [the eight large tables](showcase.md#benchmarks-on-eight-large-tables) on 12 cores, where LightGBM takes 4 seconds to 2 minutes.
+- A fit takes minutes on a CPU where a tree model often takes seconds: 2 to 5 minutes on [the eight large tables](benchmarks.md#large-tables) on 12 cores, where LightGBM takes 4 seconds to 2 minutes.
 - Early stopping is built in. By default 20% of the rows are held out to pick the epoch (`validation_size`), and `fit(X, y, validation=(X_val, y_val))` uses rows you choose. There is no `eval_set` or `early_stopping_rounds`.
 - The settings have a network's names: `learning_rate`, `weight_decay`, `batch_size`, `max_epochs`, and `patience`. `fit(X, y, search=True)` runs a small grid. [docs/tabular.md](tabular.md#defaults) lists every default.
 - There is no `feature_importances_`. For a distribution head, `model.explain(X_new, "quantile", level=0.9).importance()` attributes a quantile, an interval's width, or a tail probability to the features.

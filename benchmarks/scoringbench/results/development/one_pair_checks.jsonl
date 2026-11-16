@@ -1,0 +1,69 @@
+{"table": "560_bodyfat", "label_reader": 0.9998868777532184, "one_pair_pooled": 0.9999943547059622, "check": "rewrite_against_prototype"}
+{"table": "519_vinnie", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "forest_fires", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "cars", "label_reader": 0.9917417248163298, "one_pair_pooled": 0.9940380157245744, "check": "rewrite_against_prototype"}
+{"table": "geographical_origin_of_music", "label_reader": 1.0001532274005835, "one_pair_pooled": 1.000018028964226, "check": "rewrite_against_prototype"}
+{"table": "solar_flare", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "auction_verification", "label_reader": 0.9284630967796779, "one_pair_pooled": 1.0262060154496129, "check": "rewrite_against_prototype"}
+{"table": "grid_stability", "label_reader": 0.9895709844838063, "one_pair_pooled": 0.9976371804134876, "check": "rewrite_against_prototype"}
+{"table": "naval_propulsion_plant", "label_reader": 0.2338195639091758, "one_pair_pooled": 0.2338195639091758, "check": "rewrite_against_prototype"}
+{"table": "health_insurance", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "fps_benchmark", "label_reader": 0.9139994900234177, "one_pair_pooled": 0.9873240845696281, "check": "rewrite_against_prototype"}
+{"table": "sarcos", "label_reader": 1.007584696982044, "one_pair_pooled": 1.0080172047434368, "check": "rewrite_against_prototype"}
+{"table": "video_transcoding", "label_reader": 0.986985007789976, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "wave_energy", "label_reader": 0.9906501972466527, "one_pair_pooled": 0.9906501972466527, "check": "rewrite_against_prototype"}
+{"table": "690_visualizing_galaxy", "label_reader": 0.9977554761274994, "one_pair_pooled": 1.004484002935156, "check": "rewrite_against_prototype"}
+{"table": "nikuradse_1", "label_reader": 0.9904790114179534, "one_pair_pooled": 0.9947647048607178, "check": "rewrite_against_prototype"}
+{"table": "557_analcatdata_apnea1", "label_reader": 0.9999995590604845, "one_pair_pooled": 0.9999995590604845, "check": "rewrite_against_prototype"}
+{"table": "666_rmftsa_ladata", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "1595_poker", "label_reader": 1.0, "one_pair_pooled": 1.0, "check": "rewrite_against_prototype"}
+{"table": "cars_rated7", "label_reader": 0.9965856233506216, "one_pair_pooled": 0.9970261650212993, "check": "rewrite_against_prototype"}
+{"table": "auction_verification_rated5", "label_reader": 1.011342974091352, "one_pair_pooled": 0.9957081955993291, "check": "rewrite_against_prototype"}
+{"table": "grid_stability_rated10", "label_reader": 0.997551644947327, "one_pair_pooled": 0.999949206941048, "check": "rewrite_against_prototype"}
+{"table": "557_analcatdata_apnea1_rated6", "label_reader": 1.000005253676318, "one_pair_pooled": 1.0000023322662472, "check": "rewrite_against_prototype"}
+{"table": "forest_fires", "fold": 1, "rows": 413, "kind": "flow", "one_pair_pooled": 9.865180683417579, "network": 9.865180683417579, "check": "folds_1_and_2"}
+{"table": "forest_fires", "fold": 2, "rows": 414, "kind": "flow", "one_pair_pooled": 7.9443207973748216, "network": 7.9443207973748216, "check": "folds_1_and_2"}
+{"table": "cars", "fold": 1, "rows": 643, "kind": "flow", "one_pair_pooled": 1017.8248720457183, "network": 1064.3446270148436, "check": "folds_1_and_2"}
+{"table": "cars", "fold": 2, "rows": 643, "kind": "flow", "one_pair_pooled": 1052.3978076947358, "network": 1112.8537060042052, "check": "folds_1_and_2"}
+{"table": "geographical_origin_of_music", "fold": 1, "rows": 847, "kind": "flow", "one_pair_pooled": 6.569970215078883, "network": 6.6054591637524025, "check": "folds_1_and_2"}
+{"table": "geographical_origin_of_music", "fold": 2, "rows": 847, "kind": "flow", "one_pair_pooled": 7.175984694843261, "network": 7.175984694843261, "check": "folds_1_and_2"}
+{"table": "solar_flare", "fold": 1, "rows": 853, "kind": "ordinal", "one_pair_pooled": 0.20405330594679197, "network": 0.20405330594679197, "check": "folds_1_and_2"}
+{"table": "solar_flare", "fold": 2, "rows": 853, "kind": "ordinal", "one_pair_pooled": 0.27985269884061165, "network": 0.2803360774647889, "check": "folds_1_and_2"}
+{"table": "auction_verification", "fold": 1, "rows": 1634, "kind": "flow", "one_pair_pooled": 175.18759662064923, "network": 199.95551400377533, "check": "folds_1_and_2"}
+{"table": "auction_verification", "fold": 2, "rows": 1634, "kind": "flow", "one_pair_pooled": 193.20844609739567, "network": 209.09783290565431, "check": "folds_1_and_2"}
+{"table": "grid_stability", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 0.0034238752479681858, "network": 0.0034134776434748553, "check": "folds_1_and_2"}
+{"table": "grid_stability", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 0.0030706327487566853, "network": 0.0030581479684136737, "check": "folds_1_and_2"}
+{"table": "naval_propulsion_plant", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 9.893921115157181e-05, "network": 0.000977544212483191, "check": "folds_1_and_2"}
+{"table": "naval_propulsion_plant", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 9.10999511072161e-05, "network": 0.0011273716022743947, "check": "folds_1_and_2"}
+{"table": "health_insurance", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 6.7597127636782295, "network": 6.815488038103359, "check": "folds_1_and_2"}
+{"table": "health_insurance", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 6.61854354835929, "network": 6.674473868221451, "check": "folds_1_and_2"}
+{"table": "fps_benchmark", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 0.7800172612785012, "network": 0.7786450935106151, "check": "folds_1_and_2"}
+{"table": "fps_benchmark", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 1.1331753905829574, "network": 1.2964718390474212, "check": "folds_1_and_2"}
+{"table": "sarcos", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 1.7992790948949975, "network": 1.9337543584953896, "check": "folds_1_and_2"}
+{"table": "sarcos", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 1.6879049290883905, "network": 1.7580902872639061, "check": "folds_1_and_2"}
+{"table": "video_transcoding", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 0.5841491000302252, "network": 0.5841491000302252, "check": "folds_1_and_2"}
+{"table": "video_transcoding", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 0.6554931149494053, "network": 0.6554931149494053, "check": "folds_1_and_2"}
+{"table": "wave_energy", "fold": 1, "rows": 2400, "kind": "flow", "one_pair_pooled": 8.61114249462429, "network": 2961.564210962046, "check": "folds_1_and_2"}
+{"table": "wave_energy", "fold": 2, "rows": 2400, "kind": "flow", "one_pair_pooled": 2.920624614292119, "network": 2741.995391224778, "check": "folds_1_and_2"}
+{"table": "560_bodyfat", "fold": 1, "rows": 201, "kind": "flow", "one_pair_pooled": 0.40203649747181086, "network": 0.40105534134960236, "check": "folds_1_and_2"}
+{"table": "560_bodyfat", "fold": 2, "rows": 202, "kind": "flow", "one_pair_pooled": 0.5001021452204305, "network": 0.4840437974828664, "check": "folds_1_and_2"}
+{"table": "690_visualizing_galaxy", "fold": 1, "rows": 258, "kind": "flow", "one_pair_pooled": 10.251141330235955, "network": 9.28475115085121, "check": "folds_1_and_2"}
+{"table": "690_visualizing_galaxy", "fold": 2, "rows": 258, "kind": "flow", "one_pair_pooled": 8.637735633001826, "network": 9.085301892088308, "check": "folds_1_and_2"}
+{"table": "nikuradse_1", "fold": 1, "rows": 289, "kind": "flow", "one_pair_pooled": 0.002837408761197082, "network": 0.003450550810152949, "check": "folds_1_and_2"}
+{"table": "nikuradse_1", "fold": 2, "rows": 290, "kind": "flow", "one_pair_pooled": 0.002634748512245839, "network": 0.003131151108870541, "check": "folds_1_and_2"}
+{"table": "519_vinnie", "fold": 1, "rows": 304, "kind": "ordinal", "one_pair_pooled": 0.8480496275758697, "network": 0.915072429824562, "check": "folds_1_and_2"}
+{"table": "519_vinnie", "fold": 2, "rows": 304, "kind": "ordinal", "one_pair_pooled": 0.8646556327357784, "network": 0.986965687500001, "check": "folds_1_and_2"}
+{"table": "557_analcatdata_apnea1", "fold": 1, "rows": 380, "kind": "flow", "one_pair_pooled": 280.74312338598196, "network": 862.0352561390141, "check": "folds_1_and_2"}
+{"table": "557_analcatdata_apnea1", "fold": 2, "rows": 380, "kind": "flow", "one_pair_pooled": 233.08621209222542, "network": 713.7871728655343, "check": "folds_1_and_2"}
+{"table": "666_rmftsa_ladata", "fold": 1, "rows": 406, "kind": "flow", "one_pair_pooled": 0.9210508342590781, "network": 0.9010756890996616, "check": "folds_1_and_2"}
+{"table": "666_rmftsa_ladata", "fold": 2, "rows": 406, "kind": "flow", "one_pair_pooled": 0.8881078667500347, "network": 0.8726436780674214, "check": "folds_1_and_2"}
+{"table": "1595_poker", "fold": 1, "rows": 2400, "kind": "ordinal", "one_pair_pooled": 0.31214523992573295, "network": 0.31949624555555584, "check": "folds_1_and_2"}
+{"table": "1595_poker", "fold": 2, "rows": 2400, "kind": "ordinal", "one_pair_pooled": 0.3309730908588472, "network": 0.3375304434722225, "check": "folds_1_and_2"}
+{"table": "cars_rated7", "fold": 1, "rows": 643, "kind": "ordinal", "one_pair_pooled": 0.16601527219716886, "network": 0.28953070238095285, "check": "folds_1_and_2"}
+{"table": "cars_rated7", "fold": 2, "rows": 643, "kind": "ordinal", "one_pair_pooled": 0.1615746575042247, "network": 0.2477904353002073, "check": "folds_1_and_2"}
+{"table": "auction_verification_rated5", "fold": 1, "rows": 1634, "kind": "ordinal", "one_pair_pooled": 0.0210579661978993, "network": 0.021598018541157317, "check": "folds_1_and_2"}
+{"table": "auction_verification_rated5", "fold": 2, "rows": 1634, "kind": "ordinal", "one_pair_pooled": 0.02704897259714589, "network": 0.033627381010595, "check": "folds_1_and_2"}
+{"table": "grid_stability_rated10", "fold": 1, "rows": 2400, "kind": "ordinal", "one_pair_pooled": 0.2860163147071024, "network": 0.28567443125000014, "check": "folds_1_and_2"}
+{"table": "grid_stability_rated10", "fold": 2, "rows": 2400, "kind": "ordinal", "one_pair_pooled": 0.2744939699655184, "network": 0.2778279487500001, "check": "folds_1_and_2"}
+{"table": "557_analcatdata_apnea1_rated6", "fold": 1, "rows": 380, "kind": "ordinal", "one_pair_pooled": 0.03414916724972985, "network": 0.03632374210526311, "check": "folds_1_and_2"}
+{"table": "557_analcatdata_apnea1_rated6", "fold": 2, "rows": 380, "kind": "ordinal", "one_pair_pooled": 0.046193769061793566, "network": 0.047733587719298254, "check": "folds_1_and_2"}
