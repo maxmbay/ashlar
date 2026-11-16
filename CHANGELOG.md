@@ -2,6 +2,35 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## 0.1.0 — 2026-11-15
+
+The dressed model's code is the same as in 0.0.7. This release corrects its documentation, shortens the README, and adds our ScoringBench results with the scripts that compute them.
+
+### Added
+
+- [benchmarks/scoringbench](benchmarks/scoringbench/) holds our per-fold ScoringBench results for the dressed model and for each entry in the table of what each part adds, the results on the 23 development tables, and the scripts behind every ScoringBench number in the README and the guide. The scripts also rank the dressed model among all 64 models ScoringBench lists. The folder copies none of ScoringBench's files: the scripts read a clone of its results at a fixed commit and check each file's SHA-256 sum. It also has the wrapper that runs `ashlar.dressed()` in ScoringBench's current code. The folder is not part of the installed package.
+
+### Changed
+
+- The README has less than half the words it had (1,755, from 4,015). The table of calls for people coming from another library is now in [docs/estimator.md](docs/estimator.md#coming-from-another-library), the table of what the general estimator covers and the note on how a model is specified are in [docs/models.md](docs/models.md), the install notes are in [docs/README.md](docs/README.md#install), and the airline figures are in [docs/showcase.md](docs/showcase.md) and docs/estimator.md. The benchmarks on eight large tables are no longer in the README: the figure, its summary, and every number are in [docs/benchmarks.md](docs/benchmarks.md#large-tables).
+- The README has a table of where to start: which model and call suit which data or problem, beginning with how many rows you train on and how many you predict.
+- [docs/showcase.md](docs/showcase.md) is rewritten around what one model object can express: the five choices that define a model, one table fitted several ways with a line changed each time, a backbone of your own in Equinox, and the nine examples in about half the words. Its section on the eight large tables and its passages on where another tool does better are now in [docs/benchmarks.md](docs/benchmarks.md), which already had those results.
+- [docs/benchmarks.md](docs/benchmarks.md#how-it-was-run) says which runs on the eight large tables ended at a training budget and not by early stopping: Ashlar's default epoch budget on every split of five tables, and the trees' limit of 4,000 trees on every split of three.
+- [docs/dressed.md](docs/dressed.md#limits) gives the cost of prediction: about 0.025 seconds per row to build the distributions, and 0.12 to 0.27 seconds per row to read 203 quantiles from a model fitted to 1,200 rows. It also states a known bias: `predict` reads the mean from the 203 quantiles in a way that puts it about 0.014 of a row's standard deviation too high for a normal shape. The predicted distribution is not shifted.
+- [docs/dressed.md](docs/dressed.md#on-scoringbench) has a table of what each part adds on ScoringBench, from one network to the dressed model. It says which parts were worked out on ScoringBench and which on the 23 development tables, that 12 of the 99 tables take the few-values path, and that a fit took a median of 32 minutes per fold.
+- The guide's paragraph on why the rank is provisional now gives two rescoring results for the undressed pool: the same CRPS on all 480 rescored folds with ScoringBench's code of November 13, and less than 0.16% difference on any fold with its change dated November 14. It says that the other models' published results still come from the earlier code.
+
+### Fixed
+
+- The dressed model's guide ([docs/dressed.md](docs/dressed.md)), docstrings and diagram now say what the code does and what the test records show. No code changed.
+  - A label reader's points are a row's trend plus the context rows' leave-one-out residuals, so a draw is not limited to training labels. At prediction each reader also reads the part that stopped it, up to twice `reader_rows` rows.
+  - The pool weight is picked on the unsmoothed pool, and the CRPS factor on at most 120 held-out rows per member. The bandwidth is Silverman's rule with Kish's effective sample size. The corrector reads the columns only and is stopped on the CRPS of the corrected pools. The gate is the grid weight with the lowest held-out CRPS and can be positive where the corrected pools alone score worse.
+  - A target with at most 20 values gets ordinal networks stopped on held-out log loss, and a held-out row whose value the other parts lack moves into training.
+  - The wide normal is `0.01 * (1 - w)` of the pool, and its cost exceeds the whole CRPS only where that CRPS is below about 0.00006 of the labels' spread; the guide said a thousandth. `DressedDistribution.crps` reads 203 quantiles as point masses, where ScoringBench reads them as a CDF that is linear between them.
+  - The members are cross-fitted, not bagged. The guide credits what the recipe builds on, with links: cross-fitting, the linear pool and stacking, kernel dressing, and condensité's PIT boosting, which the corrector and the gate follow. What the model adds is the label reader and its pairing with a network, and the diagram marks only the readers.
+  - In the tests: folds 1 and 2 of the development tables had been used for earlier models before the dressed model existed; the medians are 0.910, 0.914, 0.955 and 0.974, and 0.16 nats for the log score (the guide gave the upper middle values); the corrector without a gate was worse on four tables of 380 to 852 training rows, not the four smallest; and the pass line also required the dressed model to be at least 1% below the smoothed pools.
+  - The description of the figure of the 46 development fits now counts fits. It said the dressed model was within 2% of one network on the last five tables, and one of those has a fold at 0.926.
+
 ## 0.0.7 — 2026-11-15
 
 ### Added

@@ -1,0 +1,10 @@
+{"table": "560_bodyfat", "fold": 0, "rows": 201, "network": 0.16199844360207447, "network_with_solved_layer": 0.16220518316249255}
+{"table": "nikuradse_1", "fold": 0, "rows": 289, "network": 0.0037075172579084346, "network_with_solved_layer": 0.003908489085530376}
+{"table": "cars", "fold": 0, "rows": 643, "network": 1089.6805450370314, "network_with_solved_layer": 1027.0489715839594}
+{"table": "video_transcoding", "fold": 0, "rows": 2400, "network": 0.5531986095437952, "network_with_solved_layer": 0.5577110896734196}
+{"table": "naval_propulsion_plant", "fold": 0, "rows": 2400, "network": 0.001045983897339306, "network_with_solved_layer": 0.0009802645151031028}
+{"table": "sarcos", "fold": 0, "rows": 2400, "network": 2.211071602738845, "network_with_solved_layer": 2.135239641079383}
+{"table": "grid_stability", "fold": 0, "rows": 2400, "network": 0.0034515341644255435, "network_with_solved_layer": 0.003344513680221761}
+{"table": "auction_verification", "fold": 0, "rows": 1634, "network": 144.28551533462053, "network_with_solved_layer": 148.68365672311305}
+{"table": "wave_energy", "fold": 0, "rows": 2400, "network": 3073.3231626191673, "network_with_solved_layer": 3285.7263381172934}
+{"table": "fps_benchmark", "fold": 0, "rows": 2400, "network": 0.8826462937920966, "network_with_solved_layer": 1.1167191304307658}

@@ -1,8 +1,8 @@
 """Draw the README's diagram of a dressed model: what ``ashlar.dressed().fit`` does, top to bottom.
 
-Five courses of stone blocks, one per step, in the colors of ``examples/architecture.py``. Teal marks the two
-parts the model adds, the label readers and the corrector; the rest is pale stone. Beside each course, what the
-step does and what it picks on held-out rows.
+Five courses of stone blocks, one per step, in the colors of ``examples/architecture.py``. Teal marks the part the
+model adds, the label readers; the rest is pale stone. Beside each course, what the step does and what it picks on
+held-out rows.
 
     python examples/dressed_diagram.py
 
@@ -48,10 +48,10 @@ COURSES = [
             [(f"reader {k}", True, 1) for k in range(1, 6)],
         ],
         [
-            "Five pairs of a network and a label reader. Each",
-            "pair trains on four fifths of the rows and holds",
-            "out the rest. A reader predicts from the training",
-            "rows' labels, not from weights on the columns.",
+            "Five cross-fitted pairs of a network and a label",
+            "reader. Each pair trains on four fifths of the",
+            "rows and holds out the rest. A reader predicts",
+            "a row from other rows' labels.",
         ],
     ),
     (
@@ -76,7 +76,7 @@ COURSES = [
     (
         "correct",
         "corrector_",
-        [[("corrector network, on the held-out pool's scale", True, 1)]],
+        [[("corrector network, on the held-out pool's scale", False, 1)]],
         [
             "One more network learns where each label falls in",
             "its own held-out pool, and reshapes every row's",
@@ -88,9 +88,9 @@ COURSES = [
         "gate_",
         [[("g × corrected + (1 − g) × smoothed", False, 1)]],
         [
-            "One weight g, picked on held-out rows. Where the",
-            "corrector did not help, g is 0 and the prediction",
-            "is the smoothed pool.",
+            "One weight g, picked by the CRPS of the fifth",
+            "pair's held-out rows. At g = 0 the prediction",
+            "is the smoothed pool alone.",
         ],
     ),
 ]
@@ -104,10 +104,11 @@ CODE = [
 ]
 
 CAPTION = [
-    "Teal marks what this model adds: the label readers,",
-    "and a corrector that works on the scale of the",
-    "pairs' held-out pool. Each choice after the members",
-    "is made on rows the pairs did not train on.",
+    "Teal marks the label readers, the part this",
+    "model adds. The rest builds on cross-fitting,",
+    "linear pools, kernel dressing and condensité's",
+    "PIT boosting. Each choice after the members is",
+    "made on rows the pairs held out.",
 ]
 
 

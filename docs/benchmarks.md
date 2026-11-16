@@ -1,6 +1,6 @@
 # Benchmarks
 
-[Ashlar](../README.md) beside LightGBM, XGBoost, CatBoost, and other neural packages. The large-table numbers come from [`examples/benchmark_large.py`](../examples/benchmark_large.py), the small-table numbers from [`examples/benchmark_readme.py`](../examples/benchmark_readme.py), and the ablations from [`examples/ablation_gbm_parity.py`](../examples/ablation_gbm_parity.py). A section named for a figure says how that figure, in the README or in [the showcase](showcase.md), was made.
+[Ashlar](../README.md) beside LightGBM, XGBoost, CatBoost, and other neural packages. The large-table numbers come from [`examples/benchmark_large.py`](../examples/benchmark_large.py), the small-table numbers from [`examples/benchmark_readme.py`](../examples/benchmark_readme.py), and the ablations from [`examples/ablation_gbm_parity.py`](../examples/ablation_gbm_parity.py). A section named for a figure says how that figure, on this page, in [the showcase](showcase.md), or on another docs page, was made.
 
 ```bash
 pip install -e ".[dataframes]" xgboost lightgbm catboost openml pyarrow pytabkit
@@ -43,7 +43,7 @@ Versions: LightGBM 4.7.0, XGBoost 3.4.1, CatBoost 1.2.10, PyTabKit 1.7.3, JAX 0.
 
 Hardware: An Apple M3 Pro laptop with 12 cores and 18 GB, CPU only. Several runs shared the machine. Ashlar (JAX) used every core it could get; the trees ran on one thread each, and on six on the large tables' later splits; LightGBMLSS ran on six; PyTabKit models ran on four threads. Read the seconds as an order of magnitude.
 
-Large tables: Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. Random 80/20 splits with seeds 0, 1, and 2: the Splits column says how many each model ran, and a cell over several is their mean ± the standard deviation across them. The seconds are each model's fastest split's. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row.
+Large tables: Eight tables from OpenML, each capped at 2,000,000 rows by a fixed random sample. Random 80/20 splits with seeds 0, 1, and 2: the Splits column says how many each model ran, and a cell over several is their mean ± the standard deviation across them. The seconds are each model's fastest split's. Every model holds out the same share, 20% of the training rows, to stop early. The trees run at learning rate 0.05 with up to 4,000 trees and 100 rounds of patience, with native categorical handling. Ashlar is `ASRRegressor()`, `ASRClassifier()`, or `ASRRegressor(task="mixture")` with no other arguments. The distributional scores are on a fixed sample of 100,000 test rows; point and classification scores use every test row. Ashlar's default epoch budget is 20,000,000 divided by the number of training rows, kept between 20 and 100: 20 epochs on the four tables of about two million rows (1.28 million training rows after both splits) and 54 to 61 on the other four. Its runs ended at that budget on every split of airline delay, click prediction, Higgs, and Zurich transport (20 epochs, for the default model and for the mixture head on airline delay and Zurich) and of airlines (58), and on one split of covertype (54), where early stopping ended the other two after 53. Early stopping also ended its runs on taxi tips (the default model after 21, 35, and 42 of 54 epochs; the mixture head after 25 on one split, with all 54 on the other two) and on release years (22 to 25 of 61). The trees' limit of 4,000 trees ended training (a best round within 100 of the limit, their patience) on Higgs, covertype, and release years for LightGBM, XGBoost, and CatBoost on every split; on click prediction for LightGBM and CatBoost on every split and for XGBoost on one; on airlines for CatBoost on every split; and on one split each of airline delay, Zurich transport, and taxi tips for CatBoost and one of taxi tips for LightGBM.
 
 Small tables: Each table is split 80/20 at random, three times, with seeds 0, 1, and 2. A cell is the mean over the three test sets ± the standard deviation across them. The temperature forecast is split on the clock instead, the last 20% of the series, so its three runs differ only in the seed. XGBoost and LightGBM "default" is the library's constructor defaults; "early-stopped" is a learning rate of 0.05 and up to 4,000 trees, stopped after 100 rounds without improvement on a 20% validation slice of the training rows. A category the training rows never saw is missing to the trees, as it is index 0 to Ashlar.
 
@@ -78,6 +78,43 @@ What is not here: No hyperparameter search on any side. Flight tables with a dat
 | Melbourne daily minimum temperature | [jbrownlee/Datasets](https://github.com/jbrownlee/Datasets) | 3,650 | °C, one day ahead | 28-day window. |
 
 ## Large tables
+
+![Two panels over eight OpenML tables, each row a dot for Ashlar's relative difference from the best tree-based model on that table, left of zero when Ashlar is better. Left, test error compared with the best of LightGBM, XGBoost, and CatBoost: within 0.3% on airline delay, song release years, and Zurich transport, better on Higgs and covertype, 1.5% and 2.3% worse on click prediction and airlines, and 11% worse on taxi tips. Right, the predicted distribution compared with the best tree-based distribution: CRPS 0.2% higher than LightGBMLSS's mixture on airline delay, 3.5% and 1.7% lower on song release years and Zurich transport, and 27% higher on taxi tips; log loss lower on Higgs and covertype, higher on click prediction and airlines.](images/readme/scoreboard.png)
+
+The eight tables are from OpenML and have half a million to two million rows. No model is tuned: Ashlar uses its default settings, and the tree-based models use a learning rate of 0.05 and up to 4,000 trees, with early stopping. Ashlar's runs ended at their epoch budget on every split of five of the eight tables, and LightGBM, XGBoost, and CatBoost at their limit of 4,000 trees on every split of three; [How it was run](#how-it-was-run) lists every case. Each table has three random train/test splits. For point predictions, Ashlar's default model is within 0.3% of the best of LightGBM, XGBoost, and CatBoost on airline delay, song release years, and Zurich transport. It is better on Higgs (accuracy 0.763 against 0.752) and covertype (0.968 against 0.963), and worse on click prediction and airlines, by less than one point of accuracy, and on taxi tips, where its RMSE is 11% higher.
+
+For predicted distributions, `task="mixture"` has a 3.5% lower CRPS than LightGBMLSS's mixture of three normals on release years and a 1.7% lower one on Zurich transport. On airline delay its CRPS is 0.2% higher, and LightGBMLSS is slightly ahead on each of the three splits. On taxi tips, where the target has a spike at $0 and a long tail, Ashlar's CRPS is 27% higher on average and varies a lot between splits, from 6% to 41% higher.
+
+LightGBM trains much faster, in 4 seconds to 2 minutes per table on six threads. Ashlar's default and mixture models take 2 to 5 minutes on all 12 cores of a laptop, and LightGBMLSS's mixture takes 3 to 16 minutes on six threads. The tables below have all the results, including each model's training time, and [`examples/readme/scoreboard.py`](../examples/readme/scoreboard.py) draws the figure from the saved results.
+
+<details>
+<summary>Results tables for point predictions and distributions, mean ± one standard deviation over three splits</summary>
+
+| Table | Rows | Target, metric | Ashlar | Best tree |
+|---|---:|---|---:|---:|
+| Airline delay | 2,000,000 | delay in minutes, RMSE ↓ | 29.19 ± 0.1 | 29.19 ± 0.1 (CatBoost) |
+| Year (MSD) | 515,345 | release year, RMSE ↓ | **8.655** ± 0.03 | 8.679 ± 0.02 (XGBoost) |
+| Zurich transport | 2,000,000 | delay, RMSE ↓ | 3.053 ± 0.0006 | **3.047** ± 0.0005 (LightGBM) |
+| NYC green taxi tips | 581,835 | tip in $, RMSE ↓ | 1.973 ± 0.05 | **1.771** ± 0.02 (CatBoost) |
+| Higgs | 2,000,000 | signal, accuracy ↑ | **0.763** ± 0.0004 | 0.752 ± 0.0007 (XGBoost) |
+| Covertype | 581,012 | 7 forest types, accuracy ↑ | **0.968** ± 0.0005 | 0.963 ± 0.0005 (LightGBM) |
+| Click prediction | 1,997,410 | click, accuracy ↑ | 0.842 ± 0.0001 | **0.844** ± 0.0003 (LightGBM) |
+| Airlines | 539,383 | delayed, accuracy ↑ | 0.662 ± 0.001 | **0.669** ± 0.001 (CatBoost) |
+
+| Table | Score | Ashlar | Best tree distribution |
+|---|---|---:|---:|
+| Airline delay, delay in minutes | CRPS | 9.24 ± 0.05 | **9.22** ± 0.06 (LightGBMLSS mixture) |
+| Year (MSD), release year | CRPS | **4.03** ± 0.02 | 4.17 ± 0.01 (LightGBMLSS mixture) |
+| Zurich transport, delay | CRPS | **1.62** ± 0.002 | 1.65 ± 0.003 (LightGBMLSS mixture) |
+| NYC green taxi tips, tip in $ | CRPS | 0.55 ± 0.07 | **0.44** ± 0.003 (LightGBMLSS mixture) |
+| Higgs | Log loss | **0.481** ± 0.0006 | 0.496 ± 0.0008 (XGBoost) |
+| Covertype | Log loss | **0.093** ± 0.002 | 0.114 ± 0.002 (LightGBM) |
+| Click prediction | Log loss | 0.395 ± 0.0003 | **0.386** ± 0.0004 (XGBoost) |
+| Airlines | Log loss | 0.613 ± 0.001 | **0.605** ± 0.0009 (CatBoost) |
+
+In the first table, Ashlar is `ASRRegressor()` or `ASRClassifier()` with no arguments. In the second, it is `ASRRegressor(task="mixture")` on the regression tables and the default classifier's probabilities on the others. The best tree-based distribution is the one with the lowest score among LightGBM, XGBoost, and CatBoost with a normal distribution of fixed width; CatBoost's `RMSEWithUncertainty`, which fits a mean and a variance for each row; and LightGBMLSS's Gaussian, Student-t, and mixture of three normals, which fit a LightGBM model for each parameter. CRPS is in the target's units and log loss is per row; lower is better for both. The tables below also report each model's NLL, but on a target with a spike, such as on-time departures at zero minutes or taxi tips of $0, the NLL depends mostly on how narrow a model makes the spike, so it is not compared here.
+
+</details>
 
 Each table has three random splits. A row with 1 in the Splits column ran on seed 0 only, so a comparison with it is rough; a cell over several splits is the mean ± the standard deviation across them. The seconds are each model's fastest split's. A † marks a time from seed 0's first runs, which shared the laptop, with each tree on one thread. The other times ran one job at a time, Ashlar on all 12 cores and the trees and LightGBMLSS on six threads, so compare times only between unmarked rows. On taxi tips Ashlar's mixture changes most from split to split: its CRPS is 0.594, 0.462, and 0.607 on seeds 0, 1, and 2, where LightGBMLSS's mixture scores 0.431 to 0.438 and CatBoost's `RMSEWithUncertainty` 0.456 to 0.465. Its seed-2 fit stopped after 25 epochs and the other two after 54, so its 97 seconds is the time of a shorter run; seed 1 took 210. On Zurich, LightGBMLSS's Student-t ran to the 4,000-tree cap with a median of 3.7 million degrees of freedom: it became a Gaussian. On airline delay, NGBoost's default scores a CRPS of 90.7 because a few flights get an exploded scale, up to 3.4 × 10⁷ minutes where 99.9% of flights get under 66; its NLL, 4.76, barely notices. With `min_samples_leaf=100` its largest scale is 138 minutes and its CRPS 11.57, near LightGBMLSS's Gaussian. NGBoost ran alone; its scikit-learn trees use one thread.
 
@@ -178,9 +215,9 @@ Each table has three random splits. A row with 1 in the Splits column ran on see
 | XGBoost | 3 | 0.8441 ± 0.0001 | 0.7546 ± 0.00085 | 0.3857 ± 0.00041 | 38 |
 | CatBoost | 3 | 0.8435 ± 4.5e-05 | 0.7496 ± 0.00048 | 0.3883 ± 0.00023 | 139 |
 
-### The README's airline figure
+### The showcase's airline figures
 
-The figure at the top of the README and the one-flight card come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
+The showcase's [figure of 16 flights](showcase.md#one-distribution-per-row) and the one-flight card on [the estimator page](estimator.md#what-the-methods-return) come from one more fit on airline delay's seed-0 split, made the way the benchmark makes its own ([`examples/readme/hero_flights.py`](../examples/readme/hero_flights.py) `compute`, with the fits saved so a redraw never refits): `ASRRegressor(task="mixture")` in 259 seconds, CatBoost `RMSEWithUncertainty` in 127, and LightGBM in 4, given a normal whose scale is its residual spread on the early-stopping rows, 29.2 minutes. The figure's baseline is the best tree distribution on this table, LightGBMLSS's mixture of three normals, from the benchmark's own seed-0 fit: 1,201 seconds on six threads (`hero_flights.py baseline` reads the parameters the benchmark saved and fits nothing; `hero_flights.py coverage` re-scores the saved fits at equal coverage). Each of these runs had the laptop to itself. Scores are on the benchmark's 100,000 scored test flights.
 
 | Model | CRPS | NLL | 80% coverage | 80% width | Brier, delay > 60 |
 |---|---:|---:|---:|---:|---:|
@@ -264,7 +301,7 @@ The large tables changed the epoch budget. With 10 epochs at a million rows, cov
 
 ## Point accuracy
 
-Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClassifier()`.
+Three random splits of five small tables. Ashlar is `ASRRegressor()` or `ASRClassifier()`. The default model matches the trees on two (Ames and abalone, within the variation across splits) and is worse than LightGBM on three. The `tabm_piecewise()` recipe closes the gap on California housing and diamonds, but not on adult.
 
 ### Abalone, rings
 
@@ -1112,6 +1149,12 @@ The grid chose a shift of 1, normal errors, and a spread of 0.2 on every seed, w
 - XGBoost's AFT objective, which reads censored labels too, is ahead on this table. Its orders cost 4.7% less than the mixture oracle's, less on every seed (3.6% to 6.3%), against 4.0% more for the censored `mixture` and 5.2% more for the censored `hurdle` on the same yardstick. Its CRPS is 7% below the censored mixture's, and its 90% quantile is above the true demand on 87.8% of days against 81.3%. Its NLL, 5.285, is level with the censored `hurdle`'s 5.280 and 0.09 nats ahead of the censored mixture's.
 - The censoring does not explain the gap. XGBoost's censored fit also beats Ashlar's fits to the true demand, whose CRPS is 0.283 to 0.284, so on these features its trees predict demand better than Ashlar's default network does, censored or not. Reading the sold-out days as censored is what both need: every fit that reads them as demand, or drops them, orders at a cost 12% to 19% above its oracle's.
 - Its grid costs about five Ashlar fits, and one tuned fit costs a twenty-fifth of one: 565 CPU seconds for 132 fits, against 111 to 119 for each censored Ashlar fit, and 4.5 for one fit at the setting the grid chose.
+
+#### One product's sold-out days
+
+![One FreshRetailNet-50K product over its 20 test days: sales bars that stop at the stock on sold-out days, with the unobserved demand above them; 10% to 90% bands of demand from Ashlar and from XGBoost AFT, both fitted to the censored sales, and LightGBM's 90% quantile fitted to sales. Beside it, each model's order cost relative to a model trained on the true demand, over three seeds: AFT below it, Ashlar's censored model a little above it, and the three models that treat sold-out days as full demand or drop them well above it](images/readme/sold-out.png)
+
+[`examples/readme/sold_out.py`](../examples/readme/sold_out.py) follows seed 0 of this benchmark and draws one series whose shelf ran out, chosen by a rule that looks at the data and at no fit: its sales, its stock, and its true demand on each of the 20 test days, with the 10% to 90% bands of the `mixture` head and of XGBoost AFT, both fitted to the censored sales, and LightGBM's 90% quantile, fitted to sales. The bars are the order costs of the two tables above, the mean of the three seeds with a dot for each.
 
 ### Daily loads from meter readings
 
