@@ -1504,7 +1504,19 @@ def _bisection_quantile(dist: Distribution, q):
         above = frozen.cdf(middle) >= level
         return jnp.where(above, low, middle), jnp.where(above, middle, high)
 
-    low, high = jax.lax.fori_loop(0, _BISECTION_STEPS, step, (low, high))
+    # A step reads the brackets alone, so once a step moves none of them, no later step does: stopping there gives
+    # the brackets of all _BISECTION_STEPS steps, bit for bit. A NaN never equals itself, so a NaN bracket runs every
+    # step, as before.
+    def moving(state):
+        count, _, _, moved = state
+        return (count < _BISECTION_STEPS) & moved
+
+    def advance(state):
+        count, low, high, _ = state
+        new_low, new_high = step(count, (low, high))
+        return count + 1, new_low, new_high, jnp.any((new_low != low) | (new_high != high))
+
+    _, low, high, _ = jax.lax.while_loop(moving, advance, (jnp.int32(0), low, high, jnp.bool_(True)))
     x0 = jax.lax.stop_gradient(0.5 * (low + high))
     try:
         density = jnp.exp(dist.log_prob(x0))
