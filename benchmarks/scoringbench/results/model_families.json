@@ -1,0 +1,1068 @@
+{
+ "catboost_quantile": {
+  "family": "untuned",
+  "note": "CatBoost MultiQuantile, 1000 iterations, library defaults otherwise.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"catboost_quantile\": lambda: CatBoostQuantileWrapper(n_quantiles=99, iterations=1000),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/catboost_wrapper.py",
+    "self._model = CatBoostRegressor("
+   ]
+  ]
+ },
+ "causilo_v1": {
+  "family": "pretrained",
+  "note": "Causilo with released weights (Hugging Face nums-ai/causilo).",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"causilo_v1\": lambda: CausiloWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/causilo.py",
+    "Pretrained Causilo regression with exponential quantile tails."
+   ]
+  ]
+ },
+ "cde_MDN": {
+  "family": "untuned",
+  "note": "Mixture density network, fixed preset, 300 epochs.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "f\"cde_{_name}\": (lambda n=_name: CDEWrapper(estimator=n, n_grid=200))"
+   ],
+   [
+    "scoringbench/univariate/wrappers/cde_wrapper.py",
+    "\"MDN\": dict(n_training_epochs=300, n_centers=10, hidden_sizes=(32, 32)),"
+   ]
+  ]
+ },
+ "cde_NF": {
+  "family": "untuned",
+  "note": "Normalizing-flow density estimator, fixed preset, 300 epochs.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "f\"cde_{_name}\": (lambda n=_name: CDEWrapper(estimator=n, n_grid=200))"
+   ],
+   [
+    "scoringbench/univariate/wrappers/cde_wrapper.py",
+    "\"NF\": dict(n_training_epochs=300, n_flows=6, hidden_sizes=(32, 32)),"
+   ]
+  ]
+ },
+ "condensite_pitbst_v0_1_1": {
+  "family": "untuned",
+  "note": "Two LightGBM stages with one fixed bandwidth each (so no bandwidth search); the mixing weight lambda is fitted on out-of-fold PITs as part of the method.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"condensite_pitbst_v0_1_1\": lambda: CondensitePITBoostingWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/condensite_pit_boosting_wrapper.py",
+    "CONDENSITE_PIT_BOOSTING_PRESET = dict("
+   ],
+   [
+    "scoringbench/univariate/wrappers/condensite_pit_boosting_wrapper.py",
+    "Validation fraction for the selection among several bandwidths; unused"
+   ]
+  ]
+ },
+ "crepes_catboost_difficulty": {
+  "family": "untuned",
+  "note": "Conformal predictive system around CatBoost (100 iterations), fixed settings.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_catboost_difficulty\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=_catboost_regressor(iterations=100, verbose=False, random_state=0),"
+   ]
+  ]
+ },
+ "crepes_catboost_difficulty_mondrian": {
+  "family": "untuned",
+  "note": "As above, with Mondrian categories.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_catboost_difficulty_mondrian\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=_catboost_regressor(iterations=100, verbose=False, random_state=0),"
+   ]
+  ]
+ },
+ "crepes_tabiclv2": {
+  "family": "pretrained",
+  "note": "Conformal predictive system around the pretrained TabICL v2 regressor: the base is pretrained; only the conformal calibration is fitted on the table.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_tabiclv2\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=__import__(\"tabicl\").TabICLRegressor(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/crepes_wrapper.py",
+    "Fits a base regressor on proper-training data and calibrates a conformal"
+   ]
+  ]
+ },
+ "crepes_tabiclv2_mondrian": {
+  "family": "pretrained",
+  "note": "As crepes_tabiclv2, with Mondrian categories.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_tabiclv2_mondrian\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=__import__(\"tabicl\").TabICLRegressor(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/crepes_wrapper.py",
+    "use_mondrian_categorizer: If True"
+   ]
+  ]
+ },
+ "crepes_xgb_difficulty": {
+  "family": "untuned",
+  "note": "Conformal predictive system around XGBoost (100 trees), fixed settings.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_xgb_difficulty\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=_xgb_regressor(n_estimators=100, random_state=0),"
+   ]
+  ]
+ },
+ "crepes_xgb_difficulty_mondrian": {
+  "family": "untuned",
+  "note": "As above, with Mondrian categories.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"crepes_xgb_difficulty_mondrian\": lambda: CrepesWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "base_model=_xgb_regressor(n_estimators=100, random_state=0),"
+   ]
+  ]
+ },
+ "exaonetabular": {
+  "family": "pretrained",
+  "note": "EXAONE-Tabular loaded with from_pretrained.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"exaonetabular\": lambda: EXAONETabularWrapper(device=\"cuda:0\"),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/exaonetabular_wrapper.py",
+    "self._model = EXAONETabularRegressor.from_pretrained("
+   ]
+  ]
+ },
+ "finetune_mitra2_steps_50": {
+  "family": "fine-tuned",
+  "note": "Mitra-2 checkpoint fine-tuned for 50 steps on the table.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"finetune_mitra2_steps_50\": lambda: MitraFinetuneWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "ft_steps=50,"
+   ]
+  ]
+ },
+ "finetune_tabiclv2": {
+  "family": "fine-tuned",
+  "note": "TabICL v2 fine-tuned on the table (80 epochs, early stopping).",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"finetune_tabiclv2\": lambda: FinetuneTabICLWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabicl.py",
+    "Wraps a finetuned TabICL regressor."
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_0.1": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_0.1\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_0.3": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_0.3\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_0.5": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_0.5\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_0.7": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_0.7\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_0.9": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_0.9\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.1": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.1\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.3": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.3\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.5": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.5\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.7": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.7\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.8": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.8\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_beta_1.9": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"beta_1.9\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_cde": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"cde\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_ce": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"ce\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_crls": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"crls\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_crps": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"crps\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_is_90": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"is_90\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_mse": {
+  "family": "fine-tuned",
+  "note": "TabPFN fine-tuned on the table with an MSE loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"finetune_tabpfn_realv2_5_mse\": lambda: FinetuneTabPFNWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_wCRPS_center": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"wCRPS_center\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_wCRPS_left": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"wCRPS_left\","
+   ]
+  ]
+ },
+ "finetune_tabpfn_realv2_5_wCRPS_right": {
+  "family": "fine-tuned",
+  "note": "FinetuneTabPFNWrapper starts from the TabPFN 2.5 checkpoint and fine-tunes it on the table (80 epochs, early stopping), one entry per fine-tuning loss.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "def _create_finetune_model_tabpfn(beta_name, tabpfn_version):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "model_path=MODEL_PATH_MAP[tabpfn_version],"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class FinetuneTabPFNWrapper(ProbabilisticWrapper):"
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "    \"wCRPS_right\","
+   ]
+  ]
+ },
+ "flexcode_randomforest": {
+  "family": "untuned",
+  "note": "FlexCode with a random forest, 63 cosine basis functions; FlexCode's own tune() step (basis count and sharpening on validation data) is not called.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "f\"flexcode_{_name}\": (lambda n=_name: FlexCodeWrapper(regressor=n, n_grid=200))"
+   ],
+   [
+    "scoringbench/univariate/wrappers/flexcode_wrapper.py",
+    "\"randomforest\": dict(max_basis=63, basis_system=\"cosine\", regression_params={\"n_estimators\": 100}),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/flexcode_wrapper.py",
+    "self._model.fit(X, y.reshape(-1, 1))"
+   ]
+  ]
+ },
+ "flexcode_xgboost": {
+  "family": "untuned",
+  "note": "FlexCode with XGBoost (depth 3); tune() not called.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "f\"flexcode_{_name}\": (lambda n=_name: FlexCodeWrapper(regressor=n, n_grid=200))"
+   ],
+   [
+    "scoringbench/univariate/wrappers/flexcode_wrapper.py",
+    "\"xgboost\": dict(max_basis=63, basis_system=\"cosine\", regression_params={\"max_depth\": 3}),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/flexcode_wrapper.py",
+    "self._model.fit(X, y.reshape(-1, 1))"
+   ]
+  ]
+ },
+ "forest_diffusion_flow": {
+  "family": "untuned",
+  "note": "Forest-Flow with fixed settings (25 noise levels, 100 trees of depth 7).",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"forest_diffusion_flow\": lambda: ForestDiffusionWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/forest_diffusion_wrapper.py",
+    "self._model = ForestDiffusionModel("
+   ]
+  ]
+ },
+ "kumo_tabular_large": {
+  "family": "pretrained",
+  "note": "NVIDIA KumoTabular in-context model.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"kumo_tabular_large\": lambda: KumoTabularLargeWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/kumo.py",
+    "The model is one of SDM's in-context learning models,"
+   ]
+  ]
+ },
+ "kumo_tabular_medium": {
+  "family": "pretrained",
+  "note": "NVIDIA KumoTabular in-context model.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"kumo_tabular_medium\": lambda: KumoTabularMediumWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/kumo.py",
+    "The model is one of SDM's in-context learning models,"
+   ]
+  ]
+ },
+ "kumo_tabular_small": {
+  "family": "pretrained",
+  "note": "NVIDIA KumoTabular in-context model.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"kumo_tabular_small\": lambda: KumoTabularSmallWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/kumo.py",
+    "The model is one of SDM's in-context learning models,"
+   ]
+  ]
+ },
+ "limix2": {
+  "family": "pretrained",
+  "note": "LimiX-2 checkpoint downloaded from Hugging Face.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"limix2\": lambda: LimiXWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/limix.py",
+    "\"stable-ai/LimiX-2\", \"LimiX-2.ckpt\", revision=_CHECKPOINT_REVISION"
+   ]
+  ]
+ },
+ "mitra2": {
+  "family": "pretrained",
+  "note": "Mitra-2 checkpoint with ft_steps=0: in-context only.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"mitra2\": lambda: MitraFinetuneWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "ft_steps=0,"
+   ],
+   [
+    "scoringbench/univariate/wrappers/mitra_finetune_wrapper.py",
+    "pure in-context; ``ft_steps`` wins)"
+   ]
+  ]
+ },
+ "nflows_rqs": {
+  "family": "untuned",
+  "note": "Spline flow trained by maximum likelihood, 300 epochs, fixed settings.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"nflows_rqs\": lambda: NFlowsWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/nflows_wrapper.py",
+    "``fit`` trains a conditional normalizing flow"
+   ]
+  ]
+ },
+ "ngboost_gaussian": {
+  "family": "untuned",
+  "note": "NGBoost, Normal, 500 trees at learning rate 0.01.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"ngboost_gaussian\": lambda: NGBoostWrapper(dist=\"normal\", n_estimators=500, learning_rate=0.01, n_quantiles=99),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/ngboost_wrapper.py",
+    "from ngboost import NGBRegressor"
+   ]
+  ]
+ },
+ "nori": {
+  "family": "pretrained",
+  "note": "Synthefy Nori, a tabular foundation model used in context with a frozen checkpoint.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"nori\": lambda: SynthefyWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/synthefy.py",
+    "is a tabular foundation model"
+   ]
+  ]
+ },
+ "nori_30m": {
+  "family": "pretrained",
+  "note": "Synthefy Nori-30M, frozen checkpoint.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"nori_30m\": lambda: SynthefyWrapper(model=\"nori-30m\"),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/synthefy.py",
+    "just stores the labeled context rows; the frozen model"
+   ]
+  ]
+ },
+ "pymc_bart": {
+  "family": "untuned",
+  "note": "BART by MCMC, 50 trees; 'tune' is the sampler's warm-up, not a hyperparameter search.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"pymc_bart\": lambda: BARTWrapper(num_trees=50, draws=150, tune=200, chains=2, cores=1),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/bart_wrapper.py",
+    "self._idata = pm.sample("
+   ]
+  ]
+ },
+ "pytabkit_realmlp_hpo_cv_8_new": {
+  "family": "tuned",
+  "note": "pytabkit RealMLP_HPO_Regressor: random search, 8-fold cross-validation, Caruana ensembling.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"pytabkit_realmlp_hpo_cv_8_new\": lambda: PytabkitRealMLPHPOWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "hpo_space_name='tabarena-new',"
+   ],
+   [
+    "scoringbench/univariate/wrappers/pytabkit.py",
+    "self._model = RealMLP_HPO_Regressor(**self._init_kwargs)"
+   ]
+  ]
+ },
+ "pytabkit_realmlp_td": {
+  "family": "untuned",
+  "note": "RealMLP with its published tuned defaults ('TD'), the same on every table.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"pytabkit_realmlp_td\": lambda: PytabkitRealMLPWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/pytabkit.py",
+    "self._model = RealMLP_TD_Regressor(**self._init_kwargs)"
+   ]
+  ]
+ },
+ "surjectors_maf": {
+  "family": "untuned",
+  "note": "Masked autoregressive flow, fixed preset.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "f\"surjectors_{_name}\": (lambda n=_name: SurjectorsWrapper(flow=n, n_grid=200))"
+   ],
+   [
+    "scoringbench/univariate/wrappers/surjectors_wrapper.py",
+    "\"maf\": dict(n_layers=3, hidden=(64, 64), n_iter=400, batch_size=100, lr=1e-3),"
+   ]
+  ]
+ },
+ "tabdptv1_3": {
+  "family": "pretrained",
+  "note": "TabDPT v1.3 with its released weights (models.json: Layer6/TabDPT on Hugging Face).",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabdptv1_3\": lambda: TabDPTWrapper(n_ensembles=8),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabdpt.py",
+    "from tabdpt import TabDPTRegressor"
+   ]
+  ]
+ },
+ "tabiclv2": {
+  "family": "pretrained",
+  "note": "TabICL v2 regressor with its released weights (models.json links the Hugging Face weights).",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabiclv2\": lambda: TabICLWrapper(),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabicl.py",
+    "from tabicl import TabICLRegressor"
+   ]
+  ]
+ },
+ "tabldm_v1": {
+  "family": "pretrained",
+  "note": "Xiaomi-TabLDM, a pretrained transformer used in context, no task-specific weight updates.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabldm_v1\": lambda: TabLDMWrapper(device=\"cuda:0\"),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabldm.py",
+    "a single pretrained Transformer makes"
+   ]
+  ]
+ },
+ "tabm_d": {
+  "family": "untuned",
+  "note": "TabM with its default settings ('D').",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabm_d\": lambda: PytabkitTabMDWrapper("
+   ],
+   [
+    "scoringbench/univariate/wrappers/pytabkit.py",
+    "self._model = TabM_D_Regressor(**self._init_kwargs)"
+   ]
+  ]
+ },
+ "tabm_hpo_cv_8_tabarena": {
+  "family": "tuned",
+  "note": "pytabkit TabM_HPO_Regressor: random search over the TabArena space, 8-fold cross-validation.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabm_hpo_cv_8_tabarena\": lambda: PytabkitTabMHPOWrapper("
+   ],
+   [
+    "scoringbench/univariate/models.py",
+    "hpo_space_name='tabarena',"
+   ],
+   [
+    "scoringbench/univariate/wrappers/pytabkit.py",
+    "self._model = TabM_HPO_Regressor(**self._init_kwargs)"
+   ]
+  ]
+ },
+ "tabpfn_realv2_5": {
+  "family": "pretrained",
+  "note": "TabPFNWrapper loads a released TabPFN checkpoint; prediction is in-context, no weight update.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"realv2_5\": str(_PROJECT_ROOT / \"tabpfn-v2.5-regressor-v2.5_real.ckpt\")"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class TabPFNWrapper(ProbabilisticWrapper)"
+   ]
+  ]
+ },
+ "tabpfn_v2_6": {
+  "family": "pretrained",
+  "note": "TabPFN 2.6 checkpoint, in-context.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"v2_6\": str(_PROJECT_ROOT / \"tabpfn-v2.6-regressor-v2.6_default.ckpt\")"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class TabPFNWrapper(ProbabilisticWrapper)"
+   ]
+  ]
+ },
+ "tabpfn_v3": {
+  "family": "pretrained",
+  "note": "TabPFN 3 checkpoint, in-context.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"v3\": str(_PROJECT_ROOT / \"tabpfn-v3-regressor-v3_default.ckpt\")"
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "class TabPFNWrapper(ProbabilisticWrapper)"
+   ]
+  ]
+ },
+ "tabpfn_v3_5": {
+  "family": "pretrained",
+  "note": "TabPFN 3.5 default checkpoint, in-context.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabpfn_v3_5\": lambda: TabPFNWrapper(model_version=\"v3.5\""
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "TabPFNRegressor.create_default_for_version(model_version)"
+   ]
+  ]
+ },
+ "tabpfn_v3_5_fast": {
+  "family": "pretrained",
+  "note": "TabPFN 3.5-fast checkpoint, in-context.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"tabpfn_v3_5_fast\": lambda: TabPFNWrapper(model_version=\"v3.5-fast\""
+   ],
+   [
+    "scoringbench/univariate/wrappers/tabpfn.py",
+    "TabPFNRegressor.create_default_for_version(model_version)"
+   ]
+  ]
+ },
+ "xgb_vector": {
+  "family": "untuned",
+  "note": "XGBoost over 50 target bins with a CRPS objective, 100 rounds.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"xgb_vector\": lambda: XGBVectorWrapper(n_bins=50, num_boost_round=100),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/xgb_vector.py",
+    "class XGBVectorWrapper(ProbabilisticWrapper):"
+   ]
+  ]
+ },
+ "xgb_vector_quantile": {
+  "family": "untuned",
+  "note": "XGBoost vector quantile model, 100 rounds.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"xgb_vector_quantile\": lambda: XGBQuantileVectorWrapper(n_bins=50, num_boost_round=100),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/xgb_vector.py",
+    "class XGBQuantileVectorWrapper(ProbabilisticWrapper):"
+   ]
+  ]
+ },
+ "xgblss_Gaussian": {
+  "family": "untuned",
+  "note": "XGBoostLSS Gaussian with fixed eta 0.1 and depth 3; XGBoostLSS's hyper_opt is not called.",
+  "evidence": [
+   [
+    "scoringbench/univariate/models.py",
+    "\"xgblss_Gaussian\": lambda: XGBLSSWrapper(n_quantiles=100, num_boost_round=100, distribution=\"Gaussian\"),"
+   ],
+   [
+    "scoringbench/univariate/wrappers/xgblss_wrapper.py",
+    "\"eta\": 0.1,"
+   ]
+  ]
+ }
+}
