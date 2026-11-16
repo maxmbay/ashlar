@@ -410,8 +410,8 @@ def density():
 def few_values():
     X, y = _table(seed=1)
     X["kind"] = np.where(X["c"] > 0, "up", "down")  # read by the networks and, by code, by the readers
-    # Adding +0.0 turns the -0.0 that rounding gives into +0.0: with both zeros among the labels, np.unique keeps
-    # either one, so ``values_`` would hold a zero of either sign in any version.
+    # Adding +0.0 turns the -0.0 that rounding gives into +0.0: with both zeros among the labels, the released fit's
+    # np.unique keeps either one, so its ``values_`` holds a zero of either sign from one fit to the next.
     y = np.round(np.clip(y, -2.0, 2.0)) + 0.0
     with _released_code() as traced:
         released = R.ASRDressed(members=3, network=NETWORK, reader=READER).fit(X.iloc[:200], y[:200])
@@ -451,3 +451,10 @@ def test_a_few_values_fit_and_every_read_are_the_released_ones(few_values):
         patch.setattr(D, "KEPT_CELLS", 0)
         model = ASRDressed(members=3, network=NETWORK, reader=READER, threads=2).fit(X.iloc[:200], y[:200])
     _assert_same_fit(model, released, "the fit that reads its held-out rows again")
+    # Labels with zeros of both signs: the fit reports 0.0 and is otherwise the fit on the labels above.
+    mixed = np.where((y == 0.0) & (np.arange(len(y)) % 2 == 0), -0.0, y)
+    zeros = mixed[:200][mixed[:200] == 0.0]
+    assert np.signbit(zeros).any() and not np.signbit(zeros).all()
+    model = ASRDressed(members=3, network=NETWORK, reader=READER, threads=2).fit(X.iloc[:200], mixed[:200])
+    assert not np.signbit(model.values_[model.values_ == 0.0]).any()
+    _assert_same_fit(model, released, "the fit on labels with zeros of both signs")

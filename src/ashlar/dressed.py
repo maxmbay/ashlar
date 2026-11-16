@@ -1017,7 +1017,7 @@ class ASRDressed(RegressorMixin, BaseEstimator):
         n, count, seed = len(y), int(self.members), int(self.random_state)
         self.columns_ = _Columns(X)
         x = self.columns_(X)
-        values = np.unique(y)
+        values = np.unique(y + 0.0)  # +0.0 for a zero of either sign; np.unique alone keeps either one of -0.0 and 0.0
         self.values_ = values if self.few_values and values.size <= int(self.few_values) else None
         self.centre_, self.spread_ = float(y.mean()), float(y.std() + 1e-12)
         order = np.random.default_rng(2000 + seed).permutation(n)

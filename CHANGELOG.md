@@ -20,6 +20,7 @@ The dressed model fits and predicts faster, and every fitted number and every pr
 ### Fixed
 
 - `DressedDistribution.quantile` refuses a NaN level with the error it gives for a level outside 0 to 1. A NaN level used to turn every quantile of every row into NaN.
+- A dressed fit on a target with few values whose labels hold both -0.0 and 0.0 reports the value as 0.0. It used to report either one, differently from fit to fit, because `np.unique` keeps either.
 
 ## 0.1.0 — 2026-11-15
 
