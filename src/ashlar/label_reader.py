@@ -102,15 +102,12 @@ def _trend_features(params, z, raw):
     return jnp.concatenate([jnp.ones((len(z), 1), dtype=z.dtype), raw, z, jax.nn.relu(z @ params["t1"] + params["tb"])], axis=1)
 
 
-def _attend(params, x_ctx, onehot_ctx, y_ctx, mask, x_query):
-    """The context rows' leave-one-out trend residuals, the queries' trends, and ``(queries, context)`` weights.
-
-    ``mask`` marks the usable context rows; the ridge fit and the attention read only those.
-    """
+def _context_side(params, x_ctx, onehot_ctx, y_ctx, mask):
+    """What ``_attend`` computes from the context alone: the columns' relevance, the ridge coefficients, the context
+    rows' leave-one-out residuals and their keys."""
     d = x_ctx.shape[1] // 2
     rel = _relevance(params, onehot_ctx, y_ctx, mask)
     z_ctx, raw_ctx = x_ctx[:, :d] * rel, x_ctx[:, d:] * rel
-    z_query, raw_query = x_query[:, :d] * rel, x_query[:, d:] * rel
     weight = mask.astype(y_ctx.dtype)
     phi = _trend_features(params, z_ctx, raw_ctx)
     gram = (phi * weight[:, None]).T @ phi + jnp.exp(10.0 * params["log_ridge"]) * jnp.eye(phi.shape[1], dtype=phi.dtype)
@@ -118,11 +115,28 @@ def _attend(params, x_ctx, onehot_ctx, y_ctx, mask, x_query):
     beta = solved @ (weight * y_ctx)
     leverage = jnp.einsum("np,pn->n", phi, solved)
     residual = (y_ctx - phi @ beta) / jnp.maximum(1.0 - weight * leverage, 1e-3)
-    kq, kc = _keys(params, z_query), _keys(params, z_ctx)
+    return rel, beta, residual, _keys(params, z_ctx)
+
+
+def _query_side(params, rel, beta, kc, mask, x_query):
+    """The queries' trends and ``(queries, context)`` weights, given ``_context_side``'s outputs."""
+    d = x_query.shape[1] // 2
+    z_query, raw_query = x_query[:, :d] * rel, x_query[:, d:] * rel
+    kq = _keys(params, z_query)
     distance = (kq**2).sum(-1)[:, None, :] + (kc**2).sum(-1)[None, :, :] - 2.0 * jnp.einsum("qhk,chk->qch", kq, kc)
     logits = jnp.where(mask[None, :, None], -jnp.exp(params["log_sharp"]) * distance / kq.shape[-1], -1e30)
     weights = jnp.einsum("qch,h->qc", jax.nn.softmax(logits, axis=1), jax.nn.softmax(params["mix"]))
-    return residual, _trend_features(params, z_query, raw_query) @ beta, weights
+    return _trend_features(params, z_query, raw_query) @ beta, weights
+
+
+def _attend(params, x_ctx, onehot_ctx, y_ctx, mask, x_query):
+    """The context rows' leave-one-out trend residuals, the queries' trends, and ``(queries, context)`` weights.
+
+    ``mask`` marks the usable context rows; the ridge fit and the attention read only those.
+    """
+    rel, beta, residual, kc = _context_side(params, x_ctx, onehot_ctx, y_ctx, mask)
+    trend, weights = _query_side(params, rel, beta, kc, mask, x_query)
+    return residual, trend, weights
 
 
 def _ecdf_crps(weights, y_ctx, y_query):
@@ -152,6 +166,16 @@ def _step(params, state, x, onehot, y, query, drop, rate):
 @jax.jit
 def _read(params, x_ctx, onehot_ctx, y_ctx, x_query):
     return _attend(params, x_ctx, onehot_ctx, y_ctx, jnp.ones(len(y_ctx), dtype=bool), x_query)
+
+
+@jax.jit
+def _read_context(params, x_ctx, onehot_ctx, y_ctx):
+    return _context_side(params, x_ctx, onehot_ctx, y_ctx, jnp.ones(len(y_ctx), dtype=bool))
+
+
+@jax.jit
+def _read_query(params, rel, beta, kc, x_query):
+    return _query_side(params, rel, beta, kc, jnp.ones(kc.shape[0], dtype=bool), x_query)
 
 
 def _predict(params, x_ctx, onehot_ctx, y_ctx, x_query, chunk=128):
@@ -219,13 +243,37 @@ class LabelReader:
                     if stale >= self.patience:
                         break
         self.params_, self.steps_ = best, index + 1
+        self._contexts = {}
         return self
+
+    def __getstate__(self):
+        """A pickle leaves out the kept contexts (``_context``); they are computed again when first read."""
+        state = self.__dict__.copy()
+        state.pop("_contexts", None)
+        return state
+
+    def _context(self, context):
+        """``_context_side`` on the training rows (``"train"``) or on every fitted row (``"all"``): it depends only
+        on the fitted reader, so it is computed once and kept."""
+        cache = self.__dict__.setdefault("_contexts", {})
+        if context not in cache:
+            rows = slice(None) if context == "all" else slice(0, self.n_train_)
+            cache[context] = _read_context(self.params_, jnp.asarray(self.x_[rows]), jnp.asarray(self.onehot_[rows]),
+                                           jnp.asarray(self.y_[rows]))
+        return cache[context]
 
     def atoms(self, X, context="all"):
         """``(values, masses)``, each ``(rows, context rows)`` float64: the rows' predictive distributions."""
-        rows = slice(None) if context == "all" else slice(0, self.n_train_)
-        residual, trend, weights = _predict(self.params_, jnp.asarray(self.x_[rows]), jnp.asarray(self.onehot_[rows]),
-                                            jnp.asarray(self.y_[rows]), self.columns_(np.asarray(X, dtype=np.float64)))
+        rel, beta, residual, kc = self._context(context)
+        x_query, chunk = self.columns_(np.asarray(X, dtype=np.float64)), 128
+        trends, out = [], []
+        for start in range(0, len(x_query), chunk):  # fixed-size pieces, so one compiled shape serves all
+            piece = x_query[start : start + chunk]
+            padded = np.concatenate([piece, np.repeat(piece[:1], chunk - len(piece), axis=0)])
+            trend, weights = _read_query(self.params_, rel, beta, kc, jnp.asarray(padded))
+            trends.append(np.asarray(trend)[: len(piece)])
+            out.append(np.asarray(weights)[: len(piece)])
+        residual, trend, weights = np.asarray(residual), np.concatenate(trends), np.concatenate(out)
         values = self.center_ + self.spread_ * (residual.astype(np.float64)[None, :] + trend.astype(np.float64)[:, None])
         weights = weights.astype(np.float64)
         return values, weights / weights.sum(axis=1, keepdims=True)

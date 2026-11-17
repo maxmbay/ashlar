@@ -2,6 +2,26 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## 0.1.1 — 2026-11-16
+
+The dressed model fits and predicts faster, and every fitted number and every prediction is the same as in 0.1.0 to the last bit. The tests in `tests/test_dressed_identical.py` run the 0.1.0 code beside the new code and compare the two as bytes. Where both give a NaN, as for a NaN label, the NaN's bits are not compared.
+
+### Added
+
+- `threads` on the dressed model, as in `ashlar.dressed(threads=4)`, and the `ASHLAR_THREADS` environment variable for a model left at the default. A fit trains up to this many members at once and then splits the readers' sums over as many threads. Prediction splits the sums the same way and solves two blocks of rows at a time. The default is the CPUs the process may use, at most 8. No result depends on it, and a model saved by 0.1.0 loads with the default.
+
+### Changed
+
+- A fit keeps each member's reads of its held-out rows for the factor search and the corrector, which used to read them again; above about 0.5 GB of them (a table of roughly 8,000 rows or more) it reads them again as before. The factor search sorts the readers' points and reads the networks' log densities once for all five factors. A member network's quantiles come from the distribution the fit has already read, not from a second pass of the network.
+- A label reader computes the part of its attention that depends only on its context once, not again for every 128 rows it reads.
+- Prediction sums only the parts of the readers' kernels that a read uses and skips the points that carry no mass. It reads each network once per round of the quantile solver, and `mean` and `crps` share one solve of the 203 quantiles. The solver's start table is built on the first quantile read, so `cdf` and `log_prob` no longer pay for it.
+- A quantile found by bisection on a CDF, as every mixture's is (the dressed model's networks among them), stops once a halving moves no bracket, after at most 80 halvings as before. The quantiles are the same to the last bit.
+
+### Fixed
+
+- `DressedDistribution.quantile` refuses a NaN level with the error it gives for a level outside 0 to 1. A NaN level used to turn every quantile of every row into NaN.
+- A dressed fit on a target with few values whose labels hold both -0.0 and 0.0 reports the value as 0.0. It used to report either one, differently from fit to fit, because `np.unique` keeps either.
+
 ## 0.1.0 — 2026-11-15
 
 The dressed model's code is the same as in 0.0.7. This release corrects its documentation, shortens the README, and adds our ScoringBench results with the scripts that compute them.

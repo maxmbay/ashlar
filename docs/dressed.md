@@ -81,6 +81,7 @@ ashlar.ASRDressed(network={"learning_rate": 1e-3}, reader={"max_steps": 2000})
 | `reader_rows` | 4096 | The most training rows a member's reader trains on, and separately the most held-out rows it is stopped on. A larger set is sampled down, because a reader's cost grows with the square of its rows. At prediction a reader reads both sets, so up to twice this many rows. |
 | `floor_cost` | `None` | See [Limits](#limits). |
 | `random_state` | 0 | Seeds the split, the members, the rows sampled for the readers and for the CRPS factor, and the corrector. |
+| `threads` | `None` | Threads for the fit and for prediction: up to this many members train at once, and the readers' sums are split over as many. `None` reads the `ASHLAR_THREADS` environment variable, or else takes the CPUs the process may use, at most 8; `-1` takes them all. No fitted number and no prediction depends on it. Fits that share a machine each take their own threads, so give them fewer. |
 
 After a fit, `pool_weight_`, `bandwidth_factor_`, `fallback_factor_`, and `gate_` are the four searched numbers, `members_` and `corrector_` the fitted parts, and `history_` the searched curves.
 
