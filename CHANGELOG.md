@@ -4,7 +4,7 @@ Every release of `ashlar-tabular` that changes something you can see. Versions f
 
 ## 0.1.1 — 2026-11-16
 
-The dressed model fits and predicts faster, and every fitted number and every prediction is the same as in 0.1.0 to the last bit. The tests in `tests/test_dressed_identical.py` run the 0.1.0 code beside the new code and compare the two as bytes.
+The dressed model fits and predicts faster, and every fitted number and every prediction is the same as in 0.1.0 to the last bit. The tests in `tests/test_dressed_identical.py` run the 0.1.0 code beside the new code and compare the two as bytes. Where both give a NaN, as for a NaN label, the NaN's bits are not compared.
 
 ### Added
 
