@@ -4,9 +4,9 @@
 functions the speedups changed are kept below as released: the bisection of ``ashlar.distributions`` (it now stops
 once no bracket moves), the label reader's attention (now cut into a side that reads the context alone and a side
 that reads the queries) and ``LabelReader.atoms`` (it now keeps the context side). Each test runs the released code
-beside the current code on the same data and compares the results as bytes, so one unit in the last place, a NaN or
-the sign of a zero counts as a difference. The fits are tiny, and pieces and blocks are cut small so that the threads
-share every read.
+beside the current code on the same data and compares the results as bytes, so one unit in the last place, a NaN
+where a number belongs or the sign of a zero counts as a difference. Where both hold a NaN its bits are not compared
+(``_same``). The fits are tiny, and pieces and blocks are cut small so that the threads share every read.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import io
 import pickle
 import threading
 import time
+import warnings
 
 import equinox as eqx
 import jax
@@ -145,16 +146,49 @@ def _released_code():
 # ---------------------------------------------------------------------------------------------------- helpers
 
 
+def _vector_extensions():
+    """The widest vector extension numpy uses on this machine, for a message."""
+    try:
+        from numpy._core._multiarray_umath import __cpu_features__ as features
+    except ImportError:
+        return "numpy's vector extension unknown"
+    return "numpy uses " + next((name for name in ("AVX512F", "AVX2", "SSE42", "ASIMD") if features.get(name)), "no vector extension")
+
+
 def _same(a, b):
+    """The same shape, type and bytes. Where both hold a NaN, its bits are not compared: IEEE 754 leaves the sign and
+    the payload of a NaN result open, so two codes that agree on every number can differ in a NaN's bits. A warning
+    says so when it happens. A NaN in one and a number in the other is a difference."""
     a, b = np.asarray(a), np.asarray(b)
-    return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.tobytes() == b.tobytes():
+        return True
+    if a.dtype.kind != "f":
+        return False
+    nan = np.isnan(a)
+    if not (np.array_equal(nan, np.isnan(b)) and np.where(nan, 0, a).tobytes() == np.where(nan, 0, b).tobytes()):
+        return False
+    warnings.warn(f"the two versions agree on every number and differ in the bits of a NaN: {_differences(a, b)}", stacklevel=2)
+    return True
 
 
-def _gap(a, b):
-    if np.shape(a) != np.shape(b):
-        return np.inf
+def _differences(a, b):
+    """What differs between two results, for a message."""
+    a, b = np.ascontiguousarray(a), np.ascontiguousarray(b)
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return f"shapes {a.shape} and {b.shape}, types {a.dtype} and {b.dtype}"
+    if a.dtype.kind != "f":
+        return f"{int((a != b).sum())} of {a.size} entries differ"
+    bits = a.view(f"u{a.itemsize}") != b.view(f"u{a.itemsize}")
+    nan_a, nan_b = np.isnan(a), np.isnan(b)
+    numbers = bits & ~nan_a & ~nan_b
     with np.errstate(invalid="ignore"):
-        return float(np.nanmax(np.abs(np.asarray(a, np.float64) - np.asarray(b, np.float64))))
+        gap = np.where(numbers, np.abs(a.astype(np.float64) - b.astype(np.float64)), 0.0)
+    return (f"{int(bits.sum())} of {a.size} entries differ in their bits: {int((bits & nan_a & nan_b).sum())} are NaN in both,"
+            f" {int((bits & (nan_a ^ nan_b)).sum())} NaN in one, {int((numbers & (a == b)).sum())} zeros of opposite sign and"
+            f" {int((numbers & (a != b)).sum())} other numbers (largest difference {float(np.nan_to_num(gap, nan=np.inf).max()) if a.size else 0.0});"
+            f" {_vector_extensions()}")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -249,14 +283,14 @@ def _assert_same_fit(model, released, label):
     assert [what for what, _ in got] == [what for what, _ in expected], label
     for (what, value), (_, reference) in zip(got, expected, strict=True):
         same = value == reference if isinstance(value, str) else _same(value, reference)
-        assert same, f"{label}: {what} differs"
+        assert same, f"{label}: {what} differs" + ("" if isinstance(value, str) else f": {_differences(value, reference)}")
 
 
 def _assert_same_reads(model, X, y, reads, cases, label):
     for case, settings in cases.items():
         got = _reads(_case(model, settings), X, y)
         for name, expected in reads[case].items():
-            assert _same(got[name], expected), f"{label}, {case}, {name}: largest difference {_gap(got[name], expected)}"
+            assert _same(got[name], expected), f"{label}, {case}, {name}: {_differences(got[name], expected)}"
 
 
 # ------------------------------------------------------------------------------------------------- fast tests
