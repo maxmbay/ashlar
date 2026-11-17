@@ -18,6 +18,7 @@ import pickle
 import threading
 import time
 import warnings
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -25,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import ndtr
 
 import ashlar
 import ashlar.distributions as distributions
@@ -348,6 +350,46 @@ def test_the_bisection_stops_at_the_released_answer():
     stacked = jnp.stack([loc, loc + 1.0, 2.0 * loc])
     assert _same(jax.vmap(lambda loc: Mixture(Normal(loc, scale)).quantile(inner))(stacked),
                  jax.vmap(lambda loc: _released_bisection_quantile(Mixture(Normal(loc, scale)), inner))(stacked))
+
+
+def test_the_quantile_solver_takes_the_released_path_wherever_that_one_ends():
+    """Mixtures of a wide and a narrow normal, five levels around the narrow one from fourteen starts. Where the
+    released solver ends within its 100 rounds the current one returns the same bytes after the same rounds. It
+    differs only where the released one is still passing from side to side of the narrow normal's rise when its
+    rounds run out; there the current one goes on by halving and meets the tolerance."""
+
+    def normal(z):
+        return np.exp(-0.5 * z**2) / np.sqrt(2 * np.pi)
+
+    starts = np.array([-1.0, -0.6, -0.45, -0.35, -0.3, -0.25, -0.2, -0.15, 0.15, 0.2, 0.3, 0.45, 0.6, 1.0])
+    bracket = SimpleNamespace(spread=1.0, lo=np.full(len(starts), -50.0), hi=np.full(len(starts), 50.0))
+    tolerance, ended, ran_out = 3e-7, 0, 0
+    for narrow, share, wide, centre in ((0.04, 0.2, 0.5, 0.0), (0.055, 0.22, 0.85, 0.3), (0.02, 0.3, 1.2, -0.3), (0.08, 0.4, 2.0, 0.0)):
+
+        def cdf(t, narrow=narrow, share=share, wide=wide, centre=centre):
+            return (1 - share) * ndtr((t - centre) / wide) + share * ndtr(t / narrow)
+
+        def density(t, narrow=narrow, share=share, wide=wide, centre=centre):
+            return (1 - share) * normal((t - centre) / wide) / wide + share * normal(t / narrow) / narrow
+
+        levels = cdf(narrow * np.array([-1.0, -0.5, 0.0, 0.5, 1.0]))
+        start, u = np.repeat(starts[:, None], len(levels), axis=1), np.repeat(levels[None, :], len(starts), axis=0)
+        answers, rounds = [], []
+        for solve in (R._solve, D._solve):
+            count = np.zeros(u.shape, dtype=int)
+
+            def evaluate(i, j, y, count=count, cdf=cdf, density=density):
+                count[i, j] += 1
+                return cdf(y[i, j]), density(y[i, j])
+
+            answers.append(solve([SimpleNamespace(reader=bracket)], u, start, evaluate, tolerance))
+            rounds.append(count)
+        within = rounds[0] < 100
+        assert _same(answers[1][within], answers[0][within]) and np.array_equal(rounds[1][within], rounds[0][within])
+        assert (np.abs(cdf(answers[0][~within]) - u[~within]) > 1e-3).all()  # where its rounds ran out the released one is far off
+        assert (np.abs(cdf(answers[1]) - u) <= tolerance).all() and rounds[1].max() < 200
+        ended, ran_out = ended + int(within.sum()), ran_out + int((~within).sum())
+    assert ended >= 200 and ran_out >= 5, (ended, ran_out)
 
 
 def test_a_nan_level_is_refused():

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import copy
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import ndtr, ndtri
 
 import ashlar
 from ashlar import ASRDressed, observed
-from ashlar.dressed import FLOOR, LEVELS, _Columns, _floor_share, atoms_crps
+from ashlar.dressed import FLOOR, LEVELS, _Columns, _floor_share, _solve, atoms_crps
 from ashlar.errors import AshlarError
 from micro import TABM_NET
 
@@ -66,6 +68,62 @@ def test_columns_reads_numbers_as_they_are_and_other_columns_by_code():
     assert np.array_equal(_Columns(np.eye(2))(np.eye(2)), np.eye(2))
     with pytest.raises(AshlarError, match="DataFrame"):
         _Columns(np.eye(2))(np.asarray([["a", "b"]], dtype=object))
+
+
+def _bracket(rows, low=-50.0, high=50.0):
+    """What the quantile solver reads of its pools: the readers' spread and the ends of each row's bracket."""
+    return [SimpleNamespace(reader=SimpleNamespace(spread=1.0, lo=np.full(rows, low), hi=np.full(rows, high)))]
+
+
+def _normal_density(t):
+    return np.exp(-0.5 * t**2) / np.sqrt(2 * np.pi)
+
+
+def test_the_quantile_solver_leaves_a_density_that_is_far_too_large():
+    """A standard normal whose density reads 50 above 8, where its CDF is 1: a corrected pool reads such a density
+    beyond its network's float32 reach. The first Newton step from the far lower tail lands there and every step after
+    it is too short to leave. Releases up to 0.1.1 returned 665.45 and 495.52 for the first two levels."""
+    u, start = np.array([[0.001, 0.0025, 0.5]]), np.array([[-5.0, -5.0, 0.0]])
+
+    def evaluate(i, j, y):
+        t = y[i, j]
+        return ndtr(t), np.where(t > 8.0, 50.0, _normal_density(t))
+
+    q = _solve(_bracket(1, -1000.0, 1000.0), u, start, evaluate, 3e-7)
+    assert np.abs(ndtr(q) - u).max() <= 3e-7
+    assert np.allclose(q, ndtri(u), atol=1e-3)
+
+
+def test_the_quantile_solver_ends_a_pass_from_side_to_side_of_a_steep_rise():
+    """A narrow normal on a wide one, and a level inside the narrow one's rise. Newton steps land on either side of
+    the rise in turn, each just inside the last, and the bracket stops closing. Releases up to 0.1.1 returned -0.0855
+    from each of these starts, where the CDF is 0.202 from the level."""
+
+    def cdf(t):
+        return 0.8 * ndtr(t / 0.5) + 0.2 * ndtr(t / 0.04)
+
+    starts = np.array([-1.0, -0.45, -0.3, -0.15])
+    u = np.full((len(starts), 1), cdf(0.02))
+
+    def evaluate(i, j, y):
+        t = y[i, j]
+        return cdf(t), 0.8 * _normal_density(t / 0.5) / 0.5 + 0.2 * _normal_density(t / 0.04) / 0.04
+
+    q = _solve(_bracket(len(starts)), u, starts[:, None], evaluate, 3e-7)
+    assert np.abs(cdf(q) - u).max() <= 3e-7
+    assert np.abs(q - 0.02).max() < 1e-6
+
+
+def test_the_quantile_solver_says_where_it_has_no_cdf_to_read():
+    u, start = np.array([[0.3, 0.5]]), np.zeros((1, 2))
+
+    def evaluate(i, j, y):
+        t = y[i, j]
+        return np.where(j == 0, np.nan, ndtr(t)), _normal_density(t)
+
+    with pytest.warns(RuntimeWarning, match="not a number at 1 of the quantiles"):
+        q = _solve(_bracket(1), u, start, evaluate, 3e-7)
+    assert abs(ndtr(q[0, 1]) - 0.5) <= 3e-7 and q[0, 0] == 0.0  # the other level is solved; this one is its bracket's middle
 
 
 def test_a_dressed_density_fits_and_predicts_one_distribution(density):

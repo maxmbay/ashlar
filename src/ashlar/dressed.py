@@ -47,6 +47,7 @@ from __future__ import annotations
 import copy
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, wait
 from queue import Empty, SimpleQueue
 
@@ -73,6 +74,8 @@ PREDICT_ROWS = 512  # rows per piece at prediction time
 MEMBER_SETTINGS = {"max_epochs": 1000, "cooldown_epochs": 3}
 MAX_THREADS = 8  # the most threads a fit or a prediction uses unless told otherwise
 KEPT_CELLS = 32_000_000  # a fit keeps its held-out reads up to this many reader cells (rows x points), about 0.5 GB
+NEWTON_ROUNDS = 100  # rounds in which the quantile solver may take a Newton step
+HALVINGS = 100  # rounds of halving alone after them, for the entries still unsolved
 
 _READ = None
 _POOL = {"pid": None, "executor": None, "workers": 0, "lock": threading.Lock(), "reads": None}
@@ -470,7 +473,12 @@ class _Pool:
 def _solve(pools, u, start, evaluate, tolerance):
     """Each row's ``y`` where an increasing CDF reaches ``u`` (rows, k), from ``start``: Newton steps inside a
     bisection bracket wide enough for every pool. ``evaluate(i, j, y)`` gives the CDF and density at the unsolved
-    entries."""
+    entries.
+
+    A Newton step is only as good as the density it reads. It can stall where the density is far too large for the
+    CDF's rise (the far upper tail of a corrected pool, whose network's CDF has rounded to 1 in float32), and it can
+    pass from side to side of a steep rise while the bracket barely closes. So an entry still unsolved after
+    ``NEWTON_ROUNDS`` rounds goes on by halving its bracket, which reads the CDF alone."""
     n, k = u.shape
     spread = pools[0].reader.spread
     y = np.array(start, dtype=np.float64)
@@ -478,7 +486,7 @@ def _solve(pools, u, start, evaluate, tolerance):
     hi = np.repeat(np.maximum(np.max([p.reader.hi for p in pools], axis=0), y.max(axis=1) + spread)[:, None], k, axis=1)
     y = np.clip(y, lo, hi)
     active = np.ones((n, k), dtype=bool)
-    for _ in range(100):
+    for round_ in range(NEWTON_ROUNDS + HALVINGS):
         i, j = np.nonzero(active)
         F, f = evaluate(i, j, y)
         g = F - u[i, j]
@@ -490,8 +498,12 @@ def _solve(pools, u, start, evaluate, tolerance):
         lo[i, j] = np.where(g < 0, y[i, j], lo[i, j])
         hi[i, j] = np.where(g > 0, y[i, j], hi[i, j])
         step = y[i, j] - g / np.maximum(f, 1e-300)
-        inside = (step > lo[i, j]) & (step < hi[i, j]) & np.isfinite(step)
+        inside = (step > lo[i, j]) & (step < hi[i, j]) & np.isfinite(step) & (round_ < NEWTON_ROUNDS)
         y[i, j] = np.where(inside, step, 0.5 * (lo[i, j] + hi[i, j]))
+    else:
+        # Halving closes any bracket of finite numbers well within HALVINGS rounds, so what is left has no CDF to read.
+        warnings.warn(f"The CDF is not a number at {int(active.sum())} of the quantiles asked for. "
+                      "Each of those is returned as the middle of its bracket.", RuntimeWarning, stacklevel=2)
     return y
 
 
