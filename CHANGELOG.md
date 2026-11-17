@@ -2,6 +2,13 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## Unreleased
+
+### Fixed
+
+- A quantile of the dressed model could be far from where the CDF reaches its level. On 46 fits of our development tables this happened at 2 of 2.2 million quantiles, and one of the two was 9.5 standard deviations of the target too high. The solver takes Newton steps inside a bracket. A step that landed where the density reads far too large for the CDF's rise, as it does in the far upper tail of a corrected fit, or steps that passed from side to side of a steep rise of the CDF, used up the solver's 100 rounds, and the solver returned where it stood. A quantile still unsolved after those rounds is now found by halving its bracket. Every quantile the solver reached within its rounds is the same as in 0.1.1 to the last bit.
+- The quantile solver warns when the CDF is not a number at a quantile it is asked for. It returns the middle of its bracket there, as it did.
+
 ## 0.1.1 — 2026-11-16
 
 The dressed model fits and predicts faster, and every fitted number and every prediction is the same as in 0.1.0 to the last bit. The tests in `tests/test_dressed_identical.py` run the 0.1.0 code beside the new code and compare the two as bytes. Where both give a NaN, as for a NaN label, the NaN's bits are not compared.
