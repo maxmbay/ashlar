@@ -2,7 +2,9 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
-## Unreleased
+## 0.1.2 — 2026-11-16
+
+A fix to the dressed model's quantile solver. A fit or a prediction differs from 0.1.1's only where one of its quantile solves ran out of its 100 rounds.
 
 ### Fixed
 
