@@ -16,7 +16,7 @@ Ashlar is a Python library for regression and classification on tabular data, bu
 
 The model Ashlar adds is [the dressed model](docs/dressed.md), `ashlar.dressed()`, named for the dressed stone of ashlar masonry. It pools five networks with five label readers, gives the pool a density, and corrects it with one more network. A label reader predicts a row from the training rows' labels, which it reads at prediction time.
 
-On [ScoringBench](https://github.com/jonaslandsgesell/ScoringBench), in our own run, the dressed model ranks first of 21 untuned models trained from scratch, by CRPS across 99 tables. The rank is provisional until ScoringBench's maintainer repeats the run. ScoringBench also lists tuned and pretrained models, and the rank is within the untuned group only.
+On the [ScoringBench leaderboard](https://scoringbench.com), the dressed model is the first model behind the pretrained tabular foundation models. ScoringBench's maintainer ran it and listed it on November 19, 2026. In our own run it ranks first of 21 untuned models trained from scratch, by CRPS across 99 tables.
 
 ```bash
 pip install "ashlar-tabular[dataframes]"
