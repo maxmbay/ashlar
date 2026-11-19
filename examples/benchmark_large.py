@@ -44,6 +44,8 @@ N_DRAWS = 200
 Z80 = 1.2815515655446004
 LEVELS = (0.1, 0.5, 0.9)
 GBM_THREADS = int(os.environ.get("GBM_THREADS", "1"))
+# The most trees a boosted model may grow before early stopping ends it.
+GBM_MAX_TREES = int(os.environ.get("GBM_MAX_TREES", "4000"))
 # The distributional scores sample at most this many test rows, with a fixed seed.
 DIST_ROWS = 100_000
 
@@ -192,13 +194,17 @@ def inner_split(frame, y, seed):
 # ---------------------------------------------------------------- scores
 
 
-def crps_samples(draws, y):
-    """Sample CRPS per row set: E|X - y| - E|X - X'| / 2. ``draws`` is ``(rows, n)``."""
+def crps_samples(draws, y, fair=False):
+    """Sample CRPS per row set: E|X - y| - E|X - X'| / 2. ``draws`` is ``(rows, n)``.
+
+    The pair term is a mean over all ``n * n`` pairs, a draw with itself included, so the result reads above the CRPS
+    by ``E|X - X'| / (2n)``. ``fair`` takes the mean over the ``n * (n - 1)`` pairs of different draws, which is
+    unbiased (Ferro 2014)."""
     draws = np.sort(draws, axis=1)
     n = draws.shape[1]
     first = np.mean(np.abs(draws - y[:, None]), axis=1)
     weights = 2.0 * np.arange(1, n + 1) - n - 1
-    second = np.sum(weights * draws, axis=1) / (n * n)
+    second = np.sum(weights * draws, axis=1) / (n * (n - 1) if fair else n * n)
     return float(np.mean(first - second))
 
 
@@ -264,7 +270,7 @@ def _align(train, other):
 
 
 def fit_tree(kind, task, x_train, y_train, seed, classes=None):
-    """Early-stopped at learning rate 0.05, up to 4,000 trees, 100 rounds of patience."""
+    """Early-stopped at learning rate 0.05, up to ``GBM_MAX_TREES`` trees (4,000 by default), 100 rounds of patience."""
     frame = _tree_frame(x_train)
     fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
     if task == "classification":
@@ -274,13 +280,13 @@ def fit_tree(kind, task, x_train, y_train, seed, classes=None):
         import lightgbm
 
         cls = lightgbm.LGBMClassifier if task == "classification" else lightgbm.LGBMRegressor
-        model = cls(n_estimators=4000, learning_rate=0.05, random_state=seed, n_jobs=GBM_THREADS, verbose=-1)
+        model = cls(n_estimators=GBM_MAX_TREES, learning_rate=0.05, random_state=seed, n_jobs=GBM_THREADS, verbose=-1)
         model.fit(fit_x, fit_y, eval_set=[(val_x, val_y)], callbacks=[lightgbm.early_stopping(100, verbose=False)])
     elif kind == "xgboost":
         import xgboost
 
         cls = xgboost.XGBClassifier if task == "classification" else xgboost.XGBRegressor
-        model = cls(n_estimators=4000, learning_rate=0.05, early_stopping_rounds=100, enable_categorical=True,
+        model = cls(n_estimators=GBM_MAX_TREES, learning_rate=0.05, early_stopping_rounds=100, enable_categorical=True,
                     tree_method="hist", max_cat_to_onehot=1, random_state=seed, n_jobs=GBM_THREADS)
         model.fit(fit_x, fit_y, eval_set=[(val_x, val_y)], verbose=False)
     else:
@@ -296,7 +302,7 @@ def fit_tree(kind, task, x_train, y_train, seed, classes=None):
 
         cls = catboost.CatBoostClassifier if task == "classification" else catboost.CatBoostRegressor
         extra = {} if task == "classification" else {"loss_function": "RMSE"}
-        model = cls(iterations=4000, learning_rate=0.05, od_type="Iter", od_wait=100, random_seed=seed,
+        model = cls(iterations=GBM_MAX_TREES, learning_rate=0.05, od_type="Iter", od_wait=100, random_seed=seed,
                     thread_count=GBM_THREADS, verbose=False, cat_features=cats, **extra)
         model.fit(prep(fit_x), fit_y, eval_set=(prep(val_x), val_y), use_best_model=True)
         model._prep = prep
@@ -366,7 +372,7 @@ def fit_catboost_uncertainty(x_train, y_train, seed, path=None):
         model.load_model(str(path))
     else:
         fit_x, val_x, fit_y, val_y = inner_split(frame, y_train, seed)
-        model = catboost.CatBoostRegressor(iterations=4000, learning_rate=0.05, od_type="Iter", od_wait=100,
+        model = catboost.CatBoostRegressor(iterations=GBM_MAX_TREES, learning_rate=0.05, od_type="Iter", od_wait=100,
                                            random_seed=seed, thread_count=GBM_THREADS, verbose=False,
                                            cat_features=cats, loss_function="RMSEWithUncertainty")
         model.fit(prep(fit_x), fit_y, eval_set=(prep(val_x), val_y), use_best_model=True)
@@ -656,6 +662,8 @@ def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
         model.set_params(split="group").fit(x_train, y_train, groups=TRAIN_GROUPS)
     seconds = time.time() - start
     record = {"seconds": round(seconds, 1), "epochs": len(model.history_["train_loss"])}
+    if model.history_.get("best_epoch") is not None:
+        record["best_epoch"] = int(model.history_["best_epoch"])
     if task == "classification":
         record.update(class_scores(model.predict_proba(x_test), model.classes_, y_test))
         return record
@@ -669,6 +677,7 @@ def run_ashlar(table, seed, *, head=None, overrides=None, recipe=None):
         return record
     draws = model.sample(xd, n=N_DRAWS, seed=seed).T
     record["crps"] = crps_samples(draws, yd)
+    record["crps_fair"] = crps_samples(draws, yd, fair=True)
     record["nll"] = float(-np.mean(model.log_prob(xd, yd)))
     record.update(interval(np.quantile(draws, LEVELS, axis=1).T, yd))
     return record
@@ -740,8 +749,12 @@ def model_runner(name):
 
 LABELS = {
     "ashlar": "Ashlar, default",
+    "ashlar_early": "Ashlar, default, to early stopping",
+    "ashlar_warmup": "Ashlar, default, to early stopping after a 50-epoch warmup",
     "ashlar_tabm": "Ashlar, `tabm_piecewise()`",
     "ashlar_mixture": "Ashlar, `task=\"mixture\"`",
+    "ashlar_mixture_early": "Ashlar, `task=\"mixture\"`, to early stopping",
+    "ashlar_mixture_warmup": "Ashlar, `task=\"mixture\"`, to early stopping after a 50-epoch warmup",
     "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
     "catboost": "CatBoost",
@@ -775,19 +788,70 @@ METRIC_NAMES = {
 
 
 SHARED = "†"  # a time from seed 0's first runs, which shared the laptop with each tree on one thread
+BUSY = "‡"  # a time from the runs to early stopping, which shared the laptop with each other and with other work
+SAMPLED = "§"  # a CRPS from draws with a draw paired with itself, which reads high by E|X - X'| / (2 * N_DRAWS)
+# The trees' runs with the limit at 50,000 trees (GBM_MAX_TREES=50000). The limit of 4,000 had cut short 42 of their 75
+# runs; the other 33 came out the same under the new limit.
+RAISED = "limit-50000"
+# Ashlar's runs to early stopping: ``max_epochs=1000`` and ``cooldown_epochs=3`` at a constant learning rate on three
+# splits, and on the default schedule, which then warms up for 50 epochs, on split 0.
+EARLY, WARMUP = "to-early-stopping-constant-rate", "to-early-stopping"
+# The mixture head fitted again with both CRPS estimators recorded: at default settings, and to early stopping.
+REFIT = {"default-settings": "v3", EARLY: EARLY}
 
 # Models left out of the report; none now. NGBoost was held while a diagnostic ran: its default's CRPS on airline
 # delay, 90.7, comes from a few flights whose predicted scale explodes (up to 3.4e7 minutes); see the report's note.
 HELD = ()
 # A variant reported as a row of its own, beside the model's default: NGBoost with a minimum leaf, whose scales stay
 # bounded (largest 138 minutes on airline delay).
-SHOWN_VARIANTS = {("ngboost", "leaf100"): "ngboost_leaf100"}
+SHOWN_VARIANTS = {("ngboost", "leaf100"): "ngboost_leaf100",
+                  ("ashlar", EARLY): "ashlar_early", ("ashlar_mixture", EARLY): "ashlar_mixture_early",
+                  ("ashlar", WARMUP): "ashlar_warmup", ("ashlar_mixture", WARMUP): "ashlar_mixture_warmup"}
+
+
+def shown_rows(rows):
+    """The records a report reads, from every record in the results file.
+
+    A tree's run under the raised limit stands in for its run at 4,000 trees of the same table and split, unless the
+    two are the same model (equal tree count and scores): then the earlier one stays, because it was timed on a
+    quieter machine. A refit of Ashlar's mixture head that is the same fit as an earlier record (equal RMSE, MAE and
+    CRPS) gives that record its unbiased CRPS, ``crps_fair``, and is not a row of its own. A refit whose sampled
+    scores differ, because its draws do, is read in place of the earlier record."""
+    scores = ("trees", "rmse", "mae", "crps", "nll", "accuracy", "auc", "log_loss")
+
+    def key(r):
+        return r["table"], r["model"], r["seed"]
+
+    raised = {key(r): r for r in rows if r.get("variant") == RAISED}
+    refits = {(*key(r), REFIT[r["variant"]]): r for r in rows
+              if r.get("crps_fair") is not None and r.get("variant") in REFIT}
+    out = []
+    for r in rows:
+        variant, r = r.get("variant", ""), dict(r)
+        if variant == "" and key(r) in raised and any(r.get(s) != raised[key(r)].get(s) for s in scores):
+            continue  # ended by the limit of 4,000: the run under the raised limit is read
+        if variant == RAISED:
+            earlier = [o for o in rows if o.get("variant", "") == "" and key(o) == key(r)]
+            if earlier and all(earlier[-1].get(s) == r.get(s) for s in scores):
+                continue  # the same model as the earlier run, which stays
+            r["variant"], r["busy"] = "", True
+        elif r.get("crps_fair") is not None and variant in REFIT:
+            continue
+        else:
+            r["busy"] = variant in (EARLY, WARMUP)
+            refit = refits.get((*key(r), variant))
+            if refit is not None and all(refit.get(s) == r.get(s) for s in ("rmse", "mae", "crps")):
+                r["crps_fair"] = refit["crps_fair"]
+            elif refit is not None:
+                r = {**refit, "variant": variant, "busy": True}  # other draws: the refit is read, with both scores
+        out.append(r)
+    return out
 
 
 def report(out, variant_for=None, seeds=None, held=HELD):
     """Markdown tables: mean ± std over the seeds that ran, per table and model; seconds from the fastest seed."""
     variant_for = variant_for or {}
-    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    rows = shown_rows([json.loads(line) for line in out.read_text().splitlines()])
     frame = pd.DataFrame(rows)
     frame["variant"] = frame["variant"].fillna("")
     shown = [SHOWN_VARIANTS.get((model, variant)) for model, variant in zip(frame["model"], frame["variant"])]
@@ -813,21 +877,26 @@ def report(out, variant_for=None, seeds=None, held=HELD):
             cells = []
             for metric in metrics:
                 values = group[metric].dropna() if metric in group else pd.Series(dtype=float)
+                mark = ""
+                if metric == "crps" and model.startswith("ashlar") and not values.empty:
+                    # Ashlar's CRPS is from draws: the unbiased estimate where every split has one.
+                    fair = group["crps_fair"].dropna() if "crps_fair" in group else pd.Series(dtype=float)
+                    values, mark = (fair, "") if len(fair) == len(values) else (values, SAMPLED)
                 if values.empty:
                     cells.append("—")
                 elif metric == "coverage80":
                     cells.append(f"{values.mean():.0%}")
                 elif len(values) == 1:
-                    cells.append(f"{values.iloc[0]:.4g}")
+                    cells.append(f"{values.iloc[0]:.4g}{mark}")
                 else:
-                    cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}")
+                    cells.append(f"{values.mean():.4g} ± {values.std(ddof=0):.2g}{mark}")
             # Seed 0's first runs shared the laptop, each tree on one thread. Seeds 1 and 2, LightGBMLSS, and
             # NGBoost ran one job at a time, the trees on six threads, so the fastest seed is the fairest time;
             # a time from those shared seed-0 runs is marked.
             fastest = group.loc[group["seconds"].idxmin()]
             shared = int(fastest["seed"]) == 0 and not model.startswith(("lightgbmlss_", "ngboost"))
-            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) +
-                  f" | {fastest['seconds']:.0f}{SHARED if shared else ''} |")
+            mark = BUSY if fastest["busy"] else SHARED if shared else ""
+            print(f"| {LABELS[model]} | {len(group)} | " + " | ".join(cells) + f" | {fastest['seconds']:.0f}{mark} |")
 
 
 def done_runs(out):
