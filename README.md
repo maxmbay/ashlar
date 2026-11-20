@@ -18,6 +18,8 @@ The model Ashlar adds is [the dressed model](docs/dressed.md), `ashlar.dressed()
 
 On the [ScoringBench leaderboard](https://scoringbench.com), the dressed model is the first model behind the pretrained tabular foundation models. ScoringBench's maintainer ran it and listed it on November 19, 2026. In our own run it ranks first of 21 untuned models trained from scratch, by CRPS across 99 tables.
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/maxmbay/ashlar/blob/main/examples/dressed_demo.ipynb) Try it in five minutes: fit the dressed model, plot its predicted distributions, and score them beside CatBoost.
+
 ```bash
 pip install "ashlar-tabular[dataframes]"
 ```
