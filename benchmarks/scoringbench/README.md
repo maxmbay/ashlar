@@ -48,7 +48,7 @@ clones are, and have not run the clone commands.
   fitting and predicting, summed over the folds. The run was paused twice, and the folds in progress then count
   the pause in their times.
 
-The rank comes from our own run and is provisional until ScoringBench's maintainer repeats it.
+The rank comes from our own run. ScoringBench's maintainer has since run the model and listed it on the [leaderboard](https://scoringbench.com) on November 19, 2026.
 
 Of the five Ashlar entries in the table of what each part adds, the second and third come from the same fits, and
 so do the fourth and fifth. The first three ran from research code that predates the library's dressed model, so

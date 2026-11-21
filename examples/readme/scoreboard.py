@@ -23,11 +23,15 @@ when the change is under half a percent).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
 import style as k
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from benchmark_large import shown_rows  # noqa: E402
 
 RESULTS = k.ARTIFACTS / "large" / "large.jsonl"
 VARIANT = {"ashlar": "v3", "ashlar_mixture": "v3"}  # the recorded Ashlar runs
@@ -51,8 +55,14 @@ DOT_RADIUS = (110 ** 0.5 / 2 + 1.6) / 72  # inches: the dot (s=110) and its edge
 
 
 def load(path: Path = RESULTS) -> list[dict]:
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    return [r for r in rows if r.get("variant", "") == VARIANT.get(r["model"], "")]
+    """Ashlar's default-settings runs and each tree's run, under the raised limit where it had reached 4,000 trees.
+    Ashlar's CRPS is the unbiased estimate where a refit recorded one."""
+    rows = shown_rows([json.loads(line) for line in path.read_text().splitlines() if line.strip()])
+    rows = [dict(r) for r in rows if r.get("variant", "") == VARIANT.get(r["model"], "")]
+    for r in rows:
+        if r.get("crps_fair") is not None:
+            r["crps"] = r["crps_fair"]
+    return rows
 
 
 def _by_seed(rows, table, model, metric):
