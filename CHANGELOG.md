@@ -2,6 +2,23 @@
 
 Every release of `ashlar-tabular` that changes something you can see. Versions follow [semantic versioning](https://semver.org); before 1.0, a minor version may change the API.
 
+## 0.1.3 — 2026-11-21
+
+The same code as 0.1.2, so every fit and prediction is unchanged. This release brings the README on PyPI up to date.
+
+### Added
+
+- A Colab notebook, `examples/dressed_demo.ipynb`, that fits the dressed model on California housing and scores its predicted distributions beside CatBoost. The README links to it.
+
+### Changed
+
+- The dressed model is on the [ScoringBench leaderboard](https://scoringbench.com). Its maintainer ran it and listed it on November 19, 2026, as the first model behind the pretrained tabular foundation models. The README and the dressed model's guide no longer call its rank provisional.
+- The large-tables benchmark in `docs/benchmarks.md` is rerun. A limit of 4,000 trees had cut short 42 of the trees' 75 runs, and they now run under a limit of 50,000. Ashlar is also trained to early stopping, and its mixture is scored with the unbiased CRPS estimate.
+
+### Fixed
+
+- `test_fit_finishes_a_poisson_group_at_its_posterior_mode` failed under JAX 0.12.1, where the fit ends at a scaled gradient of 1.04e-5. It now allows 2e-5.
+
 ## 0.1.2 — 2026-11-16
 
 A fix to the dressed model's quantile solver. A fit or a prediction differs from 0.1.1's only where one of its quantile solves ran out of its 100 rounds.
